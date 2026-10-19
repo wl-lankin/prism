@@ -5,7 +5,7 @@
   "identifier": "de.wolfganglinz.prism",
   "build": {
     "beforeDevCommand": "npm run dev",
-    "devUrl": "http://localhost:1420",
+    "devUrl": "http://localhost:1430",
     "beforeBuildCommand": "npm run build",
     "frontendDist": "../dist"
   },
@@ -30,7 +30,7 @@
       "csp": {
         "default-src": "'self'",
         "img-src": "'self' data: prism: http://prism.localhost",
-        "connect-src": "'self' ipc: http://ipc.localhost prism: http://prism.localhost",
+        "connect-src": "'self' ipc: http://ipc.localhost prism: http://prism.localhost ws://localhost:1431",
         "media-src": "'self' prism: http://prism.localhost",
         "style-src": "'self' 'unsafe-inline'",
         "script-src": "'self'"
