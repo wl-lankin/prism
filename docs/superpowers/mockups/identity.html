@@ -1,0 +1,88 @@
+<h2>Name, logo and mood: which direction feels like your app?</h2>
+<p class="subtitle">Three directions. Each one shows the logo, the palette and a sketch of the main window with the big play button sitting half outside the window edge (the CleanMyMac idea). Names still need a trademark check.</p>
+
+<style>
+  .idg{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:22px;margin-top:18px}
+  .idc{border-radius:18px;overflow:visible;cursor:pointer;border:2px solid transparent;transition:transform .2s,border-color .2s;padding-bottom:40px}
+  .idc:hover{transform:translateY(-3px)}
+  .idc.selected{border-color:#7c5cff}
+  .brand{display:flex;align-items:center;gap:12px;padding:18px 18px 6px}
+  .brand h3{margin:0;font-size:24px;letter-spacing:-.02em}
+  .tag{padding:0 18px 12px;font-size:13px;opacity:.75}
+  .sw{display:flex;gap:6px;padding:0 18px 16px}
+  .sw span{width:26px;height:26px;border-radius:8px;box-shadow:inset 0 0 0 1px rgba(255,255,255,.12)}
+  .win{position:relative;margin:0 18px;height:190px;border-radius:14px;display:flex;overflow:visible}
+  .win .side{width:70px;border-radius:14px 0 0 14px;padding:12px 8px;display:flex;flex-direction:column;gap:8px}
+  .win .side i{display:block;height:7px;border-radius:4px;opacity:.5}
+  .win .main{flex:1;padding:12px;display:grid;grid-template-columns:repeat(3,1fr);gap:8px;align-content:start}
+  .win .main b{display:block;aspect-ratio:1;border-radius:8px}
+  .fab{position:absolute;left:50%;bottom:-34px;transform:translateX(-50%);width:68px;height:68px;border-radius:50%;display:flex;align-items:center;justify-content:center}
+  .why{padding:46px 18px 0;font-size:13px;line-height:1.5;opacity:.85}
+</style>
+
+<div class="idg">
+
+  <!-- A: Tributary -->
+  <div class="idc" data-choice="tributary" onclick="toggleSelect(this)" style="background:linear-gradient(160deg,#0b1020,#111a33);color:#e8eeff">
+    <div class="brand">
+      <svg width="44" height="44" viewBox="0 0 64 64"><defs><linearGradient id="ga" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#3ee6c8"/><stop offset="1" stop-color="#7c5cff"/></linearGradient></defs>
+        <rect width="64" height="64" rx="16" fill="#0e1630"/>
+        <path d="M12 14 C 26 22, 30 30, 32 40" stroke="url(#ga)" stroke-width="4" fill="none" stroke-linecap="round"/>
+        <path d="M32 10 C 32 22, 32 30, 32 40" stroke="url(#ga)" stroke-width="4" fill="none" stroke-linecap="round"/>
+        <path d="M52 14 C 38 22, 34 30, 32 40" stroke="url(#ga)" stroke-width="4" fill="none" stroke-linecap="round"/>
+        <path d="M32 40 C 32 46, 30 50, 26 54 M32 40 C 32 46, 34 50, 38 54" stroke="url(#ga)" stroke-width="4" fill="none" stroke-linecap="round" opacity=".55"/>
+      </svg>
+      <h3>Tributary</h3>
+    </div>
+    <div class="tag">Every stream flows into one river.</div>
+    <div class="sw"><span style="background:#0b1020"></span><span style="background:#16213f"></span><span style="background:#3ee6c8"></span><span style="background:#7c5cff"></span><span style="background:#e8eeff"></span></div>
+    <div class="win" style="background:#121b36;box-shadow:0 20px 50px rgba(0,0,0,.5)">
+      <div class="side" style="background:#0e1630"><i style="background:#3ee6c8"></i><i style="background:#7c5cff"></i><i style="background:#9aa6c8"></i><i style="background:#9aa6c8"></i></div>
+      <div class="main"><b style="background:linear-gradient(135deg,#1d6f7a,#3ee6c8)"></b><b style="background:linear-gradient(135deg,#3b2a8a,#7c5cff)"></b><b style="background:linear-gradient(135deg,#123,#2a4a7a)"></b><b style="background:linear-gradient(135deg,#2a4a7a,#3ee6c8)"></b><b style="background:linear-gradient(135deg,#7c5cff,#c55cff)"></b><b style="background:linear-gradient(135deg,#0e3a40,#1d6f7a)"></b></div>
+      <div class="fab" style="background:linear-gradient(135deg,#3ee6c8,#7c5cff);box-shadow:0 0 0 6px #0b1020,0 10px 40px rgba(62,230,200,.55)"><svg width="26" height="26" viewBox="0 0 24 24"><path d="M7 4l13 8-13 8z" fill="#0b1020"/></svg></div>
+    </div>
+    <div class="why">Cool, focused, "night-shift coder" feel. Teal-to-violet glow. The logo is literally your sources merging into one stream.</div>
+  </div>
+
+  <!-- B: Vesper -->
+  <div class="idc" data-choice="vesper" onclick="toggleSelect(this)" style="background:linear-gradient(160deg,#1a0f1f,#2a1530);color:#fbeee6">
+    <div class="brand">
+      <svg width="44" height="44" viewBox="0 0 64 64"><defs><linearGradient id="gb" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ffb07a"/><stop offset="1" stop-color="#ff5d8f"/></linearGradient></defs>
+        <rect width="64" height="64" rx="16" fill="#241429"/>
+        <path d="M40 12 A 20 20 0 1 0 52 40 A 15 15 0 1 1 40 12 Z" fill="url(#gb)"/>
+        <g stroke="#fbeee6" stroke-width="3" stroke-linecap="round" opacity=".9"><line x1="22" y1="30" x2="22" y2="38"/><line x1="28" y1="26" x2="28" y2="42"/><line x1="34" y1="31" x2="34" y2="37"/></g>
+      </svg>
+      <h3>Vesper</h3>
+    </div>
+    <div class="tag">Music for the long evening session.</div>
+    <div class="sw"><span style="background:#1a0f1f"></span><span style="background:#33203a"></span><span style="background:#ffb07a"></span><span style="background:#ff5d8f"></span><span style="background:#fbeee6"></span></div>
+    <div class="win" style="background:#2b1932;box-shadow:0 20px 50px rgba(0,0,0,.5)">
+      <div class="side" style="background:#241429"><i style="background:#ffb07a"></i><i style="background:#ff5d8f"></i><i style="background:#b89aa8"></i><i style="background:#b89aa8"></i></div>
+      <div class="main"><b style="background:linear-gradient(135deg,#ff8a5c,#ff5d8f)"></b><b style="background:linear-gradient(135deg,#5a2a4a,#b0406a)"></b><b style="background:linear-gradient(135deg,#ffb07a,#ffd9a8)"></b><b style="background:linear-gradient(135deg,#3a1f40,#7a3a6a)"></b><b style="background:linear-gradient(135deg,#ff5d8f,#9a3aff)"></b><b style="background:linear-gradient(135deg,#40202a,#a04a4a)"></b></div>
+      <div class="fab" style="background:linear-gradient(135deg,#ffb07a,#ff5d8f);box-shadow:0 0 0 6px #1a0f1f,0 10px 40px rgba(255,93,143,.55)"><svg width="26" height="26" viewBox="0 0 24 24"><path d="M7 4l13 8-13 8z" fill="#1a0f1f"/></svg></div>
+    </div>
+    <div class="why">Warm, cozy, a bit vinyl-lounge. Sunset amber and pink. The logo is a crescent moon holding a small equalizer.</div>
+  </div>
+
+  <!-- C: Prism -->
+  <div class="idc" data-choice="prism" onclick="toggleSelect(this)" style="background:linear-gradient(160deg,#0d0d10,#18181d);color:#f3f3f5">
+    <div class="brand">
+      <svg width="44" height="44" viewBox="0 0 64 64"><defs><linearGradient id="gc" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#ff4d6d"/><stop offset=".33" stop-color="#ffc94d"/><stop offset=".66" stop-color="#4dffb2"/><stop offset="1" stop-color="#4da6ff"/></linearGradient></defs>
+        <rect width="64" height="64" rx="16" fill="#141418"/>
+        <path d="M30 12 L48 46 L12 46 Z" fill="none" stroke="#f3f3f5" stroke-width="3" stroke-linejoin="round"/>
+        <path d="M6 30 L24 30" stroke="#f3f3f5" stroke-width="3" stroke-linecap="round"/>
+        <path d="M36 30 Q 46 26 58 22 M36 32 Q 46 32 58 32 M36 34 Q 46 38 58 42" stroke="url(#gc)" stroke-width="3" fill="none" stroke-linecap="round"/>
+      </svg>
+      <h3>Prism</h3>
+    </div>
+    <div class="tag">One player, every color of sound.</div>
+    <div class="sw"><span style="background:#0d0d10"></span><span style="background:#1f1f25"></span><span style="background:linear-gradient(90deg,#ff4d6d,#ffc94d,#4dffb2,#4da6ff)"></span><span style="background:#4da6ff"></span><span style="background:#f3f3f5"></span></div>
+    <div class="win" style="background:rgba(255,255,255,.04);backdrop-filter:blur(10px);box-shadow:0 20px 50px rgba(0,0,0,.6),inset 0 0 0 1px rgba(255,255,255,.08)">
+      <div class="side" style="background:rgba(255,255,255,.03)"><i style="background:#ff4d6d"></i><i style="background:#ffc94d"></i><i style="background:#4dffb2"></i><i style="background:#4da6ff"></i></div>
+      <div class="main"><b style="background:linear-gradient(135deg,#ff4d6d,#ffc94d)"></b><b style="background:linear-gradient(135deg,#4dffb2,#4da6ff)"></b><b style="background:#2a2a32"></b><b style="background:linear-gradient(135deg,#4da6ff,#a64dff)"></b><b style="background:#34343c"></b><b style="background:linear-gradient(135deg,#ffc94d,#4dffb2)"></b></div>
+      <div class="fab" style="background:conic-gradient(from 0deg,#ff4d6d,#ffc94d,#4dffb2,#4da6ff,#ff4d6d);box-shadow:0 0 0 6px #0d0d10,0 10px 40px rgba(77,166,255,.45)"><div style="width:54px;height:54px;border-radius:50%;background:#141418;display:flex;align-items:center;justify-content:center"><svg width="24" height="24" viewBox="0 0 24 24"><path d="M7 4l13 8-13 8z" fill="#f3f3f5"/></svg></div></div>
+    </div>
+    <div class="why">Neutral graphite glass and one spectral accent ring, which can take its color from the current album cover. Most "pro tool".</div>
+  </div>
+
+</div>

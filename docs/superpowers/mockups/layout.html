@@ -1,0 +1,82 @@
+<h2>Prism: main window and mini player</h2>
+<p class="subtitle">Left: the full window. Right: the mini player that pops up above the taskbar in the bottom-right corner when you click the app icon. Below: two ideas for what the big half-out button does.</p>
+
+<style>
+  .stage{display:flex;gap:40px;flex-wrap:wrap;align-items:flex-end;margin:20px 0 10px;padding:30px;border-radius:18px;background:radial-gradient(circle at 30% 20%,#23232b,#0b0b0e);color:#f3f3f5;font-family:Inter,system-ui,sans-serif}
+  .app{position:relative;width:640px;max-width:100%;height:400px;border-radius:16px;background:rgba(24,24,30,.92);box-shadow:0 30px 80px rgba(0,0,0,.6),inset 0 0 0 1px rgba(255,255,255,.07);display:flex;margin-bottom:46px}
+  .sb{width:170px;padding:16px 12px;border-right:1px solid rgba(255,255,255,.06);font-size:12px}
+  .sb .h{opacity:.4;text-transform:uppercase;letter-spacing:.08em;font-size:10px;margin:14px 6px 6px}
+  .sb .it{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:8px;opacity:.8}
+  .sb .it.on{background:rgba(255,255,255,.07);opacity:1}
+  .dot{width:8px;height:8px;border-radius:50%}
+  .mn{flex:1;padding:18px;overflow:hidden}
+  .mn h4{margin:0 0 4px;font-size:18px}
+  .mn .s{font-size:11px;opacity:.5;margin-bottom:12px}
+  .row{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+  .cv{aspect-ratio:1;border-radius:10px;position:relative}
+  .cv em{position:absolute;right:6px;bottom:6px;width:16px;height:16px;border-radius:5px;font-size:9px;font-style:normal;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.55)}
+  .cap{font-size:10px;opacity:.7;margin-top:4px}
+  .ring{position:absolute;left:50%;bottom:-40px;transform:translateX(-50%);width:84px;height:84px;border-radius:50%;padding:4px;background:conic-gradient(#ff4d6d,#ffc94d,#4dffb2,#4da6ff,#ff4d6d);box-shadow:0 0 0 7px #0b0b0e,0 14px 50px rgba(77,166,255,.5)}
+  .ring>div{width:100%;height:100%;border-radius:50%;background:#141418;display:flex;flex-direction:column;align-items:center;justify-content:center;font-size:10px;letter-spacing:.1em}
+  .mini{width:300px;border-radius:16px;background:rgba(30,30,38,.85);backdrop-filter:blur(20px);box-shadow:0 20px 60px rgba(0,0,0,.6),inset 0 0 0 1px rgba(255,255,255,.08);padding:14px}
+  .mini .top{display:flex;gap:12px;align-items:center}
+  .mini .art{width:64px;height:64px;border-radius:10px;background:linear-gradient(135deg,#4da6ff,#a64dff)}
+  .bar{height:4px;border-radius:2px;background:rgba(255,255,255,.1);margin:12px 0 10px;position:relative}
+  .bar i{position:absolute;left:0;top:0;bottom:0;width:38%;border-radius:2px;background:linear-gradient(90deg,#ff4d6d,#ffc94d,#4dffb2,#4da6ff)}
+  .ctl{display:flex;justify-content:space-between;align-items:center;font-size:16px;opacity:.9}
+  .task{margin-top:10px;height:34px;border-radius:8px;background:rgba(255,255,255,.05);display:flex;align-items:center;justify-content:flex-end;padding:0 10px;gap:8px;font-size:10px;opacity:.7}
+</style>
+
+<div class="stage">
+  <div class="app">
+    <div class="sb">
+      <div class="it" style="font-weight:600;font-size:14px;opacity:1">Prism</div>
+      <div class="h">You</div>
+      <div class="it on">Home</div>
+      <div class="it">Favorites (all sources)</div>
+      <div class="it">Playlists</div>
+      <div class="h">Sources</div>
+      <div class="it"><span class="dot" style="background:#4dffb2"></span>Navidrome</div>
+      <div class="it"><span class="dot" style="background:#ff4d6d"></span>Apple Music</div>
+      <div class="it"><span class="dot" style="background:#ffc94d"></span>YouTube Music</div>
+      <div class="it"><span class="dot" style="background:#4da6ff"></span>Radio near you</div>
+      <div class="it"><span class="dot" style="background:#ccc"></span>Local files</div>
+    </div>
+    <div class="mn">
+      <h4>Good evening, Wolfgang</h4>
+      <div class="s">Your favorites, from everywhere</div>
+      <div class="row">
+        <div><div class="cv" style="background:linear-gradient(135deg,#ff4d6d,#ffc94d)"><em style="color:#4dffb2">N</em></div><div class="cap">Album from Navidrome</div></div>
+        <div><div class="cv" style="background:linear-gradient(135deg,#4dffb2,#4da6ff)"><em style="color:#ff4d6d">A</em></div><div class="cap">Apple Music playlist</div></div>
+        <div><div class="cv" style="background:linear-gradient(135deg,#2a2a32,#4a4a55)"><em style="color:#4da6ff">R</em></div><div class="cap">Radio Hamburg</div></div>
+        <div><div class="cv" style="background:linear-gradient(135deg,#4da6ff,#a64dff)"><em style="color:#ccc">L</em></div><div class="cap">Local FLAC album</div></div>
+      </div>
+      <div class="s" style="margin-top:14px">Stations near you</div>
+      <div class="row">
+        <div class="cv" style="aspect-ratio:2/1;background:#26262e"></div><div class="cv" style="aspect-ratio:2/1;background:#2c2c35"></div><div class="cv" style="aspect-ratio:2/1;background:#26262e"></div><div class="cv" style="aspect-ratio:2/1;background:#2c2c35"></div>
+      </div>
+    </div>
+    <div class="ring"><div><svg width="22" height="22" viewBox="0 0 24 24"><path d="M7 4l13 8-13 8z" fill="#f3f3f5"/></svg><span style="margin-top:2px">FLOW</span></div></div>
+  </div>
+
+  <div>
+    <div class="mini">
+      <div class="top"><div class="art"></div><div><div style="font-weight:600;font-size:13px">Track title</div><div style="font-size:11px;opacity:.6">Artist · Album</div><div style="font-size:10px;opacity:.5;margin-top:4px"><span style="color:#4dffb2">●</span> Navidrome · FLAC 24/96</div></div></div>
+      <div class="bar"><i></i></div>
+      <div class="ctl"><span>♡</span><span>⏮</span><span style="font-size:22px">⏯</span><span>⏭</span><span>🔊</span></div>
+    </div>
+    <div class="task">taskbar · <b style="color:#4da6ff">◆ Prism</b> · 18:42</div>
+  </div>
+</div>
+
+<h3>What should the big half-out button do?</h3>
+<div class="options">
+  <div class="option" data-choice="play" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content"><h3>Play / Pause</h3><p>The classic. Always the main transport control, and the spectral ring shows playback progress around the edge.</p></div>
+  </div>
+  <div class="option" data-choice="flow" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content"><h3>"Flow": one click, music starts</h3><p>When nothing is playing, it builds an endless mix from your favorites across your music sources (local + Navidrome, later Apple Music), tuned for focus work. While playing, it turns into play/pause with the progress ring.</p></div>
+  </div>
+</div>
