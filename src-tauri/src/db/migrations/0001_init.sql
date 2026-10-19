@@ -4,7 +4,8 @@ CREATE TABLE folders (
 );
 
 CREATE TABLE tracks (
-    id TEXT PRIMARY KEY,
+    row_id INTEGER PRIMARY KEY,
+    id TEXT NOT NULL UNIQUE,
     source TEXT NOT NULL DEFAULT 'local',
     title TEXT NOT NULL,
     artist TEXT NOT NULL,
@@ -51,24 +52,24 @@ CREATE VIRTUAL TABLE tracks_fts USING fts5(
     artist,
     album,
     content = 'tracks',
-    content_rowid = 'rowid'
+    content_rowid = 'row_id'
 );
 
 CREATE TRIGGER tracks_fts_ai AFTER INSERT ON tracks BEGIN
     INSERT INTO tracks_fts (rowid, title, artist, album)
-    VALUES (new.rowid, new.title, new.artist, new.album);
+    VALUES (new.row_id, new.title, new.artist, new.album);
 END;
 
 CREATE TRIGGER tracks_fts_ad AFTER DELETE ON tracks BEGIN
     INSERT INTO tracks_fts (tracks_fts, rowid, title, artist, album)
-    VALUES ('delete', old.rowid, old.title, old.artist, old.album);
+    VALUES ('delete', old.row_id, old.title, old.artist, old.album);
 END;
 
 CREATE TRIGGER tracks_fts_au AFTER UPDATE ON tracks BEGIN
     INSERT INTO tracks_fts (tracks_fts, rowid, title, artist, album)
-    VALUES ('delete', old.rowid, old.title, old.artist, old.album);
+    VALUES ('delete', old.row_id, old.title, old.artist, old.album);
     INSERT INTO tracks_fts (rowid, title, artist, album)
-    VALUES (new.rowid, new.title, new.artist, new.album);
+    VALUES (new.row_id, new.title, new.artist, new.album);
 END;
 
 CREATE TABLE covers (

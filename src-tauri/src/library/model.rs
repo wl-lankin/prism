@@ -154,7 +154,36 @@ mod tests {
 
     #[test]
     fn track_serializes_camel_case_and_lowercase_source() {
-        let value = serde_json::to_value(Source::Navidrome).unwrap();
-        assert_eq!(value, serde_json::json!("navidrome"));
+        let track = Track {
+            id: "local:x".into(),
+            source: Source::Navidrome,
+            title: "T".into(),
+            artist: "A".into(),
+            album_artist: "AA".into(),
+            album: "Al".into(),
+            album_id: "local:y".into(),
+            track_no: Some(1),
+            disc_no: None,
+            duration_ms: 1234,
+            year: None,
+            genre: None,
+            format: "flac".into(),
+            sample_rate: None,
+            bit_depth: None,
+            bitrate_kbps: None,
+            cover_id: None,
+            path: None,
+            replay_gain_track_db: Some(-6.5),
+            replay_gain_album_db: None,
+            replay_gain_track_peak: None,
+            replay_gain_album_peak: None,
+        };
+        let value = serde_json::to_value(&track).unwrap();
+        assert_eq!(value["source"], "navidrome");
+        assert_eq!(value["albumArtist"], "AA");
+        assert_eq!(value["durationMs"], 1234);
+        assert_eq!(value["trackNo"], 1);
+        assert_eq!(value["replayGainTrackDb"], -6.5);
+        assert!(value.get("album_artist").is_none());
     }
 }

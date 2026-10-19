@@ -7,6 +7,9 @@ use rusqlite::Connection;
 /// Ordered migrations; index + 1 is the `PRAGMA user_version` they produce.
 const MIGRATIONS: &[&str] = &[include_str!("migrations/0001_init.sql")];
 
+/// Track upserts must use `INSERT ... ON CONFLICT(id) DO UPDATE`. `INSERT OR REPLACE`
+/// deletes the old row without firing the FTS delete trigger (recursive_triggers is off)
+/// and would leave stale `tracks_fts` entries.
 pub struct Db(pub Mutex<Connection>);
 
 impl Db {
@@ -30,6 +33,12 @@ impl Db {
 
 fn migrate(conn: &mut Connection) -> anyhow::Result<()> {
     let current: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if current < 0 || current as usize > MIGRATIONS.len() {
+        anyhow::bail!(
+            "library database schema version {current} is not supported (this build knows up to {})",
+            MIGRATIONS.len()
+        );
+    }
     for (index, sql) in MIGRATIONS.iter().enumerate().skip(current as usize) {
         let tx = conn.transaction()?;
         tx.execute_batch(sql)
@@ -79,6 +88,43 @@ mod tests {
     }
 
     #[test]
+    fn rejects_schema_from_newer_build() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "user_version", 99_i64).unwrap();
+        assert!(migrate(&mut conn).is_err());
+    }
+
+    #[test]
+    fn fts_follows_update_and_delete() {
+        let db = Db::open_in_memory().unwrap();
+        let conn = db.0.lock().unwrap();
+        let upsert = |title: &str| {
+            conn.execute(
+                "INSERT INTO tracks (id, source, title, artist, album_artist, album, album_id, duration_ms, format)
+                 VALUES ('t1', 'local', ?1, 'Massive Attack', 'Massive Attack', 'Mezzanine', 'a1', 1000, 'flac')
+                 ON CONFLICT(id) DO UPDATE SET title = excluded.title",
+                [title],
+            )
+            .unwrap();
+        };
+        let hits = |query: &str| -> i64 {
+            conn.query_row(
+                "SELECT COUNT(*) FROM tracks_fts WHERE tracks_fts MATCH ?1",
+                [query],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        upsert("Teardrop");
+        assert_eq!(hits("tear*"), 1);
+        upsert("Angel");
+        assert_eq!(hits("tear*"), 0);
+        assert_eq!(hits("angel*"), 1);
+        conn.execute("DELETE FROM tracks WHERE id = 't1'", []).unwrap();
+        assert_eq!(hits("angel*"), 0);
+    }
+
+    #[test]
     fn fts_finds_inserted_track() {
         let db = Db::open_in_memory().unwrap();
         let conn = db.0.lock().unwrap();
@@ -90,7 +136,7 @@ mod tests {
         .unwrap();
         let found: String = conn
             .query_row(
-                "SELECT t.title FROM tracks_fts f JOIN tracks t ON t.rowid = f.rowid WHERE tracks_fts MATCH 'tear*'",
+                "SELECT t.title FROM tracks_fts f JOIN tracks t ON t.row_id = f.rowid WHERE tracks_fts MATCH 'tear*'",
                 [],
                 |row| row.get(0),
             )
