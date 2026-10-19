@@ -20,6 +20,10 @@ tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+anyhow = "1.0.104"
+sha1 = "0.11.0"
+hex = "0.4.3"
 
 [profile.release]
 opt-level = 3
