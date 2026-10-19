@@ -1,0 +1,62 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "Prism",
+  "version": "1.0.0",
+  "identifier": "de.wolfganglinz.prism",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [
+      {
+        "label": "main",
+        "title": "Prism",
+        "width": 1280,
+        "height": 820,
+        "minWidth": 900,
+        "minHeight": 600,
+        "center": true,
+        "decorations": false,
+        "transparent": true,
+        "shadow": true,
+        "backgroundColor": "#0d0d10"
+      }
+    ],
+    "security": {
+      "csp": {
+        "default-src": "'self'",
+        "img-src": "'self' data: prism: http://prism.localhost",
+        "connect-src": "'self' ipc: http://ipc.localhost prism: http://prism.localhost",
+        "media-src": "'self' prism: http://prism.localhost",
+        "style-src": "'self' 'unsafe-inline'",
+        "script-src": "'self'"
+      },
+      "dangerousDisableAssetCspModification": ["style-src"]
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis", "app", "dmg"],
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"],
+    "publisher": "Wolfgang Linz",
+    "copyright": "Copyright 2026 Wolfgang Linz",
+    "homepage": "https://wolfgang-linz.de",
+    "category": "Music",
+    "shortDescription": "A music player for every source.",
+    "longDescription": "Prism is a music player for your own library, Navidrome, Apple Music, YouTube and radio.",
+    "license": "MIT",
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "installerIcon": "icons/icon.ico"
+      }
+    },
+    "macOS": {
+      "minimumSystemVersion": "11.0"
+    }
+  }
+}
