@@ -1,0 +1,71 @@
+/* Prism design tokens. Every component reads its colors, radii, timing and fonts from here. */
+:root {
+  color-scheme: dark;
+
+  --bg: #0d0d10;
+  --surface: #141418;
+  --raised: #1f1f25;
+  --text: #f3f3f5;
+  --text-dim: rgba(243, 243, 245, 0.62);
+  --line: rgba(255, 255, 255, 0.08);
+
+  --spec-1: #ff4d6d;
+  --spec-2: #ffc94d;
+  --spec-3: #4dffb2;
+  --spec-4: #4da6ff;
+
+  --src-local: #cccccc;
+  --src-navidrome: #4dffb2;
+  --src-apple: #ff4d6d;
+  --src-youtube: #ffc94d;
+  --src-radio: #4da6ff;
+
+  --radius-s: 8px;
+  --radius-m: 12px;
+  --radius-l: 16px;
+
+  /* --dur covers hover and fades and keeps running under reduced motion; --dur-l is large motion. */
+  --dur: 120ms;
+  --dur-l: 320ms;
+
+  --font-ui: 'Inter Variable', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-display: 'Space Grotesk Variable', 'Inter Variable', system-ui, sans-serif;
+
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-l: 0ms;
+  }
+}
+
+html,
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-ui);
+  -webkit-font-smoothing: antialiased;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.18);
+  border: 2px solid transparent;
+  border-radius: 8px;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(255, 255, 255, 0.3);
+}
