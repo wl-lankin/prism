@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "mini",
+  "description": "The mini player: the app's commands and events only. It cannot close, move or resize itself from script; the backend shows, hides and places it.",
+  "windows": ["mini"],
+  "permissions": ["core:default"]
+}

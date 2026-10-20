@@ -207,10 +207,9 @@ pub fn apply_setting(app: &AppHandle, change: &Change) -> Result<(), String> {
                     .map_err(|err| format!("keeping the mini player on top failed: {err}"))?;
             }
         }
-        // `settings_set` applies these two itself, before saving and outside the settings
-        // lock, so a refusal reaches the UI and nothing is saved.
-        Change::MiniShortcut(accelerator) => shortcut::apply(app, accelerator)?,
-        Change::StartWithSystem(on) => shortcut::apply_start_with_system(app, *on)?,
+        // Applied in settings_set, outside the settings lock (before saving, so a refusal
+        // reaches the UI and nothing is saved). Nothing to do here.
+        Change::MiniShortcut(_) | Change::StartWithSystem(_) => {}
         other => eprintln!("setting changed: {other:?}"),
     }
     Ok(())

@@ -38,7 +38,7 @@ pub enum ReplayGain {
 #[serde(rename_all = "lowercase")]
 pub enum Crossfade {
     Off,
-    /// Only where the album does not flow on by itself.
+    /// Only inside a Flow; any other queue plays without a crossfade.
     #[default]
     Flow,
     Always,

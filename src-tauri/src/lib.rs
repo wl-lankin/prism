@@ -96,7 +96,8 @@ fn app_dirs(app: &tauri::App) -> anyhow::Result<AppDirs> {
 }
 
 fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
-    // First, so the glass is in place before the page paints.
+    // First, so the transparent background and the window shape are in place before the
+    // page paints.
     window::setup(app);
     let dirs = app_dirs(app)?;
     let data_dir = dirs.data;

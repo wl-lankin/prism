@@ -43,6 +43,9 @@ struct Session {
     /// The queue version an append in flight was sent at; no second refill until a state
     /// with a newer version arrives.
     awaiting: Option<u64>,
+    /// A state of this Flow (`flow == Some(variant)`) has been seen. Until then a state of
+    /// another queue is a queue change that raced the Flow's play and is ignored.
+    seen: bool,
 }
 
 enum Message {
@@ -137,6 +140,7 @@ impl FlowService {
             deck,
             after_version,
             awaiting: None,
+            seen: false,
         };
         // Only fails once the service thread is gone; the Flow then plays its first batch.
         let _ = self.messages.send(Message::Start(Box::new(session)));
@@ -156,8 +160,11 @@ fn refill(
         return true;
     }
     if state.flow.as_ref() != Some(&session.variant) {
-        return false;
+        // Before the Flow's own first state, another queue is a change that raced its play
+        // (the version was read before it): only a later one ends the Flow.
+        return !session.seen;
     }
+    session.seen = true;
     if let Some(version) = session.awaiting {
         // Every append bumps the queue version: a newer state already holds it.
         if state.queue_version <= version {
@@ -500,6 +507,7 @@ mod tests {
                 deck: Deck::new(pool, 0, StdRng::seed_from_u64(3)),
                 after_version: 4,
                 awaiting: None,
+                seen: false,
             }
         }
 
@@ -564,9 +572,31 @@ mod tests {
         #[test]
         fn another_queue_ends_the_session() {
             let mut s = session();
-            let mut other = state(5, 0, 2);
+            assert_eq!(step(&mut s, &state(5, 0, 50)), (true, 0));
+            let mut other = state(6, 0, 2);
             other.flow = None;
             assert_eq!(step(&mut s, &other), (false, 0));
+        }
+
+        #[test]
+        fn a_queue_change_racing_the_start_does_not_end_a_fresh_flow() {
+            let mut s = session();
+            // Another play landed after the version was read but before the Flow's play.
+            let mut racing = state(5, 0, 2);
+            racing.flow = None;
+            assert_eq!(step(&mut s, &racing), (true, 0));
+            let mut other_flow = state(5, 1, 2);
+            other_flow.flow = Some(FlowVariant::Favorites);
+            assert_eq!(step(&mut s, &other_flow), (true, 0));
+            assert!(!s.seen);
+            // The Flow's own queue arrives and runs as usual.
+            assert_eq!(step(&mut s, &state(6, 0, 50)), (true, 0));
+            assert!(s.seen);
+            assert_eq!(step(&mut s, &state(6, 40, 50)), (true, FLOW_BATCH));
+            // From now on another queue ends it.
+            let mut later = state(8, 0, 2);
+            later.flow = None;
+            assert_eq!(step(&mut s, &later), (false, 0));
         }
     }
 

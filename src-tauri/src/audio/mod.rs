@@ -38,10 +38,6 @@ pub use source::{
 
 /// How long to wait between attempts to open an output device.
 const REOPEN_BACKOFF: Duration = Duration::from_secs(1);
-/// How long `pump` waits for the decode thread when nothing is buffered: not at all. Pause,
-/// seek, next and state events must never queue behind a slow NAS read or a busy CPU; the
-/// engine simply pumps again on its next tick. (Tests may set [`Playback::starve_wait`].)
-const STARVE_WAIT: Duration = Duration::ZERO;
 
 /// What a [`Playback::pump`] call did. Errors from `pump` are always source (decode) errors.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -97,9 +93,6 @@ pub struct Playback {
     incoming: Vec<f32>,
     /// The outgoing source's decoded samples during a crossfade.
     outgoing: Vec<f32>,
-    /// How long one `pump` may wait for a decode thread with nothing buffered
-    /// ([`STARVE_WAIT`], zero, in production).
-    starve_wait: Duration,
     /// Loudness of the samples handed to the sink (never measured in the audio callback).
     meter: LevelMeter,
     /// When each recent meter reading becomes audible: the sink plays what it holds first.
@@ -279,7 +272,9 @@ impl Fade {
     }
 
     /// Mixes `incoming` (output spec) with the outgoing source into `out`: equal power over
-    /// the fade, then the incoming samples alone. Clamped to full scale.
+    /// the fade, then the incoming samples alone. Mixed frames go through [`mix::soft_clip`],
+    /// so two loud masters are rounded off below full scale instead of hard clipped; the
+    /// incoming samples after the fade pass unchanged.
     fn mix(
         &mut self,
         incoming: &[f32],
@@ -301,7 +296,7 @@ impl Fade {
                 } else {
                     0.0
                 };
-                out.push((previous * fade_out + sample * fade_in).clamp(-1.0, 1.0));
+                out.push(mix::soft_clip(previous * fade_out + sample * fade_in));
             }
             if old {
                 self.offset += channels;
@@ -365,7 +360,6 @@ impl Playback {
             read_ahead_ms: READ_AHEAD_MS,
             incoming: Vec::new(),
             outgoing: Vec::new(),
-            starve_wait: STARVE_WAIT,
             meter: LevelMeter::new(spec.sample_rate, spec.channels),
             heard: LevelTimeline::new(),
         })
@@ -645,7 +639,6 @@ impl Playback {
     }
 
     fn fill(&mut self, status: &mut PumpStatus) -> anyhow::Result<PumpStatus> {
-        let wait_until = Instant::now() + self.starve_wait;
         loop {
             if self.pending_offset < self.pending.len() {
                 let from = self.pending_offset;
@@ -699,12 +692,9 @@ impl Playback {
                     continue;
                 }
                 ReadOutcome::Starved => {
-                    let now = Instant::now();
-                    // Production never waits here (`starve_wait` is zero).
-                    if now < wait_until && current.wait_ready(wait_until - now) {
-                        continue;
-                    }
-                    // Keep playing what the sink holds; the decode thread catches up.
+                    // Never wait for the decode thread here: pause, seek, next and state
+                    // events must not queue behind a slow NAS read or a busy CPU. Keep
+                    // playing what the sink holds; the engine pumps again on its next tick.
                     return Ok(*status);
                 }
                 ReadOutcome::End => {}
@@ -1643,8 +1633,9 @@ mod tests {
     fn crossfade_overlaps_tracks() {
         let factory = FakeFactory::new(STEREO_48K, usize::MAX);
         let mut playback = Playback::new(factory.clone(), None).unwrap();
-        playback.set_source(dc(1.0, STEREO_48K, 3_000)).unwrap();
-        playback.queue_next_with(Some(dc(0.5, STEREO_48K, 3_000)), fade_options(1_000));
+        // Levels whose equal-power sum (at most 0.8 * 1.118) stays below the soft clip's knee.
+        playback.set_source(dc(0.8, STEREO_48K, 3_000)).unwrap();
+        playback.queue_next_with(Some(dc(0.4, STEREO_48K, 3_000)), fade_options(1_000));
         wait_exhausted(&playback);
         let (statuses, played) = play_until(&mut playback, &factory, |status| {
             status == PumpStatus::Finished
@@ -1661,20 +1652,48 @@ mod tests {
         let fade_start = frames.len() - 144_000;
         let fade_end = 144_000;
         assert!(fade_end - fade_start > 48_000 - BLOCK_FRAMES);
-        assert!(frames[..fade_start].iter().all(|s| *s == 1.0), "a alone");
+        assert!(frames[..fade_start].iter().all(|s| *s == 0.8), "a alone");
         let window = &frames[fade_start..fade_end];
         assert!(
-            window.iter().all(|s| *s <= 1.0 && *s >= 0.5 - 1e-6),
-            "no sample above full scale"
+            window.iter().all(|s| *s <= 0.9 && *s >= 0.4 - 1e-6),
+            "the equal-power sum, untouched below the knee"
         );
-        assert!(
-            window.windows(2).all(|w| w[1] <= w[0] + 1e-6),
-            "the window only moves from a toward b"
-        );
-        assert!((window[0] - 1.0).abs() < 1e-3, "{}", window[0]);
+        assert!((window[0] - 0.8).abs() < 1e-3, "{}", window[0]);
         let last = window[window.len() - 1];
-        assert!((last - 0.5).abs() < 0.01, "{last}");
-        assert!(frames[fade_end..].iter().all(|s| *s == 0.5), "b alone");
+        assert!((last - 0.4).abs() < 0.01, "{last}");
+        assert!(frames[fade_end..].iter().all(|s| *s == 0.4), "b alone");
+    }
+
+    #[test]
+    fn a_crossfade_of_two_loud_masters_is_soft_clipped() {
+        let factory = FakeFactory::new(STEREO_48K, usize::MAX);
+        let mut playback = Playback::new(factory.clone(), None).unwrap();
+        playback.set_source(dc(1.0, STEREO_48K, 3_000)).unwrap();
+        playback.queue_next_with(Some(dc(1.0, STEREO_48K, 3_000)), fade_options(1_000));
+        wait_exhausted(&playback);
+        let (_, played) = play_until(&mut playback, &factory, |status| {
+            status == PumpStatus::Finished
+        });
+        let frames = left(&played);
+        let fade_start = frames.len() - 144_000;
+        let fade_end = 144_000;
+        assert!(fade_end - fade_start > 48_000 - BLOCK_FRAMES);
+        let window = &frames[fade_start..fade_end];
+        assert!(
+            window.iter().all(|s| s.abs() <= 1.0),
+            "never above full scale"
+        );
+        let at_limit = window
+            .windows(3)
+            .filter(|run| run.iter().all(|s| s.abs() == 1.0))
+            .count();
+        assert_eq!(at_limit, 0, "no flat run at full scale");
+        // Mid-fade the sum is about 1.41: loud, but bent below the limit.
+        let middle = window[window.len() / 2];
+        assert!(middle > 0.99 && middle < 1.0, "{middle}");
+        // Outside the fade each master plays bit-exact.
+        assert!(frames[..fade_start].iter().all(|s| *s == 1.0));
+        assert!(frames[fade_end..].iter().all(|s| *s == 1.0));
     }
 
     #[test]

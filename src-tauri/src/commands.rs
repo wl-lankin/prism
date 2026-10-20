@@ -16,7 +16,7 @@ use crate::library::query::{self, SearchResult};
 use crate::library::scan::{lock, ScanReport};
 use crate::library::watch::{FolderWatcher, WatchState};
 use crate::library::{normalize, tauri_emitter, Library};
-use crate::player::{PlayerState, QueueItem};
+use crate::player::{PlayerState, QueueItem, DROPPED_PREFIX};
 use crate::settings::{Change, Settings};
 use crate::shell;
 use crate::shell::mini::{self, MiniLayout};
@@ -84,6 +84,17 @@ fn with_watcher(app: &AppHandle, act: impl FnOnce(&mut FolderWatcher) -> anyhow:
 
 fn folder_path(path: &str) -> Result<PathBuf, String> {
     normalize(Path::new(path)).map_err(message)
+}
+
+/// Refuses ids of dropped files ("Open with", drag and drop): they are not in the library,
+/// so they cannot be favorites or playlist entries.
+fn library_ids_only<'a>(ids: impl IntoIterator<Item = &'a str>) -> Result<(), String> {
+    match ids.into_iter().find(|id| id.starts_with(DROPPED_PREFIX)) {
+        Some(id) => Err(format!(
+            "\"{id}\" is a dropped file, not a library track: add its folder to the library first"
+        )),
+        None => Ok(()),
+    }
 }
 
 // Player
@@ -281,6 +292,7 @@ pub async fn favorites_set(
     id: String,
     on: bool,
 ) -> Result<bool, String> {
+    library_ids_only([id.as_str()])?;
     let changed = read(&app, move |conn| {
         favorites::set_changed(conn, kind, &id, on)
     })
@@ -357,6 +369,7 @@ pub async fn playlist_entries(app: AppHandle, id: i64) -> Result<Vec<PlaylistEnt
 
 #[tauri::command]
 pub async fn playlist_add(app: AppHandle, id: i64, track_ids: Vec<String>) -> Result<(), String> {
+    library_ids_only(track_ids.iter().map(String::as_str))?;
     read(&app, move |conn| {
         playlists::playlist_add(conn, id, &track_ids)
     })
@@ -516,5 +529,15 @@ mod tests {
     fn app_state_is_an_error_until_managed() {
         assert_eq!(ready::<u8>(None), Err(NOT_READY.to_string()));
         assert_eq!(ready(Some(7)), Ok(7));
+    }
+
+    #[test]
+    fn dropped_files_are_refused_as_favorites_and_playlist_entries() {
+        assert_eq!(library_ids_only(["abc", "def"]), Ok(()));
+        assert_eq!(library_ids_only([]), Ok(()));
+        let dropped = format!("{DROPPED_PREFIX}0");
+        let err = library_ids_only(["abc", dropped.as_str()]).unwrap_err();
+        assert!(err.contains(&dropped), "{err}");
+        assert!(err.contains("dropped file"), "{err}");
     }
 }

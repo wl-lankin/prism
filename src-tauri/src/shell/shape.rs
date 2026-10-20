@@ -186,11 +186,6 @@ impl Region {
     }
 }
 
-/// Gives `window` the shape `region` (logical px, window coordinates); `None` makes the whole
-/// window clickable again.
-///
-/// Windows: a window region, the card's rounded rectangle OR the ring's circle, in physical
-/// px. Outside it the window neither paints nor takes clicks.
 /// The physical-pixel rectangles handed to GDI: the card's rounded rectangle (left, top,
 /// right, bottom), its corner ellipse size, and the ring's bounding box.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -234,6 +229,11 @@ static APPLIED: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<isize, Option<GdiRects>>>,
 > = std::sync::LazyLock::new(Default::default);
 
+/// Gives `window` the shape `region` (logical px, window coordinates); `None` makes the whole
+/// window clickable again.
+///
+/// Windows: a window region, the card's rounded rectangle OR the ring's circle, in physical
+/// px. Outside it the window neither paints nor takes clicks.
 #[cfg(target_os = "windows")]
 pub fn apply(window: &WebviewWindow, region: Option<&Region>) {
     use windows_sys::Win32::Graphics::Gdi::{

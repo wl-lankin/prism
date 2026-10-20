@@ -128,11 +128,21 @@ mod tests {
         assert!(dev.contains("ws://localhost:1441"), "{dev}");
     }
 
-    /// Both windows get the commands and events; the capabilities name them.
+    /// Each window has its own capability; the mini player gets the commands and events
+    /// (`core:default`) and nothing that lets a script close, move or resize it.
     #[test]
-    fn capabilities_cover_both_windows() {
-        let capability: serde_json::Value =
+    fn capabilities_split_main_and_mini() {
+        let main: serde_json::Value =
             serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
-        assert_eq!(capability["windows"], serde_json::json!(["main", "mini"]));
+        assert_eq!(main["identifier"], "main");
+        assert_eq!(main["windows"], serde_json::json!(["main"]));
+        let main_permissions = main["permissions"].to_string();
+        assert!(main_permissions.contains("core:window:allow-close"));
+
+        let mini: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/mini.json")).unwrap();
+        assert_eq!(mini["identifier"], "mini");
+        assert_eq!(mini["windows"], serde_json::json!(["mini"]));
+        assert_eq!(mini["permissions"], serde_json::json!(["core:default"]));
     }
 }

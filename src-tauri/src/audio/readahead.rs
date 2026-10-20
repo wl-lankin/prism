@@ -113,6 +113,7 @@ impl Shared {
     }
 
     /// How long the running source call has taken so far.
+    #[cfg(test)]
     fn call_age(&self) -> Option<Duration> {
         let started = self.call_started.load(Ordering::Acquire);
         (started != 0).then(|| {
@@ -271,8 +272,9 @@ impl ReadAhead {
     /// but gives up on a source call that has run longer than [`SLOW_CALL`]: that is a slow
     /// source (a NAS, an FFmpeg restart), not a busy thread. A chunk wakes it at once; a
     /// timed check can overshoot by a timer tick (about 15 ms on Windows). True when a
-    /// `try_read` will not be starved. The engine never calls this (its `pump` does not
-    /// wait); it is for tests and an opt-in `Playback` wait.
+    /// `try_read` will not be starved. Tests only: the engine never waits (its `pump` returns
+    /// when the decode thread has nothing ready).
+    #[cfg(test)]
     pub(crate) fn wait_ready(&self, limit: Duration) -> bool {
         let deadline = Instant::now() + limit;
         let mut state = self.shared.lock();

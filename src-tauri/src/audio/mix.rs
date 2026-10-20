@@ -33,6 +33,23 @@ pub fn equal_power(t: f32) -> (f32, f32) {
     (angle.cos(), angle.sin())
 }
 
+/// Where [`soft_clip`] starts to bend; quieter samples pass unchanged.
+const KNEE: f32 = 0.9;
+
+/// A soft limiter for the mixed frames of a crossfade, where two loud masters can add up to
+/// more than full scale: identity up to [`KNEE`], above it `KNEE + (1 - KNEE) * tanh(excess /
+/// (1 - KNEE))`. Continuous with slope 1 at the knee, monotonic, and never above 1.0, so loud
+/// peaks are rounded off instead of flattened into a plateau at full scale.
+pub fn soft_clip(sample: f32) -> f32 {
+    let magnitude = sample.abs();
+    if magnitude <= KNEE {
+        return sample;
+    }
+    let headroom = 1.0 - KNEE;
+    let bent = KNEE + headroom * ((magnitude - KNEE) / headroom).tanh();
+    bent.min(1.0).copysign(sample)
+}
+
 /// RMS (linear) to 0..1: `clamp((20*log10(rms) + 50) / 50, 0, 1)`.
 pub fn level_of_rms(rms: f32) -> f32 {
     if rms <= 0.0 || !rms.is_finite() {
@@ -161,6 +178,28 @@ mod tests {
         let (a, b) = equal_power(1.0);
         assert!(a.abs() < 1e-6 && (b - 1.0).abs() < 1e-6);
         assert_eq!(equal_power(-1.0), equal_power(0.0), "clamped");
+    }
+
+    #[test]
+    fn soft_clip_bends_above_the_knee_only() {
+        for step in 0..=90 {
+            let sample = step as f32 / 100.0;
+            assert_eq!(soft_clip(sample), sample, "identity below the knee");
+            assert_eq!(soft_clip(-sample), -sample);
+        }
+        let mut previous = soft_clip(0.0);
+        for step in 1..=4000 {
+            let sample = step as f32 / 1000.0;
+            let bent = soft_clip(sample);
+            assert!(bent >= previous, "monotonic at {sample}");
+            assert!(bent <= 1.0 && bent <= sample, "at {sample}: {bent}");
+            assert_eq!(soft_clip(-sample), -bent, "symmetric");
+            previous = bent;
+        }
+        // Continuous at the knee and well below full scale for a +3 dB sum.
+        assert!((soft_clip(0.9001) - 0.9001).abs() < 1e-6);
+        assert!(soft_clip(std::f32::consts::SQRT_2) < 1.0);
+        assert_eq!(soft_clip(f32::INFINITY), 1.0);
     }
 
     #[test]

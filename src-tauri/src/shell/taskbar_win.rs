@@ -301,6 +301,12 @@ fn run(action: ThumbAction) {
     }
 }
 
+/// A `WM_SIZE` means the main window is back on screen (no longer closed) only when it is
+/// neither minimized nor hidden.
+fn back_on_screen(minimized: bool, visible: bool) -> bool {
+    !minimized && visible
+}
+
 fn main_closed() -> bool {
     APP.get()
         .and_then(|app| app.try_state::<ShellState>())
@@ -317,7 +323,8 @@ unsafe extern "system" fn proc(
 ) -> isize {
     use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        SC_RESTORE, SIZE_MINIMIZED, WM_COMMAND, WM_NCDESTROY, WM_SIZE, WM_SYSCOMMAND,
+        IsWindowVisible, SC_RESTORE, SIZE_MINIMIZED, WM_COMMAND, WM_NCDESTROY, WM_SIZE,
+        WM_SYSCOMMAND,
     };
 
     match message {
@@ -335,10 +342,15 @@ unsafe extern "system" fn proc(
                 return 0;
             }
         }
-        // Back on screen by any way (restored or maximized): no longer closed.
-        WM_SIZE if wparam != SIZE_MINIMIZED as usize => {
-            if let Some(state) = APP.get().and_then(|app| app.try_state::<ShellState>()) {
-                state.set_main_closed(false);
+        // Back on screen by any way (restored or maximized): no longer closed. A size change
+        // of a hidden window (a layout while closed) is not.
+        WM_SIZE => {
+            // SAFETY: `hwnd` is the live window this message was sent to.
+            let visible = unsafe { IsWindowVisible(hwnd) } != 0;
+            if back_on_screen(wparam == SIZE_MINIMIZED as usize, visible) {
+                if let Some(state) = APP.get().and_then(|app| app.try_state::<ShellState>()) {
+                    state.set_main_closed(false);
+                }
             }
         }
         WM_COMMAND => {
@@ -393,6 +405,14 @@ mod tests {
         for ico in [ICON_PREVIOUS, ICON_PLAY, ICON_PAUSE, ICON_NEXT] {
             assert!(!load_icon(ico).0.is_null());
         }
+    }
+
+    #[test]
+    fn only_a_visible_unminimized_size_reopens_main() {
+        assert!(back_on_screen(false, true));
+        assert!(!back_on_screen(true, true), "minimized");
+        assert!(!back_on_screen(false, false), "resized while hidden");
+        assert!(!back_on_screen(true, false));
     }
 
     #[test]
