@@ -681,6 +681,8 @@ impl Engine {
         self.dirty = true;
         match command {
             Command::Play(ids, start) => {
+                // A pending hand-over is settled at the index it belongs to.
+                self.settle_handover();
                 self.queue.set(ids, start);
                 self.queue_changed();
                 self.failures = 0;
@@ -688,6 +690,7 @@ impl Engine {
             }
             Command::Append(ids) => self.append(ids),
             Command::Jump(index) => {
+                self.settle_handover();
                 if self.queue.jump(index) {
                     self.failures = 0;
                     self.start_current(true);
@@ -741,15 +744,16 @@ impl Engine {
         self.dirty = true;
     }
 
-    /// Adds `ids` at the end. Playback goes on; when only the last track's tail was left,
-    /// the first appended track follows it.
+    /// Adds `ids` at the end. Playback goes on; when only a tail was left, the first appended
+    /// track follows it (even when the queue gave up on failed tracks before the end).
     fn append(&mut self, ids: Vec<String>) {
         if ids.is_empty() {
             return;
         }
+        let first = self.queue.len();
         self.queue.extend(ids);
         self.queue_changed();
-        if self.ending && self.queue.advance() {
+        if self.ending && self.queue.jump(first) {
             self.failures = 0;
             self.start_current(false);
         }
@@ -789,8 +793,11 @@ impl Engine {
     fn prev(&mut self) {
         self.settle_handover();
         if self.ending {
-            // Only the last track's tail is left (it is no longer decoding, so it cannot be
-            // seeked): start it again.
+            // Only a tail is left (no longer decoding, so it cannot be seeked): start the
+            // audible track again. The queue may already stand on a later track that failed.
+            if self.shown.is_some() {
+                self.queue.jump(self.shown_index);
+            }
             self.start_current(true);
         } else if self.seekable() && self.position_ms() > RESTART_AFTER_MS {
             self.seek(0);
@@ -1176,6 +1183,8 @@ impl Engine {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
 
@@ -1261,6 +1270,291 @@ mod tests {
                 _keep: tx,
             }))
         }
+    }
+
+    /// What [`BufferedSink`] changes as time passes.
+    struct BufferedState {
+        last: Instant,
+        /// Frames the device may play but has not yet (a fraction carried between calls).
+        due: f64,
+        buffer: VecDeque<f32>,
+        paused: bool,
+    }
+
+    /// An output like the real one: a ring of `ring_frames` that the device drains at `speed`
+    /// times real time, only while not paused. `queued()` is what is left in the ring,
+    /// `clear()` discards it without playing it, and every sample played is recorded.
+    struct BufferedSink {
+        spec: StreamSpec,
+        speed: f64,
+        ring_frames: usize,
+        state: RefCell<BufferedState>,
+        played: Arc<Mutex<Vec<f32>>>,
+        events: Receiver<OutputEvent>,
+        _keep: Sender<OutputEvent>,
+    }
+
+    impl BufferedSink {
+        /// Plays what the device has consumed since the last call.
+        fn drain(&self) {
+            let channels = self.spec.channels as usize;
+            let mut state = self.state.borrow_mut();
+            let now = Instant::now();
+            let elapsed = now.duration_since(state.last).as_secs_f64();
+            state.last = now;
+            if state.paused {
+                return;
+            }
+            state.due += elapsed * self.speed * self.spec.sample_rate as f64;
+            let frames = (state.due as usize).min(state.buffer.len() / channels);
+            state.due -= frames as f64;
+            let samples: Vec<f32> = state.buffer.drain(..frames * channels).collect();
+            if state.buffer.is_empty() {
+                // A device does not bank the time it had nothing to play.
+                state.due = 0.0;
+            }
+            self.played.lock().unwrap().extend(samples);
+        }
+    }
+
+    impl OutputSink for BufferedSink {
+        fn spec(&self) -> StreamSpec {
+            self.spec
+        }
+        fn push(&mut self, samples: &[f32]) -> usize {
+            self.drain();
+            let channels = self.spec.channels as usize;
+            let mut state = self.state.borrow_mut();
+            let room = self.ring_frames - state.buffer.len() / channels;
+            let taken = room.min(samples.len() / channels) * channels;
+            state.buffer.extend(&samples[..taken]);
+            taken
+        }
+        fn queued(&self) -> usize {
+            self.drain();
+            self.state.borrow().buffer.len()
+        }
+        fn clear(&mut self) {
+            self.drain();
+            self.state.borrow_mut().buffer.clear();
+        }
+        fn set_volume(&mut self, _volume: f32) {}
+        fn set_paused(&mut self, paused: bool) {
+            self.drain();
+            self.state.borrow_mut().paused = paused;
+        }
+        fn errors(&self) -> Receiver<OutputEvent> {
+            self.events.clone()
+        }
+    }
+
+    struct BufferedFactory {
+        speed: f64,
+        ring_ms: u64,
+        played: Arc<Mutex<Vec<f32>>>,
+    }
+
+    impl OutputFactory for BufferedFactory {
+        fn open(&self, _device: Option<String>) -> anyhow::Result<Box<dyn OutputSink>> {
+            let (tx, rx) = crossbeam_channel::unbounded();
+            Ok(Box::new(BufferedSink {
+                spec: STEREO_44K,
+                speed: self.speed,
+                ring_frames: (self.ring_ms * 44_100 / 1000) as usize,
+                state: RefCell::new(BufferedState {
+                    last: Instant::now(),
+                    due: 0.0,
+                    buffer: VecDeque::new(),
+                    paused: false,
+                }),
+                played: Arc::clone(&self.played),
+                events: rx,
+                _keep: tx,
+            }))
+        }
+    }
+
+    /// `ms` of a constant `value` at the output spec, so the output shows which track played.
+    struct Tone {
+        value: f32,
+        ms: u64,
+        frames_left: u64,
+    }
+
+    impl Tone {
+        fn new(value: f32, ms: u64) -> Tone {
+            Tone {
+                value,
+                ms,
+                frames_left: ms * 44_100 / 1000,
+            }
+        }
+    }
+
+    impl AudioSource for Tone {
+        fn spec(&self) -> StreamSpec {
+            STEREO_44K
+        }
+        fn read(&mut self, out: &mut Vec<f32>) -> anyhow::Result<usize> {
+            let frames = self.frames_left.min(1024) as usize;
+            out.extend(std::iter::repeat_n(self.value, frames * 2));
+            self.frames_left -= frames as u64;
+            Ok(frames)
+        }
+        fn seek(&mut self, ms: u64) -> anyhow::Result<()> {
+            self.frames_left = self.ms.saturating_sub(ms) * 44_100 / 1000;
+            Ok(())
+        }
+        fn duration_ms(&self) -> Option<u64> {
+            Some(self.ms)
+        }
+    }
+
+    /// Opens fine, fails on the first read.
+    struct Broken;
+
+    impl AudioSource for Broken {
+        fn spec(&self) -> StreamSpec {
+            STEREO_44K
+        }
+        fn read(&mut self, _out: &mut Vec<f32>) -> anyhow::Result<usize> {
+            anyhow::bail!("broken stream")
+        }
+        fn seek(&mut self, _ms: u64) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn duration_ms(&self) -> Option<u64> {
+            None
+        }
+    }
+
+    /// The tone values the buffered tests use: "a" and "c" play, "broken" fails on read.
+    const TONE_A: f32 = 0.25;
+    const TONE_C: f32 = 0.5;
+    /// "a" is longer than the ring, so it is still decoding when the next track is
+    /// pre-opened; once it is decoded, a full ring (2 s at real time) is left to play.
+    const TONE_A_MS: u64 = 2_500;
+    const BUFFERED_RING_MS: u64 = 2_000;
+
+    fn buffered_harness() -> Harness {
+        let tracks: Vec<Track> = ["a", "broken", "c"]
+            .iter()
+            .map(|id| {
+                let mut track = fixture_track(id, "tagged.flac");
+                track.duration_ms = if *id == "broken" { 0 } else { TONE_A_MS };
+                track
+            })
+            .collect();
+        let resolver: Resolver =
+            Arc::new(move |id: &str| tracks.iter().find(|track| track.id == id).cloned());
+        let opener: Opener = Arc::new(|track: &Track, _spec: StreamSpec| {
+            Ok(match track.id.as_str() {
+                "a" => Box::new(Tone::new(TONE_A, TONE_A_MS)) as Box<dyn AudioSource>,
+                "c" => Box::new(Tone::new(TONE_C, TONE_A_MS)),
+                _ => Box::new(Broken),
+            })
+        });
+        let played = Arc::new(Mutex::new(Vec::new()));
+        let factory = Arc::new(BufferedFactory {
+            speed: 1.0,
+            ring_ms: BUFFERED_RING_MS,
+            played: Arc::clone(&played),
+        });
+        let (tx, events) = crossbeam_channel::unbounded();
+        let sink: EventSink = Arc::new(move |event| {
+            let _ = tx.send(event);
+        });
+        let player =
+            Player::spawn_with_options(factory, resolver, sink, opener, PlayerOptions::default());
+        Harness {
+            player,
+            events,
+            played,
+        }
+    }
+
+    /// Samples of `value` that reached the device.
+    fn played_of(played: &Mutex<Vec<f32>>, value: f32) -> usize {
+        played
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|sample| (**sample - value).abs() < 1e-6)
+            .count()
+    }
+
+    /// Every sample of "a" (stereo).
+    const TONE_A_SAMPLES: usize = (TONE_A_MS * 44_100 / 1000) as usize * 2;
+
+    #[test]
+    fn failing_preload_keeps_the_tail() {
+        let h = buffered_harness();
+        h.player.play(ids(&["a", "broken"]), 0).unwrap();
+        let events = collect_until(&h.events, Duration::from_secs(20), back_to_idle);
+        assert_eq!(errors(&events), ids(&["broken"]));
+        assert_eq!(changes(&events), ids(&["a"]));
+        assert_eq!(
+            played_of(&h.played, TONE_A),
+            TONE_A_SAMPLES,
+            "all of a was heard: the failure after the hand-over did not cut its tail"
+        );
+    }
+
+    #[test]
+    fn prev_in_the_tail_after_a_failed_last_track_restarts_the_audible_one() {
+        let h = buffered_harness();
+        h.player.play(ids(&["a", "broken"]), 0).unwrap();
+        collect_until(&h.events, Duration::from_secs(20), |seen| {
+            !errors(seen).is_empty()
+        });
+        // The queue stands on "broken"; "a"'s tail is still playing.
+        h.player.prev().unwrap();
+        let events = collect_until(&h.events, Duration::from_secs(20), |seen| {
+            !changes(seen).is_empty()
+        });
+        assert_eq!(changes(&events), ids(&["a"]), "a starts again");
+        assert!(
+            errors(&events).is_empty(),
+            "broken was not retried: {events:#?}"
+        );
+        let state = wait_state(&h.player, |s| s.status == PlayerStatus::Playing);
+        assert_eq!(state.queue_index, 0);
+        assert_eq!(state.track.unwrap().id, "a");
+    }
+
+    #[test]
+    fn append_during_the_tail_continues_without_idle() {
+        let h = buffered_harness();
+        h.player.play(ids(&["a"]), 0).unwrap();
+        collect_until(&h.events, Duration::from_secs(20), |seen| {
+            changes(seen) == ids(&["a"])
+        });
+        // Once the device has played more than "a" minus a full ring, all of "a" has been
+        // decoded: only its tail is left (about 1.9 s of it).
+        let decoded = TONE_A_SAMPLES - (BUFFERED_RING_MS * 44_100 / 1000) as usize * 2;
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while played_of(&h.played, TONE_A) <= decoded + 4_410 {
+            assert!(Instant::now() < deadline, "a never played");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        h.player.append(ids(&["c"])).unwrap();
+        let events = collect_until(&h.events, Duration::from_secs(20), |seen| {
+            !changes(seen).is_empty()
+        });
+        assert_eq!(changes(&events), ids(&["c"]));
+        assert!(
+            events.iter().any(|e| is_state(e, PlayerStatus::Loading)),
+            "c was loaded after a's end, not pre-opened: {events:#?}"
+        );
+        assert!(
+            !events.iter().any(|e| is_state(e, PlayerStatus::Idle)),
+            "no idle between a and c: {events:#?}"
+        );
+        assert_eq!(
+            played_of(&h.played, TONE_A),
+            TONE_A_SAMPLES,
+            "a's tail played out before c"
+        );
     }
 
     /// Ten seconds of silence at the output spec.
@@ -2080,7 +2374,11 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert!(messages.len() <= 10, "an error flood: {messages:#?}");
+        assert_eq!(
+            messages.len(),
+            10,
+            "one per failed track, then none: {messages:#?}"
+        );
         assert_eq!(
             messages.last().map(String::as_str),
             Some("10 tracks in a row could not be played")
