@@ -175,7 +175,7 @@ export const onSettingsChanged = (cb: (settings: Settings) => void): Promise<Unl
   listen<Settings>('settings://changed', (event) => cb(event.payload));
 /** The mini player was just shown (it never gets focus or a visibility change for it). */
 export const onMiniShown = (cb: () => void): Promise<UnlistenFn> => listen('mini://shown', () => cb());
-export const onMiniLayout =(cb: (layout: MiniLayout) => void): Promise<UnlistenFn> =>
+export const onMiniLayout = (cb: (layout: MiniLayout) => void): Promise<UnlistenFn> =>
   listen<MiniLayout>('mini://layout', (event) => cb(event.payload));
 export const onScanProgress = (cb: (progress: ScanProgress) => void): Promise<UnlistenFn> =>
   listen<ScanProgress>('library://scan-progress', (event) => cb(event.payload));
