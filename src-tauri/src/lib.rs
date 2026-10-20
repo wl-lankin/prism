@@ -6,6 +6,7 @@ pub mod media_controls;
 pub mod player;
 pub mod protocol;
 pub mod tools;
+pub mod window;
 
 use std::sync::Arc;
 
@@ -53,6 +54,8 @@ fn main_window_handle(app: &tauri::App) -> Option<usize> {
 }
 
 fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
+    // First, so the glass is in place before the page paints.
+    window::setup(app);
     let data_dir = app
         .path()
         .app_data_dir()
@@ -119,6 +122,7 @@ pub fn run() {
             commands::library_track_count,
             commands::library_tracks_range,
             commands::library_search,
+            window::window_vibrancy,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Prism");

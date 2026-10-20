@@ -61,6 +61,11 @@ export const libraryTracksRange = (offset: number, limit: number) =>
   call<Track[]>('library_tracks_range', { offset, limit });
 export const librarySearch = (q: string, limit: number) => call<SearchResult>('library_search', { q, limit });
 
+// Window.
+
+/** True when the window sits on a native glass material (Mica, macOS vibrancy). */
+export const windowVibrancy = () => call<boolean>('window_vibrancy');
+
 // Events.
 
 export const onPlayerState = (cb: (state: PlayerState) => void): Promise<UnlistenFn> =>

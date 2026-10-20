@@ -3296,6 +3296,7 @@ dependencies = [
  "tauri-plugin-opener",
  "tempfile",
  "walkdir",
+ "window-vibrancy",
 ]
 
 [[package]]

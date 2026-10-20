@@ -15,7 +15,7 @@ crate-type = ["rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["macos-private-api"] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
@@ -36,6 +36,7 @@ rtrb = "0.4.0"
 rubato = "5.0.1"
 crossbeam-channel = "0.5.17"
 souvlaki = "0.8.3"
+window-vibrancy = "0.8.1"
 
 [profile.release]
 opt-level = 3
