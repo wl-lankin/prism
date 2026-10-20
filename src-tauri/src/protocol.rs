@@ -4,21 +4,15 @@
 //! `http://prism.localhost/cover/<coverId>/<size>`) returns the cover resized to a square
 //! bound of 96, 300 or 600 px as JPEG. Resized covers are cached on disk.
 
-use std::io::Cursor;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use image::codecs::jpeg::JpegEncoder;
-use image::imageops::FilterType;
-use image::{DynamicImage, ImageError, Rgb, RgbImage};
 use tauri::http::{header, Request, Response, StatusCode};
 use tauri::{Manager, Runtime, UriSchemeContext, UriSchemeResponder};
 
 use crate::library::covers::CoverStore;
+use crate::thumbs::{ResizeError, ResizeGate, SIZES};
 use crate::AppState;
-
-const SIZES: [u32; 3] = [96, 300, 600];
-const JPEG_QUALITY: u8 = 85;
 
 pub fn register<R: Runtime>(
     ctx: UriSchemeContext<'_, R>,
@@ -30,9 +24,10 @@ pub fn register<R: Runtime>(
     tauri::async_runtime::spawn_blocking(move || {
         // A panic in a decoder must still answer the request.
         let response = catch_unwind(AssertUnwindSafe(|| {
-            let store = &app.state::<AppState>().library.covers;
+            let state = app.state::<AppState>();
+            let store = &state.library.covers;
             match store.dir().parent() {
-                Some(cache) => handle(store, cache, &path),
+                Some(cache) => handle(&state.thumbs, store, cache, &path),
                 None => plain(StatusCode::INTERNAL_SERVER_ERROR, "no cache dir"),
             }
         }))
@@ -43,7 +38,12 @@ pub fn register<R: Runtime>(
 
 /// Serves `/cover/<id>/<size>`. `path` is the URI path only; the query string is already
 /// stripped by `Uri::path()`. `cache` is the directory holding one subfolder per size.
-pub fn handle(store: &CoverStore, cache: &Path, path: &str) -> Response<Vec<u8>> {
+pub fn handle(
+    gate: &ResizeGate,
+    store: &CoverStore,
+    cache: &Path,
+    path: &str,
+) -> Response<Vec<u8>> {
     let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
     let [kind, id, size] = parts.as_slice() else {
         return plain(StatusCode::BAD_REQUEST, "malformed path");
@@ -54,24 +54,18 @@ pub fn handle(store: &CoverStore, cache: &Path, path: &str) -> Response<Vec<u8>>
     let Some(size) = size.parse::<u32>().ok().filter(|s| SIZES.contains(s)) else {
         return plain(StatusCode::BAD_REQUEST, "invalid size");
     };
-    let Some(original) = store.path(id) else {
-        return plain(StatusCode::NOT_FOUND, "unknown cover");
+    let cached = match gate.get(store, cache, id, size) {
+        Ok(path) => path,
+        Err(ResizeError::Unknown) => return plain(StatusCode::NOT_FOUND, "unknown cover"),
+        Err(ResizeError::Undecodable(_)) => {
+            return plain(StatusCode::UNPROCESSABLE_ENTITY, "cover cannot be decoded")
+        }
+        Err(ResizeError::Internal(_)) => {
+            return plain(StatusCode::INTERNAL_SERVER_ERROR, "cover cannot be served")
+        }
     };
-    let cached = cache.join(size.to_string()).join(format!("{id}.jpg"));
-    let body = match std::fs::read(&cached) {
-        Ok(bytes) => bytes,
-        Err(_) => match resize(&original, size) {
-            Ok(bytes) => {
-                let _ = write_atomic(&cached, &bytes);
-                bytes
-            }
-            Err(ResizeError::Undecodable(_)) => {
-                return plain(StatusCode::UNPROCESSABLE_ENTITY, "cover cannot be decoded")
-            }
-            Err(ResizeError::Internal(_)) => {
-                return plain(StatusCode::INTERNAL_SERVER_ERROR, "cover cannot be served")
-            }
-        },
+    let Ok(body) = std::fs::read(&cached) else {
+        return plain(StatusCode::INTERNAL_SERVER_ERROR, "cover cannot be served");
     };
     Response::builder()
         .status(StatusCode::OK)
@@ -80,101 +74,6 @@ pub fn handle(store: &CoverStore, cache: &Path, path: &str) -> Response<Vec<u8>>
         .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
         .body(body)
         .unwrap_or_else(|_| Response::new(Vec::new()))
-}
-
-/// The cached JPEG of cover `id` at `size` px (one of 96, 300, 600), resized now when it is
-/// not cached yet. `None` when the cover is unknown or cannot be decoded.
-pub fn cached_cover(store: &CoverStore, cache: &Path, id: &str, size: u32) -> Option<PathBuf> {
-    if !SIZES.contains(&size) {
-        return None;
-    }
-    let original = store.path(id)?;
-    let cached = cache.join(size.to_string()).join(format!("{id}.jpg"));
-    if cached.is_file() {
-        return Some(cached);
-    }
-    let bytes = resize(&original, size).ok()?;
-    write_atomic(&cached, &bytes).ok()?;
-    Some(cached)
-}
-
-/// Neutral cover for tracks without one: the app icon on the surface color.
-/// Cached at `<cache>/600/_placeholder.jpg`; the leading underscore cannot collide with a
-/// cover id (those are hex).
-pub fn placeholder_cover(cache: &Path) -> Option<PathBuf> {
-    let target = cache.join("600").join("_placeholder.jpg");
-    if target.is_file() {
-        return Some(target);
-    }
-    let icon = image::load_from_memory(include_bytes!("../icons/icon.png")).ok()?;
-    let side = 600u32;
-    let logo = flatten(&icon.resize(side / 2, side / 2, FilterType::Lanczos3));
-    let mut canvas = RgbImage::from_pixel(side, side, SURFACE);
-    let offset = ((side - logo.width()) / 2, (side - logo.height()) / 2);
-    image::imageops::replace(&mut canvas, &logo, offset.0 as i64, offset.1 as i64);
-    let mut out = Cursor::new(Vec::new());
-    canvas
-        .write_with_encoder(JpegEncoder::new_with_quality(&mut out, JPEG_QUALITY))
-        .ok()?;
-    write_atomic(&target, &out.into_inner()).ok()?;
-    Some(target)
-}
-
-enum ResizeError {
-    /// The bytes are not a decodable image: the client cannot fix this, but it is not our fault.
-    Undecodable(#[allow(dead_code)] ImageError),
-    /// Disk or encoder failure.
-    Internal(#[allow(dead_code)] String),
-}
-
-/// Background for transparent covers: the `--surface` token.
-const SURFACE: Rgb<u8> = Rgb([0x14, 0x14, 0x18]);
-
-fn flatten(image: &DynamicImage) -> RgbImage {
-    let rgba = image.to_rgba8();
-    RgbImage::from_fn(rgba.width(), rgba.height(), |x, y| {
-        let [r, g, b, a] = rgba.get_pixel(x, y).0;
-        let mix = |fg: u8, bg: u8| {
-            ((fg as u32 * a as u32 + bg as u32 * (255 - a as u32) + 127) / 255) as u8
-        };
-        Rgb([mix(r, SURFACE[0]), mix(g, SURFACE[1]), mix(b, SURFACE[2])])
-    })
-}
-
-fn resize(original: &Path, size: u32) -> Result<Vec<u8>, ResizeError> {
-    let bytes = std::fs::read(original).map_err(|e| ResizeError::Internal(e.to_string()))?;
-    let image = image::load_from_memory(&bytes).map_err(|e| match e {
-        ImageError::IoError(io) => ResizeError::Internal(io.to_string()),
-        other => ResizeError::Undecodable(other),
-    })?;
-    // Never upscale: a small cover keeps its own size.
-    let image = if image.width() <= size && image.height() <= size {
-        image
-    } else {
-        image.resize(size, size, FilterType::Lanczos3)
-    };
-    let flat = flatten(&image);
-    let mut out = Cursor::new(Vec::new());
-    flat.write_with_encoder(JpegEncoder::new_with_quality(&mut out, JPEG_QUALITY))
-        .map_err(|e| ResizeError::Internal(e.to_string()))?;
-    Ok(out.into_inner())
-}
-
-/// Temp file plus rename: parallel requests for one cover never expose half a file.
-fn write_atomic(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    if let Some(dir) = target.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let temp = target.with_extension(format!(
-        "{}.{:?}.tmp",
-        std::process::id(),
-        std::thread::current().id()
-    ));
-    std::fs::write(&temp, bytes)
-        .and_then(|()| std::fs::rename(&temp, target))
-        .inspect_err(|_| {
-            let _ = std::fs::remove_file(&temp);
-        })
 }
 
 fn plain(status: StatusCode, message: &str) -> Response<Vec<u8>> {
@@ -190,12 +89,17 @@ fn plain(status: StatusCode, message: &str) -> Response<Vec<u8>> {
 mod tests {
     use super::*;
     use image::{ImageFormat, RgbImage};
+    use std::io::Cursor;
 
     fn png(width: u32, height: u32) -> Vec<u8> {
         let image = RgbImage::from_fn(width, height, |x, y| image::Rgb([x as u8, y as u8, 90]));
         let mut out = Cursor::new(Vec::new());
         image.write_to(&mut out, ImageFormat::Png).unwrap();
         out.into_inner()
+    }
+
+    fn gate() -> ResizeGate {
+        ResizeGate::new(2)
     }
 
     fn setup() -> (tempfile::TempDir, CoverStore) {
@@ -208,7 +112,7 @@ mod tests {
     fn serves_resized_cover() {
         let (root, store) = setup();
         let id = store.store_bytes(&png(400, 400)).unwrap();
-        let response = handle(&store, root.path(), &format!("/cover/{id}/96"));
+        let response = handle(&gate(), &store, root.path(), &format!("/cover/{id}/96"));
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers()[header::CONTENT_TYPE], "image/jpeg");
         assert_eq!(
@@ -220,19 +124,9 @@ mod tests {
     }
 
     #[test]
-    fn placeholder_cover_is_a_cached_600px_jpeg() {
-        let (root, _store) = setup();
-        let path = placeholder_cover(root.path()).unwrap();
-        assert_eq!(path, root.path().join("600").join("_placeholder.jpg"));
-        let decoded = image::load_from_memory(&std::fs::read(&path).unwrap()).unwrap();
-        assert_eq!((decoded.width(), decoded.height()), (600, 600));
-        assert_eq!(placeholder_cover(root.path()), Some(path));
-    }
-
-    #[test]
     fn unknown_cover_is_404() {
         let (root, store) = setup();
-        let response = handle(&store, root.path(), "/cover/deadbeef/96");
+        let response = handle(&gate(), &store, root.path(), "/cover/deadbeef/96");
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
@@ -248,11 +142,11 @@ mod tests {
             format!("/cover/{id}/96/extra"),
             format!("/cover/{id}/96/"),
         ] {
-            let response = handle(&store, root.path(), &path);
+            let response = handle(&gate(), &store, root.path(), &path);
             assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}");
         }
         // Traversal ids never reach the filesystem: the store rejects them as unknown.
-        let response = handle(&store, root.path(), "/cover/../96");
+        let response = handle(&gate(), &store, root.path(), "/cover/../96");
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
@@ -260,7 +154,7 @@ mod tests {
     fn never_upscales() {
         let (root, store) = setup();
         let id = store.store_bytes(&png(50, 50)).unwrap();
-        let response = handle(&store, root.path(), &format!("/cover/{id}/300"));
+        let response = handle(&gate(), &store, root.path(), &format!("/cover/{id}/300"));
         assert_eq!(response.status(), StatusCode::OK);
         let decoded = image::load_from_memory(response.body()).unwrap();
         assert!(decoded.width() <= 50 && decoded.height() <= 50);
@@ -273,7 +167,7 @@ mod tests {
         let mut out = Cursor::new(Vec::new());
         clear.write_to(&mut out, ImageFormat::Png).unwrap();
         let id = store.store_bytes(&out.into_inner()).unwrap();
-        let response = handle(&store, root.path(), &format!("/cover/{id}/96"));
+        let response = handle(&gate(), &store, root.path(), &format!("/cover/{id}/96"));
         let pixel = image::load_from_memory(response.body())
             .unwrap()
             .to_rgb8()
@@ -295,7 +189,7 @@ mod tests {
         bytes.truncate(40);
         bytes.extend_from_slice(b"garbage garbage garbage");
         let id = store.store_bytes(&bytes).unwrap();
-        let response = handle(&store, root.path(), &format!("/cover/{id}/96"));
+        let response = handle(&gate(), &store, root.path(), &format!("/cover/{id}/96"));
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 
@@ -305,11 +199,11 @@ mod tests {
         let id = store.store_bytes(&png(400, 400)).unwrap();
         let cached = root.path().join("300").join(format!("{id}.jpg"));
         assert!(!cached.exists());
-        let first = handle(&store, root.path(), &format!("/cover/{id}/300"));
+        let first = handle(&gate(), &store, root.path(), &format!("/cover/{id}/300"));
         assert!(cached.is_file());
         // A marker in the cache file proves the second call reads it instead of resizing.
         std::fs::write(&cached, b"cached").unwrap();
-        let second = handle(&store, root.path(), &format!("/cover/{id}/300"));
+        let second = handle(&gate(), &store, root.path(), &format!("/cover/{id}/300"));
         assert_eq!(second.body().as_slice(), b"cached");
         assert_ne!(first.body().as_slice(), b"cached");
     }
