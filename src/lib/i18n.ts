@@ -42,7 +42,6 @@ const en = {
   'transport.volume': 'Volume',
   'transport.mute': 'Mute',
   'transport.unmute': 'Unmute',
-  'transport.favorite': 'Add to favorites',
 
   'flow.failed': 'Playback could not start: {message}',
 
@@ -52,7 +51,6 @@ const en = {
   'view.songs.lead': 'Every track in your library, in one list.',
   'view.album.lead': 'Album details appear here.',
   'view.artist.lead': 'Artist details appear here.',
-  'view.favorites.lead': 'Favorites from every source arrive in a later version.',
   'view.playlists.lead': 'Playlists arrive in a later version.',
   'view.count.albums': '{count} albums',
   'view.count.albums.one': '1 album',
@@ -206,7 +204,6 @@ const de: Record<Key, string> = {
   'transport.volume': 'Lautstärke',
   'transport.mute': 'Stumm',
   'transport.unmute': 'Ton an',
-  'transport.favorite': 'Zu Favoriten hinzufügen',
 
   'flow.failed': 'Wiedergabe konnte nicht starten: {message}',
 
@@ -216,7 +213,6 @@ const de: Record<Key, string> = {
   'view.songs.lead': 'Alle Titel deiner Mediathek in einer Liste.',
   'view.album.lead': 'Hier erscheinen die Details zum Album.',
   'view.artist.lead': 'Hier erscheinen die Details zum Interpreten.',
-  'view.favorites.lead': 'Favoriten aus allen Quellen kommen in einer späteren Version.',
   'view.playlists.lead': 'Playlists kommen in einer späteren Version.',
   'view.count.albums': '{count} Alben',
   'view.count.albums.one': '1 Album',

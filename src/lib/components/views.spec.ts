@@ -46,6 +46,11 @@ const invoke = vi.fn(async (cmd: string, args?: Record<string, unknown>): Promis
       return { albums: [album], artists: [artist], tracks: [track(2)] };
     case 'library_album_tracks':
       return [track(1), track(2), track(3)];
+    case 'favorites_tracks':
+      return [track(1), track(2)];
+    case 'favorites_albums':
+    case 'favorites_artists':
+      return [];
     case 'library_tracks_range': {
       const { offset, limit } = args as { offset: number; limit: number };
       return Array.from({ length: limit }, (_, i) => track(offset + i));
@@ -315,6 +320,45 @@ it('hides a row heart that is not set from pointer and screen reader until the r
   hearts[1].dispatchEvent(new FocusEvent('focus'));
   flushSync();
   expect(hearts[1].classList.contains('hidden')).toBe(false);
+  unmount(app);
+});
+
+it('un-hearts the selected Favorites song with "f" and keeps the selection in range', async () => {
+  const { default: FavoritesView } = await import('./FavoritesView.svelte');
+  const { favorites } = await import('../stores/favorites.svelte');
+  favorites.tracks.clear();
+  favorites.tracks.add('local:t1');
+  favorites.tracks.add('local:t2');
+  const app = mount(FavoritesView, { target });
+  await settle();
+  const list = target.querySelector('[role="listbox"]')!;
+  expect(list.querySelectorAll('[role="option"]')).toHaveLength(2);
+  key(list, 'End');
+  expect(list.getAttribute('aria-activedescendant')).toBe('fav-song-1');
+  key(list, 'f');
+  expect(invoke).toHaveBeenCalledWith('favorites_set', { kind: 'track', id: 'local:t2', on: false });
+  await settle();
+  const rows = list.querySelectorAll('[role="option"]');
+  expect(rows).toHaveLength(1);
+  expect(list.getAttribute('aria-activedescendant')).toBe('fav-song-0');
+  expect(rows[0].getAttribute('aria-selected')).toBe('true');
+  unmount(app);
+});
+
+it('shows no transport heart for a dropped file, and one for a library track', async () => {
+  const { default: TransportStrip } = await import('./TransportStrip.svelte');
+  const { player } = await import('../stores/player.svelte');
+  player.status = 'playing';
+  player.track = { ...track(1), id: 'file:C:/drop/a.flac', source: 'local' };
+  const app = mount(TransportStrip, { target });
+  flushSync();
+  expect(target.querySelector('.heart')).toBeNull();
+  player.track = track(1);
+  flushSync();
+  expect(target.querySelector('.heart')?.getAttribute('aria-pressed')).not.toBeNull();
+  player.status = 'idle';
+  player.track = null;
+  flushSync();
   unmount(app);
 });
 
