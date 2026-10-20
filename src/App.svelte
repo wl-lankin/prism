@@ -243,7 +243,7 @@
      hang half out of the card's bottom edge; it is half a ring high plus room for the ring's
      bezel and glow, so nothing is cut off at the window edge. */
   .window {
-    --ring-room: 14px;
+    --ring-room: 48px;
     --frame-bottom: calc(var(--ring-size) / 2 + var(--ring-room));
     position: fixed;
     inset: 0;
