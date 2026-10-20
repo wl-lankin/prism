@@ -12,6 +12,7 @@
 
 pub mod ffmpeg;
 pub mod gain;
+pub mod mix;
 pub mod output;
 pub mod readahead;
 pub mod resample;
@@ -24,6 +25,7 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::Receiver;
 
+pub use mix::LevelMeter;
 pub use output::{
     list_devices, CpalOutputFactory, NullSink, Output, OutputEvent, OutputFactory, OutputSink,
 };
@@ -88,6 +90,50 @@ pub struct Playback {
     /// How long one `pump` may wait for a decode thread with nothing buffered
     /// ([`STARVE_WAIT`], zero, in production).
     starve_wait: Duration,
+    /// Loudness of the samples handed to the sink (never measured in the audio callback).
+    meter: LevelMeter,
+    /// When each recent meter reading becomes audible: the sink plays what it holds first.
+    heard: LevelTimeline,
+}
+
+/// How many recent level readings [`Playback`] keeps for [`Playback::level`]: one per pump that
+/// fed the sink (about every 10 ms), well beyond the output's buffer.
+const LEVEL_READINGS: usize = 64;
+
+/// Level readings with the instant each one is heard, in a fixed ring (no allocation).
+struct LevelTimeline {
+    readings: [(Instant, f32); LEVEL_READINGS],
+    /// Next slot to write.
+    next: usize,
+    len: usize,
+}
+
+impl LevelTimeline {
+    fn new() -> LevelTimeline {
+        LevelTimeline {
+            readings: [(Instant::now(), 0.0); LEVEL_READINGS],
+            next: 0,
+            len: 0,
+        }
+    }
+
+    fn record(&mut self, at: Instant, level: f32) {
+        self.readings[self.next] = (at, level);
+        self.next = (self.next + 1) % LEVEL_READINGS;
+        self.len = (self.len + 1).min(LEVEL_READINGS);
+    }
+
+    /// The newest reading already heard at `now`; 0 when none is.
+    fn at(&self, now: Instant) -> f32 {
+        (1..=self.len)
+            .map(|back| self.readings[(self.next + LEVEL_READINGS - back) % LEVEL_READINGS])
+            .find(|(at, _)| *at <= now)
+            .map_or(0.0, |(_, level)| level)
+    }
+
+    fn clear(&mut self) {
+        self.len = 0;
+    }
 }
 
 /// A finite, non-negative gain; anything else plays unchanged.
@@ -113,6 +159,7 @@ impl Playback {
             Box::new(NullSink::new())
         });
         let events = sink.errors();
+        let spec = sink.spec();
         Ok(Playback {
             factory,
             sink,
@@ -136,7 +183,19 @@ impl Playback {
             gain: 1.0,
             next_gain: 1.0,
             starve_wait: STARVE_WAIT,
+            meter: LevelMeter::new(spec.sample_rate, spec.channels),
+            heard: LevelTimeline::new(),
         })
+    }
+
+    /// 0..=1, the loudness of what is being heard now (see [`LevelMeter`]). Measured as the
+    /// samples go to the sink and delayed by what the sink still holds, so it follows the
+    /// music, not the decoder.
+    pub fn level(&self) -> f32 {
+        if self.paused {
+            return 0.0;
+        }
+        self.heard.at(Instant::now())
     }
 
     /// The output spec, for opening sources with [`open_source_with`].
@@ -342,7 +401,15 @@ impl Playback {
         }
 
         let mut status = PumpStatus::Playing;
-        match self.fill(&mut status) {
+        let filled = self.fill(&mut status);
+        // What was just measured is the end of what the sink holds (samples still pending
+        // were not measured yet): it is heard once the sink has played the rest.
+        let spec = self.sink.spec();
+        let in_sink = self.sink.queued() as f64 / spec.channels.max(1) as f64;
+        let heard_at =
+            Instant::now() + Duration::from_secs_f64(in_sink / spec.sample_rate.max(1) as f64);
+        self.heard.record(heard_at, self.meter.level());
+        match filled {
             Ok(status) => Ok(status),
             Err(err) if status == PumpStatus::Advanced => {
                 // Report the hand-over now and the new source's error on the next pump.
@@ -357,7 +424,9 @@ impl Playback {
         let wait_until = Instant::now() + self.starve_wait;
         loop {
             if self.pending_offset < self.pending.len() {
-                self.pending_offset += self.sink.push(&self.pending[self.pending_offset..]);
+                let from = self.pending_offset;
+                self.pending_offset += self.sink.push(&self.pending[from..]);
+                self.meter.push(&self.pending[from..self.pending_offset]);
                 if self.pending_offset < self.pending.len() {
                     return Ok(*status);
                 }
@@ -436,6 +505,9 @@ impl Playback {
         self.output_error = None;
         self.sink = sink;
         self.events = self.sink.errors();
+        let spec = self.sink.spec();
+        self.meter = LevelMeter::new(spec.sample_rate, spec.channels);
+        self.heard.clear();
         self.sink.set_volume(self.volume);
         self.sink.set_paused(self.paused);
     }
@@ -473,6 +545,8 @@ impl Playback {
             resampler.reset();
         }
         self.sink.clear();
+        self.meter.reset();
+        self.heard.clear();
     }
 }
 
@@ -1145,6 +1219,49 @@ mod tests {
             played == expected,
             "a's tail on the new device, then all of b"
         );
+    }
+
+    /// Endless constant samples.
+    struct Constant(f32);
+
+    impl AudioSource for Constant {
+        fn spec(&self) -> StreamSpec {
+            STEREO_44K
+        }
+        fn read(&mut self, out: &mut Vec<f32>) -> anyhow::Result<usize> {
+            out.extend(std::iter::repeat_n(self.0, 1024 * 2));
+            Ok(1024)
+        }
+        fn seek(&mut self, _ms: u64) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn duration_ms(&self) -> Option<u64> {
+            None
+        }
+    }
+
+    #[test]
+    fn level_follows_what_is_heard() {
+        // A 100 ms sink that is never played: what it holds is still ahead of the listener.
+        let factory = FakeFactory::new(STEREO_44K, 8_820);
+        let mut playback = Playback::new(factory.clone(), None).unwrap();
+        playback.set_source(Box::new(Constant(0.5))).unwrap();
+        pump_settled(&mut playback).unwrap();
+        assert_eq!(playback.level(), 0.0, "nothing heard yet");
+
+        std::thread::sleep(Duration::from_millis(130));
+        let expected = (20.0 * 0.5_f32.log10() + 50.0) / 50.0;
+        assert!(
+            (playback.level() - expected).abs() <= 0.02,
+            "{} once the sink has played it",
+            playback.level()
+        );
+
+        playback.set_paused(true);
+        assert_eq!(playback.level(), 0.0, "paused");
+        playback.set_paused(false);
+        playback.seek(0).unwrap();
+        assert_eq!(playback.level(), 0.0, "a seek starts over");
     }
 
     /// Manual check on real hardware: `cargo test -- --ignored smoke_plays`.

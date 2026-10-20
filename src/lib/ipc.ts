@@ -121,6 +121,9 @@ export const startupNotice = () => call<string | null>('startup_notice');
 
 export const onPlayerState = (cb: (state: PlayerState) => void): Promise<UnlistenFn> =>
   listen<PlayerState>('player://state', (event) => cb(event.payload));
+/** 0..1, the loudness of what plays, every 50 ms while playing. */
+export const onPlayerLevel = (cb: (level: number) => void): Promise<UnlistenFn> =>
+  listen<number>('player://level', (event) => cb(event.payload));
 export const onPlayerError = (cb: (error: PlayerError) => void): Promise<UnlistenFn> =>
   listen<PlayerError>('player://error', (event) => cb(event.payload));
 export const onLibraryChanged = (cb: () => void): Promise<UnlistenFn> => listen('library://changed', () => cb());

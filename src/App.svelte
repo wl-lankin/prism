@@ -26,6 +26,7 @@
   import { go, nav, overlays, type View } from './lib/stores/nav.svelte';
   import { notice, notify } from './lib/stores/notice.svelte';
   import { initPlayer, player } from './lib/stores/player.svelte';
+  import { initRing, ring } from './lib/stores/ring.svelte';
   import { initSettings } from './lib/stores/settings.svelte';
   import { initWindow, windowState } from './lib/stores/window.svelte';
   import shape from './lib/window-shape.json';
@@ -40,12 +41,12 @@
   const NOTICE_LIFT = TRANSPORT + 20;
 
   const maximized = $derived(windowState.maximized);
-  const ring = $derived(maximized ? MAIN.ringMaximized : MAIN.ring);
+  const ringSize = $derived(maximized ? MAIN.ringMaximized : MAIN.ring);
   const strip = $derived(maximized ? 0 : MAIN.strip);
   /** The ring dock's bottom, measured from the window's bottom edge. */
-  const dockBottom = $derived(maximized ? (TRANSPORT - ring) / 2 : MAIN.ringRoom);
+  const dockBottom = $derived(maximized ? (TRANSPORT - ringSize) / 2 : MAIN.ringRoom);
   /** The dock's top above the card's bottom edge, for the notice above it. */
-  const dockTop = $derived(maximized ? dockBottom + ring : ring / 2);
+  const dockTop = $derived(maximized ? dockBottom + ringSize : ringSize / 2);
   const isMac = typeof navigator !== 'undefined' && /Mac/.test(navigator.platform || navigator.userAgent);
 
   let glass = $state(false);
@@ -72,6 +73,8 @@
   });
 
   $effect(() => initLibrary());
+
+  $effect(() => initRing());
 
   $effect(() => {
     let stop: (() => void) | undefined;
@@ -211,10 +214,10 @@
   <!-- First in the DOM so the main control comes early in the tab order; placed by CSS. -->
   <div
     class="ring-dock"
-    style="--ring:{ring}px;--bezel:{MAIN.bezel}px;--dock-bottom:{dockBottom}px;--notice-lift:{NOTICE_LIFT - dockTop}px"
+    style="--ring:{ringSize}px;--bezel:{MAIN.bezel}px;--dock-bottom:{dockBottom}px;--notice-lift:{NOTICE_LIFT - dockTop}px"
   >
     <div class="notice" class:shown={notice.text} role="status" aria-live="polite">{notice.text ?? ''}</div>
-    <FlowRing {mode} {progress} size={ring} onactivate={activate} />
+    <FlowRing {mode} {progress} colors={ring.colors} level={ring.level} size={ringSize} onactivate={activate} />
   </div>
 
   <div class="card">
@@ -273,11 +276,11 @@
     </main>
 
     <div class="transport">
-      <TransportStrip ringGap={ring + 44} ringInside={maximized} />
+      <TransportStrip ringGap={ringSize + 44} ringInside={maximized} />
     </div>
 
     <!-- The strip below the card is click-through, so the card's bottom edge resizes. -->
-    <ResizeBand gap={ring + 2 * MAIN.bezel} />
+    <ResizeBand gap={ringSize + 2 * MAIN.bezel} />
 
     {#if dragging}
       <div class="drop" aria-hidden="true">

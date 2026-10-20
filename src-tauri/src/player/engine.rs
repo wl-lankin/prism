@@ -66,6 +66,9 @@ pub enum PlayerEvent {
     TrackChanged(Track),
     /// A track could not be opened or decoded; the player moves on.
     Error(PlayerError),
+    /// 0..=1, the loudness of what is handed to the output, every [`LEVEL_INTERVAL`] while
+    /// playing. Not part of [`PlayerState`]: it neither updates nor repeats the state.
+    Level(f32),
 }
 
 /// Looks a track id up (in the library DB).
@@ -105,6 +108,8 @@ pub const PRELOAD_MS: u64 = 5_000;
 pub const RESTART_AFTER_MS: u64 = 3_000;
 /// `player://state` is repeated this often while playing.
 const STATE_INTERVAL: Duration = Duration::from_millis(250);
+/// [`PlayerEvent::Level`] is sent this often while playing.
+pub const LEVEL_INTERVAL: Duration = Duration::from_millis(50);
 /// How long the engine waits for a command between pumps while audio is moving...
 const BUSY_TICK: Duration = Duration::from_millis(10);
 /// ...and while nothing needs pumping.
@@ -591,6 +596,8 @@ struct Engine {
     last_emit: Instant,
     /// The last `player://state` sent; an unchanged snapshot is not sent again.
     last_sent: Option<PlayerState>,
+    /// When the last [`PlayerEvent::Level`] went out.
+    last_level: Instant,
 }
 
 impl Engine {
@@ -637,6 +644,7 @@ impl Engine {
             dirty: true,
             last_emit: Instant::now(),
             last_sent: None,
+            last_level: Instant::now(),
         })
     }
 
@@ -659,6 +667,7 @@ impl Engine {
             }
             self.tick();
             self.publish();
+            self.send_level();
         }
         // Lets the decode threads drop their sources (killing FFmpeg children) before the
         // process may exit; a read stuck longer than this is left behind.
@@ -1178,6 +1187,16 @@ impl Engine {
         self.last_emit = Instant::now();
         self.last_sent = Some(state.clone());
         (self.sink)(PlayerEvent::State(state));
+    }
+
+    /// Every [`LEVEL_INTERVAL`] while playing: the loudness for the ring's glow. Kept apart
+    /// from [`publish`](Self::publish): it changes neither the state nor its dedupe.
+    fn send_level(&mut self) {
+        if self.status != PlayerStatus::Playing || self.last_level.elapsed() < LEVEL_INTERVAL {
+            return;
+        }
+        self.last_level = Instant::now();
+        (self.sink)(PlayerEvent::Level(self.playback.level()));
     }
 }
 
@@ -2428,5 +2447,57 @@ mod tests {
                     .any(|e| is_state(e, PlayerStatus::Idle))
         });
         assert_eq!(errors(&events), ids(&["missing"]));
+    }
+
+    fn levels(events: &[PlayerEvent]) -> Vec<f32> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                PlayerEvent::Level(level) => Some(*level),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn level_is_sent_every_50_ms_while_playing_without_extra_states() {
+        let opener: Opener = Arc::new(|_track: &Track, _spec: StreamSpec| {
+            Ok(Box::new(Tone::new(0.5, SILENCE_MS)) as Box<dyn AudioSource>)
+        });
+        let h = harness(long_tracks(&["a"]), 1.0, Some(opener));
+        h.player.play(ids(&["a"]), 0).unwrap();
+        wait_state(&h.player, |s| s.status == PlayerStatus::Playing);
+        std::thread::sleep(Duration::from_millis(200));
+        h.events.try_iter().for_each(drop);
+
+        std::thread::sleep(Duration::from_millis(1_000));
+        let second: Vec<PlayerEvent> = h.events.try_iter().collect();
+        let sent = levels(&second);
+        assert!(
+            (14..=22).contains(&sent.len()),
+            "{} levels in 1 s",
+            sent.len()
+        );
+        // A constant 0.5 (-6 dBFS) reads as 0.88.
+        let expected = (20.0 * 0.5_f32.log10() + 50.0) / 50.0;
+        assert!(
+            sent.iter().all(|level| (level - expected).abs() <= 0.02),
+            "{sent:?}"
+        );
+        let states = states(&second);
+        assert!(
+            (3..=5).contains(&states.len()),
+            "only the periodic states: {states:#?}"
+        );
+        assert_eq!(h.player.state().status, PlayerStatus::Playing);
+
+        // Paused: no more levels.
+        h.player.toggle().unwrap();
+        wait_state(&h.player, |s| s.status == PlayerStatus::Paused);
+        std::thread::sleep(Duration::from_millis(60));
+        h.events.try_iter().for_each(drop);
+        std::thread::sleep(Duration::from_millis(300));
+        let paused: Vec<PlayerEvent> = h.events.try_iter().collect();
+        assert!(levels(&paused).is_empty(), "{paused:#?}");
     }
 }
