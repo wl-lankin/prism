@@ -9,8 +9,8 @@
   <svg viewBox="80 210 880 600" width={width} height={(width * 600) / 880}>
     <defs>
       <linearGradient id="prism-glass" x1="0" y1="0" x2="0" y2="1">
-        <stop offset="0" stop-color="#ffffff" stop-opacity="0.12" />
-        <stop offset="1" stop-color="#ffffff" stop-opacity="0.02" />
+        <stop offset="0" stop-color="#ffffff" stop-opacity="0.2" />
+        <stop offset="1" stop-color="#ffffff" stop-opacity="0.05" />
       </linearGradient>
       <linearGradient id="prism-beam" x1="0" y1="0" x2="1" y2="0">
         <stop offset="0" stop-color="#f3f3f5" stop-opacity="0" />
@@ -25,7 +25,9 @@
       <path d="M668 654 Q 790 680 900 760" stroke="#4da6ff" stroke-width="30" />
       <!-- White light in from the left. -->
       <path d="M96 556 L 300 540" stroke="url(#prism-beam)" stroke-width="30" />
-      <!-- The glass. -->
+      <!-- The glass: a solid body (so the glow does not show through unevenly) with a sheen,
+           both filling the triangle right up to its white edge. -->
+      <path d="M450 256 L739 756 L161 756 Z" fill="#1d1d24" />
       <path d="M450 256 L739 756 L161 756 Z" fill="url(#prism-glass)" stroke="#f3f3f5" stroke-width="34" />
     </g>
   </svg>
