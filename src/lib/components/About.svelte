@@ -1,5 +1,5 @@
 <script lang="ts" module>
-  export const HOMEPAGE = 'https://wolfgang-linz.de';
+  export const HOMEPAGE = 'https://wolfgang-linz.de/';
   export const REPOSITORY = 'https://github.com/wl-lankin/prism';
 
   /** The main open-source parts of Prism. A static list for now; release builds generate
@@ -38,7 +38,13 @@
       .then((v) => (version = v))
       .catch(() => {});
     void tick().then(() => dialog?.querySelector<HTMLElement>('.close')?.focus());
-    return () => before?.focus?.();
+    // Capture phase on the window: the dialog sees every key first, and nothing behind it
+    // (Ctrl+K search, other window shortcuts) does while it is open.
+    window.addEventListener('keydown', onkeydown, true);
+    return () => {
+      window.removeEventListener('keydown', onkeydown, true);
+      before?.focus?.();
+    };
   });
 
   function focusables(): HTMLElement[] {
@@ -46,9 +52,9 @@
   }
 
   function onkeydown(event: KeyboardEvent) {
+    event.stopPropagation();
     if (event.key === 'Escape') {
       event.preventDefault();
-      event.stopPropagation();
       onclose();
       return;
     }
@@ -77,8 +83,6 @@
   // dragged out) does not.
   let pressedBackdrop = false;
 </script>
-
-<svelte:window {onkeydown} />
 
 <div
   class="backdrop"

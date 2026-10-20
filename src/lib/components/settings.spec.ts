@@ -31,7 +31,8 @@ const { default: Select } = await import('./Select.svelte');
 const { default: About } = await import('./About.svelte');
 const { default: Settings } = await import('./Settings.svelte');
 const { setLang } = await import('../i18n');
-const { settings } = await import('../stores/settings.svelte');
+const { settings, updateSettings, saveVolume, flushVolume } = await import('../stores/settings.svelte');
+const { placeList } = await import('./Select.svelte');
 
 let target: HTMLElement;
 const mounted: ReturnType<typeof mount>[] = [];
@@ -140,6 +141,12 @@ it('shows the About dialog with the version, links that open in the browser and 
   const author = [...dialog.querySelectorAll('a')].find((a) => a.textContent === 'Wolfgang Linz')!;
   author.click();
   expect(openUrl).toHaveBeenCalledWith('https://wolfgang-linz.de/');
+  // Shortcuts behind the dialog (Ctrl+K search) do not see keys while it is open.
+  const behind = vi.fn();
+  window.addEventListener('keydown', behind);
+  key(document.body, 'k', { ctrlKey: true });
+  window.removeEventListener('keydown', behind);
+  expect(behind).not.toHaveBeenCalled();
   const github = dialog.querySelector<HTMLAnchorElement>('a.github')!;
   github.click();
   expect(openUrl).toHaveBeenLastCalledWith('https://github.com/wl-lankin/prism');
@@ -221,4 +228,61 @@ it('offers the system default and every device, and moves to the chosen one', as
   await vi.waitFor(() =>
     expect(invoke).toHaveBeenCalledWith('settings_set', { patch: { outputDevice: 'USB DAC' } }),
   );
+});
+
+it('places the list inside the clipping scroller, flipping up when below is short', () => {
+  const clip = { top: 60, bottom: 700 };
+  expect(placeList({ top: 100, bottom: 136 }, clip, 212)).toEqual({ upward: false, room: 300 });
+  // Near the scroller's bottom edge (the transport strip below it): up, with all the room.
+  expect(placeList({ top: 600, bottom: 636 }, clip, 212)).toEqual({ upward: true, room: 300 });
+  // Little room either way: the side with more, capped to it.
+  const tight = placeList({ top: 160, bottom: 196 }, { top: 60, bottom: 330 }, 212);
+  expect(tight).toEqual({ upward: false, room: 330 - 196 - 6 - 8 });
+});
+
+it('keeps a change made while another one is saving', async () => {
+  let release: (value: unknown) => void = () => {};
+  invoke.mockImplementationOnce(
+    (_cmd: string, args?: Record<string, unknown>) =>
+      new Promise((resolve) => {
+        // The answer reflects the file as it was then: gapless still on.
+        const snapshot = { ...stored, ...((args as { patch: object }).patch ?? {}), gapless: true };
+        release = () => resolve(snapshot);
+      }),
+  );
+  const slow = updateSettings({ replayGain: 'track' });
+  await updateSettings({ gapless: false });
+  expect(settings.gapless).toBe(false);
+  release(undefined);
+  await slow;
+  expect(settings.replayGain).toBe('track');
+  expect(settings.gapless).toBe(false);
+});
+
+it('reverts only the failed keys', async () => {
+  await updateSettings({ gapless: true, replayGain: 'album' });
+  invoke.mockImplementationOnce(async () => {
+    throw new Error('disk full');
+  });
+  const failing = updateSettings({ gapless: false });
+  expect(settings.gapless).toBe(false);
+  await expect(failing).rejects.toThrow('disk full');
+  expect(settings.gapless).toBe(true);
+  expect(settings.replayGain).toBe('album');
+});
+
+it('debounces the volume save and flushes it on demand', async () => {
+  vi.useFakeTimers();
+  try {
+    saveVolume(0.2);
+    saveVolume(0.3);
+    expect(invoke).not.toHaveBeenCalledWith('settings_set', expect.anything());
+    await flushVolume();
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(invoke).toHaveBeenCalledWith('settings_set', { patch: { volume: 0.3 } });
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(invoke).toHaveBeenCalledTimes(1);
+  } finally {
+    vi.useRealTimers();
+  }
 });

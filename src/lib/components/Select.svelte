@@ -7,6 +7,37 @@
   }
 
   let ids = 0;
+
+  /** Tallest the list gets before it scrolls. */
+  const MAX_LIST = 300;
+  const GAP = 6;
+  const MARGIN = 8;
+
+  /** The box the list must stay inside: the nearest ancestor that clips (a scroller), or
+   *  the window. */
+  export function clipBox(element: Element): { top: number; bottom: number } {
+    for (let node = element.parentElement; node; node = node.parentElement) {
+      const overflow = getComputedStyle(node).overflowY;
+      if (overflow === 'auto' || overflow === 'scroll' || overflow === 'hidden' || overflow === 'clip') {
+        const rect = node.getBoundingClientRect();
+        return { top: rect.top, bottom: rect.bottom };
+      }
+    }
+    return { top: 0, bottom: window.innerHeight };
+  }
+
+  /** Where the list goes: below when it fits there, otherwise on the side with more room,
+   *  capped to that room. */
+  export function placeList(
+    trigger: { top: number; bottom: number },
+    clip: { top: number; bottom: number },
+    needed: number,
+  ): { upward: boolean; room: number } {
+    const below = clip.bottom - trigger.bottom - GAP - MARGIN;
+    const above = trigger.top - clip.top - GAP - MARGIN;
+    const upward = needed > below && above > below;
+    return { upward, room: Math.max(80, Math.min(MAX_LIST, upward ? above : below)) };
+  }
 </script>
 
 <script lang="ts">
@@ -36,6 +67,8 @@
   let open = $state(false);
   let active = $state(0);
   let upward = $state(false);
+  /** Room for the list inside the area that clips it, in px. */
+  let room = $state(MAX_LIST);
   let button: HTMLButtonElement | undefined = $state();
   let list: HTMLUListElement | undefined = $state();
 
@@ -45,10 +78,12 @@
   async function show() {
     if (disabled || open || options.length === 0) return;
     active = selectedIndex;
-    // Open upwards when the list would run past the bottom of the window.
-    const rect = button?.getBoundingClientRect();
-    const needed = Math.min(options.length * 40 + 12, 300);
-    upward = !!rect && rect.bottom + needed > window.innerHeight - 16 && rect.top > needed;
+    // Stay inside whatever clips the list (the settings scroller), flipping up if needed.
+    if (button) {
+      const placed = placeList(button.getBoundingClientRect(), clipBox(button), Math.min(options.length * 40 + 12, MAX_LIST));
+      upward = placed.upward;
+      room = placed.room;
+    }
     open = true;
     await tick();
     list?.querySelector(`#${id}-${active}`)?.scrollIntoView?.({ block: 'nearest' });
@@ -173,6 +208,7 @@
       id={`${id}-list`}
       class="list"
       class:upward
+      style="max-height:{room}px"
       role="listbox"
       aria-label={label}
       tabindex="-1"
@@ -275,7 +311,7 @@
     top: calc(100% + 6px);
     left: 0;
     right: 0;
-    max-height: 300px;
+    box-sizing: border-box;
     overflow-y: auto;
     margin: 0;
     padding: 5px;

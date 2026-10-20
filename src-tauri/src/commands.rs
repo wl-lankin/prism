@@ -14,7 +14,7 @@ use crate::library::scan::{lock, ScanReport};
 use crate::library::watch::{FolderWatcher, WatchState};
 use crate::library::{normalize, tauri_emitter, Library};
 use crate::player::PlayerState;
-use crate::settings::Settings;
+use crate::settings::{Change, Settings};
 use crate::AppState;
 
 /// Upper bound for `library_search` and `library_tracks_range` page sizes.
@@ -214,25 +214,27 @@ pub fn settings_get(state: State<'_, AppState>) -> Result<Settings, String> {
 }
 
 /// Merges `patch` into the settings, saves them and applies what changed to the player.
+/// The player commands are sent while the settings are locked, so concurrent calls (a
+/// debounced volume save during a device pick) reach the player once each and in order.
 #[tauri::command]
 pub async fn settings_set(app: AppHandle, patch: serde_json::Value) -> Result<Settings, String> {
-    let store = Arc::clone(&app.state::<AppState>().settings);
-    let before = store.get();
-    let after = blocking(move || store.set(patch)).await?;
-    let player = &app.state::<AppState>().player;
-    if after.volume != before.volume {
-        player.set_volume(after.volume)?;
-    }
-    if after.output_device != before.output_device {
-        player.set_device(after.output_device.clone())?;
-    }
-    if after.gapless != before.gapless {
-        player.set_gapless(after.gapless)?;
-    }
-    if after.replay_gain != before.replay_gain {
-        player.set_replay_gain(after.replay_gain)?;
-    }
-    Ok(after)
+    blocking(move || {
+        let state = app.state::<AppState>();
+        state.settings.update(patch, |changes| {
+            for change in changes {
+                let sent = match change {
+                    Change::Volume(volume) => state.player.set_volume(*volume),
+                    Change::OutputDevice(device) => state.player.set_device(device.clone()),
+                    Change::Gapless(gapless) => state.player.set_gapless(*gapless),
+                    Change::ReplayGain(mode) => state.player.set_replay_gain(*mode),
+                };
+                if let Err(err) = sent {
+                    eprintln!("applying a setting failed: {err}");
+                }
+            }
+        })
+    })
+    .await
 }
 
 /// Names of the output devices, as `outputDevice` takes them.

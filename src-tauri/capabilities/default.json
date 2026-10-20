@@ -7,6 +7,7 @@
     "core:window:allow-minimize",
     "core:window:allow-toggle-maximize",
     "core:window:allow-close",
+    "core:window:allow-destroy",
     "core:window:allow-start-dragging",
     "core:window:allow-set-title",
     "core:window:allow-is-maximized",
@@ -15,7 +16,7 @@
     "dialog:allow-open",
     {
       "identifier": "opener:allow-open-url",
-      "allow": [{ "url": "https://*" }]
+      "allow": [{ "url": "https://wolfgang-linz.de/*" }, { "url": "https://github.com/wl-lankin/prism*" }]
     },
     "opener:allow-reveal-item-in-dir"
   ]
