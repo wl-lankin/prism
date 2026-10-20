@@ -153,6 +153,10 @@ something he enjoys looking at.
 ### 5.6 YouTube Music
 - YouTube Music has no official playback API. Prism embeds music.youtube.com in an in-app
   web view. The user signs in there themselves; Prism never sees or stores the password.
+- No extra window (owner decision, 2026-10-20): the YouTube Music view lives inside the main
+  window's content area (a child web view), shown when "YouTube Music" is selected in the
+  sidebar and hidden, not destroyed, when the user navigates away, so playback continues and
+  Prism's controls keep driving it.
 - Sign-in fallback (owner decision): if Google refuses sign-in inside the embedded view
   ("This browser or app may not be secure"), Prism opens sign-in in a separate pop-up
   window that shares the same session store, then returns to the embedded view signed in.
