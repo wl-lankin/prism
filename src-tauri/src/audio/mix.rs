@@ -33,7 +33,7 @@ pub fn equal_power(t: f32) -> (f32, f32) {
     (angle.cos(), angle.sin())
 }
 
-/// RMS (linear) to 0..1:`clamp((20*log10(rms) + 50) / 50, 0, 1)`.
+/// RMS (linear) to 0..1: `clamp((20*log10(rms) + 50) / 50, 0, 1)`.
 pub fn level_of_rms(rms: f32) -> f32 {
     if rms <= 0.0 || !rms.is_finite() {
         return 0.0;

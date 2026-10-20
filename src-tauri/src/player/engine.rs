@@ -128,12 +128,7 @@ pub fn crossfade_for(
         Crossfade::Flow if in_flow => ms,
         Crossfade::Flow => 0,
         Crossfade::Always => {
-            let album_goes_on = current.album_id == next.album_id
-                && matches!(
-                    (current.track_no.and_then(|no| no.checked_add(1)), next.track_no),
-                    (Some(following), Some(no)) if following == no
-                );
-            if album_goes_on {
+            if album_goes_on(current, next) {
                 0
             } else {
                 ms
@@ -141,6 +136,21 @@ pub fn crossfade_for(
         }
     }
 }
+
+/// `next` is where the album goes on after `current`: the same (known) album, and the
+/// following track of the same disc or the first track of the next disc.
+fn album_goes_on(current: &Track, next: &Track) -> bool {
+    if current.album_id.is_empty() || current.album_id != next.album_id {
+        return false;
+    }
+    let following = current.track_no.and_then(|no| no.checked_add(1));
+    let same_disc = next.disc_no == current.disc_no;
+    let next_disc = current.disc_no.and_then(|disc| disc.checked_add(1)) == next.disc_no
+        && next.disc_no.is_some();
+    (same_disc && following.is_some() && next.track_no == following)
+        || (next_disc && next.track_no == Some(1))
+}
+
 /// The next track is opened this long before the current one ends, for gapless playback.
 pub const PRELOAD_MS: u64 = 5_000;
 /// `prev` restarts the current track once it has played longer than this.
@@ -611,6 +621,9 @@ enum Preload {
     Ready(Box<Track>),
     /// (index, track id, message): reported when the queue reaches it.
     Failed(usize, String, String),
+    /// Opened for a crossfade that does not apply (gapless off): dropped, and the track
+    /// opens after the current one ends.
+    Skipped,
 }
 
 /// What the engine publishes for [`PlayerHandle`] readers.
@@ -739,10 +752,30 @@ impl Engine {
             READ_AHEAD_MS
         };
         self.playback.set_read_ahead_ms(target);
-        if let (Some(current), Preload::Ready(next)) = (&self.current, &self.preload) {
-            let ms = self.crossfade_to(current, next);
-            self.playback.set_next_crossfade(ms);
+        if !self.gapless && fade_ms == 0 {
+            // Without gapless and without a fade, nothing is opened early.
+            if !matches!(self.preload, Preload::None) {
+                self.preload = Preload::None;
+                self.playback.queue_next(None);
+            }
+            return;
         }
+        let queued = match (&self.current, &self.preload) {
+            (Some(current), Preload::Ready(next)) => Some(self.crossfade_to(current, next)),
+            _ => None,
+        };
+        match queued {
+            Some(0) if !self.gapless => self.skip_preloaded(),
+            Some(ms) => self.playback.set_next_crossfade(ms),
+            None => {}
+        }
+    }
+
+    /// Gapless is off and the next track does not fade in: it is not queued, so it opens
+    /// once the current one has ended (a real gap), and it is not requested again.
+    fn skip_preloaded(&mut self) {
+        self.playback.queue_next(None);
+        self.preload = Preload::Skipped;
     }
 
     /// How long `next` blends into `current`.
@@ -845,10 +878,10 @@ impl Engine {
             }
             Command::SetGapless(gapless) => {
                 self.gapless = gapless;
+                // A crossfade still needs the track opened early; without one, a track
+                // opened early is dropped and opens again once this one ends.
                 if !gapless {
-                    // A track opened early is dropped; it opens again once this one ends.
-                    self.preload = Preload::None;
-                    self.playback.queue_next(None);
+                    self.crossfade_changed();
                 }
             }
             Command::UpdateTrack(track) => {
@@ -1086,6 +1119,11 @@ impl Engine {
                             .current
                             .as_ref()
                             .map_or(0, |current| self.crossfade_to(current, &track));
+                        if crossfade_ms == 0 && !self.gapless {
+                            // Opened only for a fade that does not apply to this change.
+                            self.skip_preloaded();
+                            return;
+                        }
                         self.playback.queue_next_with(
                             Some(source),
                             NextOptions {
@@ -1165,10 +1203,15 @@ impl Engine {
     }
 
     /// Opens the next track once the current one is within [`PRELOAD_MS`] of its end (with a
-    /// crossfade, `max(PRELOAD_MS, crossfade + 3 s)`), or once it has been decoded to its end. The second rule needs no duration, so tracks
-    /// whose length the library does not know (often FFmpeg-decoded ones) are gapless too.
+    /// crossfade, `max(PRELOAD_MS, crossfade + 3 s)`), or once it has been decoded to its
+    /// end. The second rule needs no duration, so tracks whose length the library does not
+    /// know (often FFmpeg-decoded ones) are gapless too. With gapless off, only a crossfade
+    /// opens the next track early.
     fn maybe_preload(&mut self) {
-        if !self.gapless || !matches!(self.preload, Preload::None) || !self.seekable() {
+        if (!self.gapless && self.fade_ms() == 0)
+            || !matches!(self.preload, Preload::None)
+            || !self.seekable()
+        {
             return;
         }
         let Some(track) = &self.current else {
@@ -2659,12 +2702,23 @@ mod tests {
 
     #[test]
     fn crossfade_for_rules() {
-        let one = album_track("1", "x", 1);
-        let two = album_track("2", "x", 2);
-        let three = album_track("3", "x", 3);
         let other = album_track("o", "y", 2);
-        let mut untracked = album_track("u", "x", 2);
+        let on_disc = |id: &str, disc: u32, no: u32| {
+            let mut track = album_track(id, "x", no);
+            track.disc_no = Some(disc);
+            track
+        };
+        let one = on_disc("1", 1, 1);
+        let two = on_disc("2", 1, 2);
+        let three = on_disc("3", 1, 3);
+        let mut untracked = on_disc("u", 1, 2);
         untracked.track_no = None;
+        let last_of_disc_1 = on_disc("d1", 1, 12);
+        let first_of_disc_2 = on_disc("d2", 2, 1);
+        let first_of_disc_3 = on_disc("d3", 3, 1);
+        let two_on_disc_2 = on_disc("2b", 2, 2);
+        let no_album_1 = album_track("n1", "", 1);
+        let no_album_2 = album_track("n2", "", 2);
         let cases = [
             // (mode, in Flow, current, next, expected)
             (Crossfade::Off, false, &one, &other, 0),
@@ -2681,6 +2735,24 @@ mod tests {
             (Crossfade::Always, false, &one, &three, 4_000),
             (Crossfade::Always, false, &two, &one, 4_000),
             (Crossfade::Always, false, &one, &untracked, 4_000),
+            // Discs: track 1 of the next disc goes on; the same number on another disc not.
+            (
+                Crossfade::Always,
+                false,
+                &last_of_disc_1,
+                &first_of_disc_2,
+                0,
+            ),
+            (Crossfade::Always, false, &one, &two_on_disc_2, 4_000),
+            (
+                Crossfade::Always,
+                false,
+                &last_of_disc_1,
+                &first_of_disc_3,
+                4_000,
+            ),
+            // An unknown album is never one album.
+            (Crossfade::Always, false, &no_album_1, &no_album_2, 4_000),
         ];
         for (mode, in_flow, current, next, expected) in cases {
             assert_eq!(
@@ -2715,19 +2787,68 @@ mod tests {
 
     #[test]
     fn crossfade_blends_the_next_track_in() {
+        assert_blends(crossfade_always(1_000));
+    }
+
+    #[test]
+    fn crossfade_blends_with_gapless_off() {
+        assert_blends(PlayerOptions {
+            gapless: false,
+            ..crossfade_always(1_000)
+        });
+    }
+
+    /// Plays 2 s tones "a" (album x, track 1) then "c" (album `c_album`, track 2) with
+    /// `options` at 5x; returns the events and what was played.
+    fn play_two_tones(options: PlayerOptions, c_album: &str) -> (Vec<PlayerEvent>, Vec<f32>) {
         let mut a = album_track("a", "x", 1);
         a.duration_ms = 2_000;
-        let mut c = album_track("c", "y", 1);
+        let mut c = album_track("c", c_album, 2);
         c.duration_ms = 2_000;
         let tracks = [a, c];
         let resolver: Resolver =
             Arc::new(move |id: &str| tracks.iter().find(|track| track.id == id).cloned());
         let opener = tone_opener(vec![("a", TONE_A, 2_000), ("c", TONE_C, 2_000)]);
-        let h = harness_full(resolver, 5.0, Some(opener), crossfade_always(1_000));
+        let h = harness_full(resolver, 5.0, Some(opener), options);
         h.player.play(ids(&["a", "c"]), 0).unwrap();
         let events = collect_until(&h.events, Duration::from_secs(10), back_to_idle);
-        assert_eq!(changes(&events), ids(&["a", "c"]));
         let played = h.played.lock().unwrap().clone();
+        (events, played)
+    }
+
+    #[test]
+    fn same_album_with_gapless_off_keeps_the_gap() {
+        let (events, played) = play_two_tones(
+            PlayerOptions {
+                gapless: false,
+                ..crossfade_always(1_000)
+            },
+            "x",
+        );
+        assert_eq!(changes(&events), ids(&["a", "c"]));
+        let first = events
+            .iter()
+            .position(|e| matches!(e, PlayerEvent::TrackChanged(_)))
+            .unwrap();
+        assert!(
+            events[first..]
+                .iter()
+                .any(|e| is_state(e, PlayerStatus::Loading)),
+            "c was loaded after a ended: {events:#?}"
+        );
+        assert_eq!(
+            played.len(),
+            2 * 2 * 88_200,
+            "both tones whole, nothing blended"
+        );
+        assert!(played
+            .iter()
+            .all(|s| (*s - TONE_A).abs() < 1e-6 || (*s - TONE_C).abs() < 1e-6));
+    }
+
+    fn assert_blends(options: PlayerOptions) {
+        let (events, played) = play_two_tones(options, "y");
+        assert_eq!(changes(&events), ids(&["a", "c"]));
         let frames = played.len() / 2;
         assert!(
             frames.abs_diff(3 * 44_100) <= 4_096,
