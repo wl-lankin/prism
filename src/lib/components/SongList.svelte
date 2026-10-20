@@ -11,7 +11,9 @@
   import type { Track } from '../types';
   import { evictPages, pagesFor } from '../pages';
   import { visibleRange } from '../virtual';
+  import { menuPoint } from '../menu';
   import Cover from './Cover.svelte';
+  import TrackMenu, { type TrackMenuState } from './TrackMenu.svelte';
   import Heart from './Heart.svelte';
   import NowPlayingBars from './NowPlayingBars.svelte';
   import ViewHead from './ViewHead.svelte';
@@ -33,6 +35,19 @@
   const pending = new Set<string>();
   /** Bumped when a page arrives, so the rows re-read the cache. */
   let loaded = $state(0);
+  /** Bumped a moment after a page failed: the pages in view are asked for again, so a failed
+   *  page comes back without the list having to scroll first. A page is tried at most
+   *  `MAX_ATTEMPTS` times; when the range changes, its count starts over. */
+  let retry = $state(0);
+  const RETRY_MS = 1500;
+  const MAX_ATTEMPTS = 3;
+  let retryTimer: ReturnType<typeof setTimeout> | undefined;
+  $effect(() => () => clearTimeout(retryTimer));
+  /** Failed attempts per `${version}:${page}`, for the range they were made in. */
+  const failures = new Map<string, number>();
+  let failuresRange = '';
+
+  let menu = $state<TrackMenuState | null>(null);
 
   let scroller = $state<HTMLDivElement>();
   let listTop = $state(0);
@@ -47,10 +62,16 @@
    *  so a fast scroll does not ask for every page it crosses. */
   function ensure() {
     const version = library.version;
+    const now = `${version}:${range.start}:${range.end}`;
+    if (now !== failuresRange) {
+      failuresRange = now;
+      failures.clear();
+    }
     const needed = pagesFor(range.start, range.end, PAGE);
     for (const page of needed) {
       const key = `${version}:${page}`;
       if (pages.get(page)?.version === version || pending.has(key)) continue;
+      if ((failures.get(key) ?? 0) >= MAX_ATTEMPTS) continue;
       pending.add(key);
       libraryTracksRange(page * PAGE, PAGE)
         .then((tracks) => {
@@ -60,12 +81,21 @@
           for (const old of evictPages(pages.keys(), visible, MAX_PAGES)) pages.delete(old);
           loaded++;
         })
-        .catch((err) => console.error('loading songs failed', err))
+        .catch((err) => {
+          console.error('loading songs failed', err);
+          const attempts = (failures.get(key) ?? 0) + 1;
+          failures.set(key, attempts);
+          if (attempts < MAX_ATTEMPTS) {
+            clearTimeout(retryTimer);
+            retryTimer = setTimeout(() => retry++, RETRY_MS);
+          }
+        })
         .finally(() => pending.delete(key));
     }
   }
 
   $effect(() => {
+    void retry;
     void library.version;
     void range.start;
     void range.end;
@@ -118,6 +148,23 @@
     return row ? Number(row.dataset.index) : null;
   }
 
+  function trackAt(i: number): Track | undefined {
+    const page = pages.get(Math.floor(i / PAGE));
+    return page?.version === library.version ? page.tracks[i % PAGE] : undefined;
+  }
+
+  /** Right-click (or the context menu key) on a row: select it and open the track menu. */
+  function oncontextmenu(event: MouseEvent) {
+    const row = (event.target as HTMLElement).closest<HTMLElement>('[data-index]');
+    const i = row ? Number(row.dataset.index) : selected;
+    const track = i >= 0 ? trackAt(i) : undefined;
+    if (!track) return;
+    event.preventDefault();
+    selected = i;
+    const at = menuPoint(event, document.getElementById(`song-${i}`));
+    menu = { trackIds: [track.id], ...at, albumId: track.albumId, artist: track.albumArtist || track.artist };
+  }
+
   function onkeydown(event: KeyboardEvent) {
     if (total === 0) return;
     const page = Math.max(1, Math.floor(viewport / ROW) - 1);
@@ -137,8 +184,7 @@
       event.preventDefault();
       void playSongsFrom(selected);
     } else if (isFavoriteKey(event) && selected >= 0) {
-      const page = pages.get(Math.floor(selected / PAGE));
-      const track = page?.version === library.version ? page.tracks[selected % PAGE] : undefined;
+      const track = trackAt(selected);
       if (!track) return;
       event.preventDefault();
       void toggleFavorite('track', track.id);
@@ -168,6 +214,7 @@
     aria-activedescendant={activeId}
     style="height:{total * ROW}px"
     {onkeydown}
+    {oncontextmenu}
     onclick={(event) => {
       const i = rowIndex(event);
       if (i !== null) selected = i;
@@ -224,6 +271,10 @@
     </div>
   </div>
 </div>
+
+{#if menu}
+  <TrackMenu {...menu} onclose={() => (menu = null)} />
+{/if}
 
 <style>
   .scroll {

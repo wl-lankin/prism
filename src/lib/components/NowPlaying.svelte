@@ -9,6 +9,7 @@
   import { player } from '../stores/player.svelte';
   import type { FlowVariant, QueueItem, Track } from '../types';
   import { visibleRange } from '../virtual';
+  import Backdrop from './Backdrop.svelte';
   import Cover from './Cover.svelte';
   import Heart from './Heart.svelte';
   import Icon from './Icon.svelte';
@@ -29,8 +30,6 @@
   /** Dropped files ("file:" ids) are not in the library: no album, no artist page, no heart. */
   const inLibrary = $derived(!!track && !track.id.startsWith('file:'));
   const backdrop = $derived(coverUrl(track?.coverId ?? null, 96));
-  const BACKDROP_PX = 64;
-  let backdropWidth = $state(1000);
 
   const flow = $derived((player.flow ?? null) as FlowVariant | null);
   const heading = $derived(flow ? t('nowPlaying.flow', { variant: variantName(flow) }) : t('nowPlaying.queue'));
@@ -214,11 +213,7 @@
 
 <div class="np">
   {#if backdrop}
-    <div class="backdrop" aria-hidden="true" bind:clientWidth={backdropWidth}>
-      {#key backdrop}
-        <img src={backdrop} alt="" draggable="false" style="--k:{(backdropWidth * 1.15) / BACKDROP_PX}" />
-      {/key}
-    </div>
+    <Backdrop src={backdrop} spread={1.15} />
   {/if}
 
   {#if idle || !track}
@@ -366,35 +361,6 @@
     column-gap: clamp(28px, 3.4vw, 52px);
     padding: 4px 32px 28px;
     overflow: hidden;
-  }
-
-  /* The cover, tiny and blurred far past recognition, tints the whole view. */
-  .backdrop {
-    position: absolute;
-    inset: 0;
-    overflow: hidden;
-    pointer-events: none;
-    mask-image: linear-gradient(
-      to bottom,
-      rgba(0, 0, 0, 0.3) 0,
-      #000 90px,
-      rgba(0, 0, 0, 0.6) 62%,
-      rgba(0, 0, 0, 0.18) 100%
-    );
-  }
-
-  .backdrop img {
-    position: absolute;
-    left: 50%;
-    top: 40%;
-    width: 64px;
-    height: 40px;
-    margin: -20px 0 0 -32px;
-    object-fit: cover;
-    transform: scale(var(--k, 20));
-    filter: blur(4px) saturate(1.4);
-    opacity: 0.5;
-    animation: fade var(--dur-l) ease-out;
   }
 
   .stage,
@@ -738,12 +704,6 @@
   @container (max-width: 760px) {
     .art {
       width: min(600px, calc(100cqh - 32px), 40cqw);
-    }
-  }
-
-  @keyframes fade {
-    from {
-      opacity: 0;
     }
   }
 </style>

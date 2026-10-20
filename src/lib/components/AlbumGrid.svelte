@@ -1,7 +1,9 @@
 <script lang="ts">
   import { untrack, type Snippet } from 'svelte';
   import { t } from '../i18n';
+  import { libraryAlbumTracks } from '../ipc';
   import { playAlbum } from '../play';
+  import { notify } from '../stores/notice.svelte';
   import { saveScroll, savedScroll } from '../scroll';
   import { go } from '../stores/nav.svelte';
   import { player } from '../stores/player.svelte';
@@ -10,6 +12,7 @@
   import Cover from './Cover.svelte';
   import Icon from './Icon.svelte';
   import NowPlayingBars from './NowPlayingBars.svelte';
+  import TrackMenu, { type TrackMenuState } from './TrackMenu.svelte';
 
   /** A card grid of albums, virtualized by rows: only the rows near the viewport exist. */
   let {
@@ -86,6 +89,30 @@
     scrollTop = scroller.scrollTop;
     saveScroll(scrollKey, scrollTop);
   }
+
+  let menu = $state<TrackMenuState | null>(null);
+  /** Counts menu requests, so a slow track lookup never opens a menu a later one replaced. */
+  let menuSeq = 0;
+
+  /** Right-click (or the context menu key) on a card: "Add album to playlist" and the artist. */
+  async function openMenu(event: MouseEvent, album: Album) {
+    event.preventDefault();
+    const seq = ++menuSeq;
+    let x = event.clientX;
+    let y = event.clientY;
+    if (x === 0 && y === 0) {
+      const box = (event.currentTarget as HTMLElement).getBoundingClientRect();
+      x = box.left + 24;
+      y = box.top + 24;
+    }
+    try {
+      const trackIds = (await libraryAlbumTracks(album.id)).map((track) => track.id);
+      if (seq !== menuSeq) return;
+      menu = { trackIds, x, y, album: true, artist: album.artist || undefined };
+    } catch (err) {
+      notify(t('flow.failed', { message: String(err) }));
+    }
+  }
 </script>
 
 <div class="scroll" bind:this={scroller} bind:clientHeight={viewport} {onscroll}>
@@ -104,7 +131,7 @@
       >
         {#each row.albums as album (album.id)}
           {@const playing = playingAlbum === album.id}
-          <div class="card">
+          <div class="card" role="none" oncontextmenu={(event) => openMenu(event, album)}>
             <button type="button" class="open" onclick={() => go('album', album.id)}>
               <span class="art">
                 <Cover coverId={album.coverId} size={Math.round(layout.cardWidth)} fluid cache={300} radius="10px" />
@@ -131,6 +158,10 @@
     {/each}
   </div>
 </div>
+
+{#if menu}
+  <TrackMenu {...menu} onclose={() => (menu = null)} />
+{/if}
 
 <style>
   .scroll {

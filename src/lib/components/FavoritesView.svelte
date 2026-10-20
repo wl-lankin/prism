@@ -17,7 +17,9 @@
   import { notify } from '../stores/notice.svelte';
   import { player } from '../stores/player.svelte';
   import type { Album, Artist, Source, Track } from '../types';
+  import { menuPoint } from '../menu';
   import AlbumGrid from './AlbumGrid.svelte';
+  import TrackMenu, { type TrackMenuState } from './TrackMenu.svelte';
   import Cover from './Cover.svelte';
   import Heart from './Heart.svelte';
   import Icon from './Icon.svelte';
@@ -146,6 +148,20 @@
     if (selected >= shownTracks.length) selected = shownTracks.length - 1;
   });
 
+  let menu = $state<TrackMenuState | null>(null);
+
+  /** Right-click (or the context menu key) on a song: select it and open the track menu. */
+  function onListMenu(event: MouseEvent) {
+    const row = (event.target as HTMLElement).closest<HTMLElement>('[data-index]');
+    const i = row ? Number(row.dataset.index) : selected;
+    const track = shownTracks[i];
+    if (!track) return;
+    event.preventDefault();
+    selected = i;
+    const at = menuPoint(event, document.getElementById(`fav-song-${i}`));
+    menu = { trackIds: [track.id], ...at, albumId: track.albumId, artist: track.albumArtist || track.artist };
+  }
+
   function onListKey(event: KeyboardEvent) {
     const n = shownTracks.length;
     if (!n) return;
@@ -263,6 +279,7 @@
           aria-label={t('nav.favorites')}
           aria-activedescendant={selected >= 0 ? `fav-song-${selected}` : undefined}
           onkeydown={onListKey}
+          oncontextmenu={onListMenu}
           onclick={(event) => {
             const i = rowIndex(event);
             if (i !== null) selected = i;
@@ -329,6 +346,10 @@
     </div>
   {/if}
 </div>
+
+{#if menu}
+  <TrackMenu {...menu} onclose={() => (menu = null)} />
+{/if}
 
 <style>
   .panel {

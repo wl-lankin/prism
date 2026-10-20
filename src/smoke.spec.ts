@@ -44,9 +44,12 @@ it('puts the ring first in the tab order and names disabled entries', () => {
   flushSync();
   expect(target.querySelector('button')?.classList.contains('ring')).toBe(true);
   const items = [...target.querySelectorAll('.item')];
+  const navidrome = items.find((b) => b.textContent?.includes('Navidrome'));
+  expect(navidrome?.getAttribute('aria-disabled')).toBe('true');
+  expect(navidrome?.textContent).toContain('Coming soon');
   const playlists = items.find((b) => b.textContent?.includes('Playlists'));
-  expect(playlists?.getAttribute('aria-disabled')).toBe('true');
-  expect(playlists?.textContent).toContain('Coming soon');
+  expect(playlists?.getAttribute('aria-disabled')).toBeNull();
+  expect(playlists?.textContent).not.toContain('Coming soon');
   const favorites = items.find((b) => b.textContent?.includes('Favorites'));
   expect(favorites?.getAttribute('aria-disabled')).toBeNull();
   expect(favorites?.textContent).not.toContain('Coming soon');
