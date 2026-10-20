@@ -24,10 +24,10 @@ const TRACK_COLUMNS: &str = "t.id, t.source, t.title, t.artist, t.album_artist, 
 const ALBUM_COLUMNS: &str =
     "a.id, a.source, a.title, a.artist, a.year, a.cover_id, a.track_count, a.duration_ms";
 
-const ALBUM_ORDER: &str =
+pub(crate) const ALBUM_ORDER: &str =
     "a.artist COLLATE NOCASE, a.year IS NULL, a.year, a.title COLLATE NOCASE, a.id";
 
-const TRACK_ORDER: &str = "t.artist COLLATE NOCASE, t.album COLLATE NOCASE, \
+pub(crate) const TRACK_ORDER: &str = "t.artist COLLATE NOCASE, t.album COLLATE NOCASE, \
     t.disc_no IS NULL, t.disc_no, t.track_no IS NULL, t.track_no, t.title COLLATE NOCASE, t.id";
 
 /// Artist rows (`Artist` field order) grouped from the albums that match `filter`.
