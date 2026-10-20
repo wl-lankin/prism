@@ -300,11 +300,14 @@ fn run(receiver: Receiver<PlayerState>, app: AppHandle, hwnd: Option<usize>, cov
         let own = || {
             let id = track.cover_id.as_deref()?;
             let state = cover_app.try_state::<AppState>()?;
-            crate::protocol::cached_cover(&state.library.covers, &cover_cache, id, COVER_SIZE)
+            state
+                .thumbs
+                .get(&state.library.covers, &cover_cache, id, COVER_SIZE)
+                .ok()
         };
         // The overlay keeps the previous artwork unless a new one is set, so a track
         // without a usable cover gets the placeholder.
-        own().or_else(|| crate::protocol::placeholder_cover(&cover_cache))
+        own().or_else(|| crate::thumbs::placeholder_cover(&cover_cache))
     });
     let mut pushed = Pushed::default();
     while let Ok(mut state) = receiver.recv() {

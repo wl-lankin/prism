@@ -7,6 +7,7 @@ pub mod player;
 pub mod protocol;
 pub mod settings;
 pub mod startup;
+pub mod thumbs;
 pub mod tools;
 pub mod window;
 
@@ -37,6 +38,8 @@ pub struct AppState {
     /// Files dropped onto the window, playable without indexing.
     pub dropped: Arc<DroppedFiles>,
     pub settings: Arc<SettingsStore>,
+    /// Limits and coalesces cover resizes.
+    pub thumbs: Arc<thumbs::ResizeGate>,
 }
 
 /// Resolves queue entries against the library database.
@@ -141,6 +144,7 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
         player,
         dropped,
         settings,
+        thumbs: Arc::new(thumbs::ResizeGate::new(thumbs::ResizeGate::default_limit())),
     });
     media.start(handle.clone(), main_window_handle(app), cover_cache);
 
