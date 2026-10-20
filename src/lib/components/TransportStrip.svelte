@@ -51,6 +51,7 @@
       spectrum
       disabled={idle || !duration}
       oninput={(v) => (seeking = v * duration)}
+      oncancel={() => (seeking = null)}
       oncommit={(v) => {
         seeking = null;
         player.positionMs = v * duration;

@@ -32,6 +32,20 @@ it('mounts the app shell with the idle Flow ring', () => {
   unmount(app);
 });
 
+it('puts the ring first in the tab order and names disabled entries', () => {
+  setLang('en');
+  const target = document.createElement('div');
+  const app = mount(App, { target });
+  flushSync();
+  expect(target.querySelector('button')?.classList.contains('ring')).toBe(true);
+  const favorites = [...target.querySelectorAll('.item')].find((b) => b.textContent?.includes('Favorites'));
+  expect(favorites?.getAttribute('aria-disabled')).toBe('true');
+  expect(favorites?.textContent).toContain('Coming soon');
+  expect(target.querySelector('[role="status"]')).not.toBeNull();
+  expect(document.documentElement.lang).toBe('en');
+  unmount(app);
+});
+
 it('switches the strings with the language', () => {
   setLang('de');
   const target = document.createElement('div');

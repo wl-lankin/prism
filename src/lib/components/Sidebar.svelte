@@ -27,7 +27,8 @@
   ];
 
   const sources: Item[] = [
-    { label: 'source.local', dot: 'var(--src-local)', view: 'albums' },
+    // The only source in M1, so it is lit wherever the library albums are.
+    { label: 'source.local', dot: 'var(--src-local)', view: 'albums', match: ['albums', 'album'] },
     { label: 'source.navidrome', dot: 'var(--src-navidrome)', soon: true },
     { label: 'source.youtube', dot: 'var(--src-youtube)', soon: true },
     { label: 'source.radio', dot: 'var(--src-radio)', soon: true },
@@ -44,7 +45,6 @@
       class:soon={item.soon}
       aria-current={active ? 'page' : undefined}
       aria-disabled={item.soon ? 'true' : undefined}
-      data-tip={item.soon ? t('nav.comingSoon') : undefined}
       onclick={() => item.view && !item.soon && go(item.view)}
     >
       {#if item.icon}
@@ -53,6 +53,10 @@
         <span class="dot" style="--dot:{item.dot}"></span>
       {/if}
       <span class="label">{t(item.label)}</span>
+      {#if item.soon}
+        <!-- Always in the accessible name; shown on hover and keyboard focus. -->
+        <span class="tip">{t('nav.comingSoon')}</span>
+      {/if}
     </button>
   </li>
 {/snippet}
@@ -137,9 +141,32 @@
     letter-spacing: -0.01em;
   }
 
+  /* Scrolls when the window is short (600 px minimum), fading out above Settings. */
   .scroll {
     flex: 1;
     min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    margin: 0 -6px;
+    padding: 0 6px 20px;
+    mask-image: linear-gradient(to bottom, #000 calc(100% - 22px), transparent);
+    /* The inherited standard scrollbar-color would override the slim bar below. */
+    scrollbar-color: auto;
+  }
+
+  /* A slim bar in the gutter beside the entries (no arrow buttons), clearer on hover. */
+  .scroll::-webkit-scrollbar {
+    width: 6px;
+  }
+
+  .scroll::-webkit-scrollbar-thumb {
+    border: 0;
+    border-radius: 3px;
+    background: rgba(255, 255, 255, 0.1);
+  }
+
+  .scroll:hover::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.22);
   }
 
   h2 {
@@ -233,33 +260,33 @@
     box-shadow: none;
   }
 
-  /* "Coming soon", shown beside a disabled entry. */
-  .item[data-tip]::after {
-    content: attr(data-tip);
-    position: absolute;
-    left: calc(100% + 8px);
-    top: 50%;
-    z-index: 20;
-    padding: 5px 9px;
-    border-radius: 7px;
+  /* "Coming soon": a pill at the end of a disabled entry. It lives inside the entry, so the
+     scrolling list never clips it, and it is part of the accessible name even while hidden. */
+  .tip {
+    margin-left: auto;
+    flex: none;
+    padding: 3px 7px;
+    border-radius: 6px;
     background: var(--raised);
-    box-shadow:
-      0 0 0 1px rgba(255, 255, 255, 0.08),
-      0 8px 24px rgba(0, 0, 0, 0.45);
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
     color: var(--text);
-    font-size: 12px;
+    font-size: 11px;
     white-space: nowrap;
     pointer-events: none;
     opacity: 0;
-    transform: translate(-4px, -50%);
+    transform: translateX(-4px);
     transition:
       opacity var(--dur) ease-out,
       transform var(--dur) ease-out;
   }
 
-  .item[data-tip]:hover::after {
+  .item.soon:hover .tip,
+  .item.soon:focus-visible .tip {
     opacity: 1;
-    transform: translate(0, -50%);
+    transform: none;
+  }
+
+  .item.soon:hover .tip {
     transition-delay: 250ms;
   }
 

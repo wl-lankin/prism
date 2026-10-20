@@ -8,6 +8,7 @@
     disabled = false,
     oninput,
     oncommit,
+    oncancel,
   }: {
     /** 0..1 */
     value: number;
@@ -21,6 +22,8 @@
     oninput?: (value: number) => void;
     /** The final value when the pointer is released or a key is pressed. */
     oncommit?: (value: number) => void;
+    /** A drag ended without a commit (pointer cancelled or capture lost). */
+    oncancel?: () => void;
   } = $props();
 
   let el: HTMLDivElement;
@@ -55,6 +58,13 @@
     oncommit?.(dragValue);
   }
 
+  // `up` clears `dragging` first, so a capture lost after a normal release does nothing here.
+  function cancel() {
+    if (!dragging) return;
+    dragging = false;
+    oncancel?.();
+  }
+
   function key(event: KeyboardEvent) {
     if (disabled) return;
     const deltas: Record<string, number> = { ArrowRight: step, ArrowUp: step, ArrowLeft: -step, ArrowDown: -step };
@@ -87,7 +97,8 @@
   onpointerdown={down}
   onpointermove={move}
   onpointerup={up}
-  onpointercancel={() => (dragging = false)}
+  onpointercancel={cancel}
+  onlostpointercapture={cancel}
   onkeydown={key}
 >
   <div class="rail">

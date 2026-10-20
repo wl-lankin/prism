@@ -134,6 +134,7 @@ function detect(): Lang {
 
 let pref: LangPref = 'system';
 let current: Lang = detect();
+if (typeof document !== 'undefined') document.documentElement.lang = current;
 
 // Reading `t()` inside a Svelte effect or template subscribes it to language changes.
 const listeners = new Set<() => void>();

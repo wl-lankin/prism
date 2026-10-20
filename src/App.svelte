@@ -76,6 +76,12 @@
 </script>
 
 <div class="window" class:glass data-tauri-drag-region>
+  <!-- First in the DOM so the main control comes early in the tab order; placed by CSS. -->
+  <div class="ring-dock" style="--ring:{RING}px">
+    <div class="notice" class:shown={notice} role="status" aria-live="polite">{notice ?? ''}</div>
+    <FlowRing {mode} {progress} size={RING} onactivate={activate} />
+  </div>
+
   <div class="card">
     <Sidebar />
 
@@ -95,13 +101,6 @@
     <div class="transport">
       <TransportStrip ringGap={RING + 44} />
     </div>
-  </div>
-
-  <div class="ring-dock" style="--ring:{RING}px">
-    {#if notice}
-      <div class="notice" role="status">{notice}</div>
-    {/if}
-    <FlowRing {mode} {progress} size={RING} onactivate={activate} />
   </div>
 </div>
 
@@ -204,17 +203,25 @@
     width: var(--ring);
     height: var(--ring);
     transform: translateX(-50%);
+    z-index: 2;
     border-radius: 50%;
     /* A notch of the frame around the ring, so it reads as set into the card's edge. */
     box-shadow: 0 0 0 6px var(--bg);
     background: var(--bg);
   }
 
+  /* Always in the DOM as a live region; only its text changes. It floats above the seek
+     rail (the strip is 84 px, the ring's upper half 42 px of it). */
   .notice {
     position: absolute;
-    bottom: calc(100% + 18px);
+    bottom: calc(100% + 42px + 14px);
     left: 50%;
-    transform: translateX(-50%);
+    transform: translate(-50%, 4px);
+    pointer-events: none;
+    opacity: 0;
+    transition:
+      opacity var(--dur) ease-out,
+      transform var(--dur) ease-out;
     width: max-content;
     max-width: 420px;
     padding: 8px 12px;
@@ -224,7 +231,15 @@
       0 0 0 1px rgba(255, 255, 255, 0.08),
       0 10px 30px rgba(0, 0, 0, 0.5);
     font-size: 12.5px;
-    animation: fade var(--dur) ease-out;
+  }
+
+  .notice.shown {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+
+  .notice:empty {
+    padding: 0;
   }
 
   @keyframes fade {

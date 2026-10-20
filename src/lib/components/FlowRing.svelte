@@ -77,7 +77,10 @@
   <span class="arc" aria-hidden="true"></span>
   {#if mode !== 'flow' && p > 0}
     <span class="cap start" aria-hidden="true"></span>
-    <span class="cap head" aria-hidden="true"></span>
+    {#if p < 0.995}
+      <!-- At the very end the head would sit on the start cap. -->
+      <span class="cap head" aria-hidden="true"></span>
+    {/if}
   {/if}
   <span class="disc">
     {#if mode === 'pause'}
