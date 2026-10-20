@@ -155,6 +155,8 @@ enum Command {
     SetDevice(Option<String>),
     SetGapless(bool),
     SetReplayGain(ReplayGain),
+    /// A fresher copy of a track (its cover changed): replaces the shown one when the ids match.
+    UpdateTrack(Box<Track>),
     Shutdown,
 }
 
@@ -230,6 +232,12 @@ impl PlayerHandle {
     /// Plays the queue entry at `index`; an index out of range is ignored.
     pub fn jump(&self, index: usize) -> Result<(), String> {
         self.send(Command::Jump(index))
+    }
+
+    /// Hands the engine a fresher copy of a track (resolve it off the engine thread). It
+    /// replaces the shown track when the ids match and publishes a new state.
+    pub fn refresh_track(&self, track: Track) -> Result<(), String> {
+        self.send(Command::UpdateTrack(Box::new(track)))
     }
 
     /// The latest state, as the engine published it.
@@ -390,6 +398,11 @@ impl Player {
     /// position. A device that is gone falls back to the default.
     pub fn set_device(&self, device: Option<String>) -> Result<(), String> {
         self.send(Command::SetDevice(device))
+    }
+
+    /// See [`PlayerHandle::refresh_track`].
+    pub fn refresh_track(&self, track: Track) -> Result<(), String> {
+        self.handle.refresh_track(track)
     }
 
     /// Off: the next track is opened only once the current one has ended.
@@ -722,6 +735,22 @@ impl Engine {
                     // A track opened early is dropped; it opens again once this one ends.
                     self.preload = Preload::None;
                     self.playback.queue_next(None);
+                }
+            }
+            Command::UpdateTrack(track) => {
+                let track = *track;
+                // Not `TrackChanged`: that counts a play. The state event carries the track to
+                // the UI and the media controls.
+                if self
+                    .shown
+                    .as_ref()
+                    .is_some_and(|shown| shown.id == track.id)
+                {
+                    if self.current.as_ref().is_some_and(|c| c.id == track.id) {
+                        self.current = Some(track.clone());
+                    }
+                    self.shown = Some(track);
+                    self.dirty = true;
                 }
             }
             Command::SetReplayGain(mode) => {
@@ -1844,6 +1873,46 @@ mod tests {
         h.player.prev().unwrap();
         let state = wait_state(&h.player, |s| s.queue_index == 0 && s.track.is_some());
         assert_eq!(state.track.unwrap().id, "long1");
+    }
+
+    #[test]
+    fn refresh_track_replaces_the_shown_track_without_a_new_play() {
+        let tracks: Vec<Track> = ["long1", "long2"]
+            .iter()
+            .map(|id| {
+                let mut track = fixture_track(id, "tagged.flac");
+                track.duration_ms = SILENCE_MS;
+                track
+            })
+            .collect();
+        let opener: Opener = Arc::new(|_track: &Track, _spec: StreamSpec| {
+            Ok(Box::new(Silence {
+                frames_left: SILENCE_MS * 44_100 / 1000,
+            }) as Box<dyn AudioSource>)
+        });
+        let h = harness(tracks.clone(), 1.0, Some(opener));
+        h.player.play(ids(&["long1", "long2"]), 0).unwrap();
+        collect_until(&h.events, Duration::from_secs(5), |seen| {
+            changes(seen) == ids(&["long1"])
+        });
+
+        let mut other = tracks[1].clone();
+        other.cover_id = Some("other".into());
+        h.player.refresh_track(other).unwrap();
+        let mut fresh = tracks[0].clone();
+        fresh.cover_id = Some("fresh".into());
+        h.player.refresh_track(fresh).unwrap();
+        let events = collect_until(&h.events, Duration::from_secs(5), |seen| {
+            seen.iter().any(|event| {
+                matches!(event, PlayerEvent::State(state)
+                    if state.track.as_ref().is_some_and(|t| t.cover_id.as_deref() == Some("fresh")))
+            })
+        });
+        assert!(changes(&events).is_empty(), "a refresh is not a new play");
+        let state = h.player.state();
+        let shown = state.track.expect("still shown");
+        assert_eq!(shown.id, "long1");
+        assert_eq!(state.queue_index, 0);
     }
 
     #[test]

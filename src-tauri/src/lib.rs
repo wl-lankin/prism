@@ -150,11 +150,28 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
     let lookup = library::lookup::LookupWorker::spawn(
         Arc::clone(&library.db),
         Arc::clone(&library.covers),
-        Arc::new(library::lookup::MusicBrainz::new()?),
+        match library::lookup::MusicBrainz::new() {
+            Ok(fetcher) => Arc::new(fetcher) as Arc<dyn library::lookup::CoverFetcher>,
+            Err(err) => {
+                eprintln!("cover lookup is off: {err:#}");
+                Arc::new(library::lookup::Unavailable)
+            }
+        },
         Arc::new(std::sync::atomic::AtomicBool::new(initial.cover_lookup)),
         {
             let handle = handle.clone();
             Arc::new(move || {
+                // On the lookup thread: re-read the playing track so a new cover shows at once.
+                if let Some(state) = handle.try_state::<AppState>() {
+                    if let Some(shown) = state.player.state().track {
+                        let fresh = lock(&state.library.db)
+                            .ok()
+                            .and_then(|conn| query::track(&conn, &shown.id).ok().flatten());
+                        if let Some(fresh) = fresh {
+                            let _ = state.player.refresh_track(fresh);
+                        }
+                    }
+                }
                 if let Err(err) = tauri::Emitter::emit(&handle, library::EVENT_CHANGED, ()) {
                     eprintln!("emitting the cover change failed: {err}");
                 }

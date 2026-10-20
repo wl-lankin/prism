@@ -1,6 +1,7 @@
 //! Online cover lookup for albums without a cover: MusicBrainz finds the release, the Cover
 //! Art Archive serves its front image. The only network traffic of the library, and only while
-//! the `coverLookup` setting is on.
+//! the `coverLookup` setting is on. Hosts contacted: musicbrainz.org, coverartarchive.org, and
+//! the archive.org host the Cover Art Archive redirects its image downloads to.
 
 use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -11,7 +12,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::Context;
 use rusqlite::params;
 
-use super::covers::CoverStore;
+use super::covers::{image_extension, CoverStore};
 use super::scan::lock;
 use super::tags::{UNKNOWN_ALBUM, UNKNOWN_ARTIST};
 use crate::db::Db;
@@ -20,6 +21,8 @@ use crate::db::Db;
 const NOTFOUND_RETRY_SECS: i64 = 30 * 24 * 60 * 60;
 /// Releases scoring below this are not trusted to be the album.
 const MIN_SCORE: i64 = 90;
+/// Fetch errors in a row that end a pass.
+const MAX_ERRORS_IN_A_ROW: usize = 3;
 const REQUEST_GAP: Duration = Duration::from_secs(1);
 const TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
@@ -30,6 +33,27 @@ const EMIT_GAP: Duration = Duration::from_secs(2);
 /// could not be completed (network, server) and should be retried later.
 pub trait CoverFetcher: Send + Sync {
     fn fetch(&self, artist: &str, album: &str) -> anyhow::Result<Option<Vec<u8>>>;
+}
+
+/// A fetch failed because the server could not be reached (connect error or timeout). It ends
+/// the pass; other errors only skip the album.
+#[derive(Debug)]
+pub struct Unreachable;
+
+impl std::fmt::Display for Unreachable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the server could not be reached")
+    }
+}
+
+impl std::error::Error for Unreachable {}
+
+fn classify(err: reqwest::Error) -> anyhow::Error {
+    if err.is_connect() || err.is_timeout() {
+        anyhow::Error::new(err).context(Unreachable)
+    } else {
+        err.into()
+    }
 }
 
 /// Lucene query for a release search. Quotes and backslashes are escaped inside the phrases.
@@ -121,6 +145,7 @@ impl CoverFetcher for MusicBrainz {
                 ("limit", "5"),
             ])
             .send()
+            .map_err(classify)
             .context("MusicBrainz search")?
             .error_for_status()
             .context("MusicBrainz search")?;
@@ -136,17 +161,32 @@ impl CoverFetcher for MusicBrainz {
                 "https://coverartarchive.org/release/{mbid}/front-500"
             ))
             .send()
+            .map_err(classify)
             .context("Cover Art Archive")?;
         if response.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
         }
         let response = response.error_for_status().context("Cover Art Archive")?;
+        // One byte past the cap tells an oversized image from one of exactly the cap.
         let mut bytes = Vec::new();
         response
-            .take(MAX_IMAGE_BYTES)
+            .take(MAX_IMAGE_BYTES + 1)
             .read_to_end(&mut bytes)
             .context("reading the cover")?;
+        if bytes.len() as u64 > MAX_IMAGE_BYTES {
+            return Ok(None);
+        }
         Ok(Some(bytes))
+    }
+}
+
+/// Stands in when the HTTP client could not be built: every fetch fails as unreachable, so
+/// nothing is recorded and the pass ends at once.
+pub struct Unavailable;
+
+impl CoverFetcher for Unavailable {
+    fn fetch(&self, _artist: &str, _album: &str) -> anyhow::Result<Option<Vec<u8>>> {
+        Err(anyhow::Error::new(Unreachable).context("cover lookup is unavailable"))
     }
 }
 
@@ -266,6 +306,7 @@ pub(crate) fn run_pass(
     let mut found = 0;
     let mut last_emit: Option<Instant> = None;
     let mut pending = false;
+    let mut errors_in_a_row = 0;
     if enabled.load(Ordering::SeqCst) {
         for album in candidates(db, now)? {
             // Checked before every album, so switching off stops within one request.
@@ -273,13 +314,38 @@ pub(crate) fn run_pass(
                 break;
             }
             let bytes = match fetcher.fetch(&album.artist, &album.title) {
-                Ok(bytes) => bytes,
+                Ok(bytes) => {
+                    errors_in_a_row = 0;
+                    bytes
+                }
                 Err(err) => {
-                    eprintln!("cover lookup stopped: {err:#}");
-                    break;
+                    // Not recorded: the album is asked again on the next kick. One album that
+                    // keeps failing must not block the rest, but an unreachable server or a
+                    // run of failures ends the pass.
+                    errors_in_a_row += 1;
+                    let stop = err.downcast_ref::<Unreachable>().is_some()
+                        || errors_in_a_row >= MAX_ERRORS_IN_A_ROW;
+                    eprintln!("cover lookup of {} failed: {err:#}", album.title);
+                    if stop {
+                        break;
+                    }
+                    continue;
                 }
             };
-            let stored = bytes.and_then(|bytes| covers.store_bytes(&bytes).ok());
+            // Bytes that are not an image are an answer ("no cover"); failing to write the
+            // cover is ours and is retried.
+            let stored = match bytes {
+                Some(bytes) if image_extension(&bytes).is_some() => {
+                    match covers.store_bytes(&bytes) {
+                        Ok(cover_id) => Some(cover_id),
+                        Err(err) => {
+                            eprintln!("storing a looked up cover failed: {err:#}");
+                            break;
+                        }
+                    }
+                }
+                _ => None,
+            };
             match stored {
                 Some(cover_id) => {
                     record(db, &album.album_id, "found", Some(&cover_id), now)?;
@@ -476,6 +542,119 @@ mod tests {
         assert_eq!(f.album_cover(&id), None);
         f.pass(&fetcher, NOW + DAY);
         assert_eq!(fetcher.calls(), 1);
+    }
+
+    /// Answers by calling `answer(artist)`; counts calls.
+    struct FnFetcher<F> {
+        answer: F,
+        calls: AtomicUsize,
+    }
+
+    impl<F: Fn(&str) -> anyhow::Result<Option<Vec<u8>>> + Send + Sync> CoverFetcher for FnFetcher<F> {
+        fn fetch(&self, artist: &str, _album: &str) -> anyhow::Result<Option<Vec<u8>>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            (self.answer)(artist)
+        }
+    }
+
+    fn fn_fetcher<F: Fn(&str) -> anyhow::Result<Option<Vec<u8>>>>(answer: F) -> FnFetcher<F> {
+        FnFetcher {
+            answer,
+            calls: AtomicUsize::new(0),
+        }
+    }
+
+    #[test]
+    fn one_failing_album_does_not_block_the_rest() {
+        let f = fixture();
+        let bad = f.album("A Bad", "Album");
+        let good = f.album("B Good", "Album");
+        let fetcher = fn_fetcher(|artist| {
+            if artist == "A Bad" {
+                Err(anyhow::anyhow!("HTTP 500"))
+            } else {
+                Ok(Some(PNG.to_vec()))
+            }
+        });
+        let found = run_pass(&f.db, &f.covers, &fetcher, &f.enabled, &|| {}, NOW).unwrap();
+        assert_eq!(found, 1);
+        assert!(f.album_cover(&good).is_some());
+        assert_eq!(f.album_cover(&bad), None);
+        let rows: i64 =
+            f.db.0
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM cover_lookups WHERE album_id = ?1",
+                    [&bad],
+                    |r| r.get(0),
+                )
+                .unwrap();
+        assert_eq!(rows, 0, "the failing album is retried next kick");
+    }
+
+    #[test]
+    fn three_errors_in_a_row_end_the_pass() {
+        let f = fixture();
+        for n in 0..5 {
+            f.album(&format!("Artist {n}"), "Album");
+        }
+        let fetcher = fn_fetcher(|_| Err(anyhow::anyhow!("HTTP 503")));
+        run_pass(&f.db, &f.covers, &fetcher, &f.enabled, &|| {}, NOW).unwrap();
+        assert_eq!(fetcher.calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn an_unreachable_server_ends_the_pass_at_once() {
+        let f = fixture();
+        f.album("Artist 1", "Album");
+        f.album("Artist 2", "Album");
+        let fetcher = fn_fetcher(|_| Err(anyhow::Error::new(Unreachable).context("search")));
+        run_pass(&f.db, &f.covers, &fetcher, &f.enabled, &|| {}, NOW).unwrap();
+        assert_eq!(fetcher.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn an_unrecognized_image_is_notfound() {
+        let f = fixture();
+        let id = f.album("Artist", "Album");
+        let fetcher = FakeFetcher::new(vec![Ok(Some(b"<html>nope</html>".to_vec()))]);
+        assert_eq!(f.pass(&fetcher, NOW), 0);
+        let status: String =
+            f.db.0
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT status FROM cover_lookups WHERE album_id = ?1",
+                    [&id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+        assert_eq!(status, "notfound");
+    }
+
+    #[test]
+    fn a_failed_cover_write_records_nothing() {
+        let f = fixture();
+        let id = f.album("Artist", "Album");
+        // The cover directory path is a file, so creating it fails.
+        let blocked = f._dir.path().join("blocked");
+        std::fs::write(&blocked, b"x").unwrap();
+        let covers = CoverStore::new(blocked.join("covers"));
+        let fetcher = FakeFetcher::cover();
+        let found = run_pass(&f.db, &covers, &fetcher, &f.enabled, &|| {}, NOW).unwrap();
+        assert_eq!(found, 0);
+        let rows: i64 =
+            f.db.0
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM cover_lookups WHERE album_id = ?1",
+                    [&id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+        assert_eq!(rows, 0);
     }
 
     #[test]
