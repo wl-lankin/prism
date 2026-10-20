@@ -57,6 +57,15 @@ export interface SearchResult {
   tracks: Track[];
 }
 
+export type FavKind = 'track' | 'album' | 'artist';
+
+/** Every favorite id, newest first, whether or not the item is in the index. */
+export interface FavoriteIds {
+  tracks: string[];
+  albums: string[];
+  artists: string[];
+}
+
 export interface ScanReport {
   added: number;
   updated: number;

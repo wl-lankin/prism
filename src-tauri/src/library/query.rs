@@ -15,13 +15,14 @@ pub struct SearchResult {
 }
 
 /// Every `Track` field, from a `tracks` table aliased `t`, in `track_from_row` order.
-const TRACK_COLUMNS: &str = "t.id, t.source, t.title, t.artist, t.album_artist, t.album, \
+pub(crate) const TRACK_COLUMNS: &str =
+    "t.id, t.source, t.title, t.artist, t.album_artist, t.album, \
     t.album_id, t.track_no, t.disc_no, t.duration_ms, t.year, t.genre, t.format, \
     t.sample_rate, t.bit_depth, t.bitrate_kbps, t.cover_id, t.path, t.replay_gain_track_db, \
     t.replay_gain_album_db, t.replay_gain_track_peak, t.replay_gain_album_peak";
 
 /// Every `Album` field, from an `albums` table aliased `a`, in `album_from_row` order.
-const ALBUM_COLUMNS: &str =
+pub(crate) const ALBUM_COLUMNS: &str =
     "a.id, a.source, a.title, a.artist, a.year, a.cover_id, a.track_count, a.duration_ms";
 
 pub(crate) const ALBUM_ORDER: &str =
@@ -31,7 +32,7 @@ pub(crate) const TRACK_ORDER: &str = "t.artist COLLATE NOCASE, t.album COLLATE N
     t.disc_no IS NULL, t.disc_no, t.track_no IS NULL, t.track_no, t.title COLLATE NOCASE, t.id";
 
 /// Artist rows (`Artist` field order) grouped from the albums that match `filter`.
-fn artist_select(filter: &str) -> String {
+pub(crate) fn artist_select(filter: &str) -> String {
     format!(
         "SELECT a.artist, COUNT(*), SUM(a.track_count),
             (SELECT b.cover_id FROM albums b
@@ -42,7 +43,7 @@ fn artist_select(filter: &str) -> String {
     )
 }
 
-fn track_from_row(row: &Row) -> rusqlite::Result<Track> {
+pub(crate) fn track_from_row(row: &Row) -> rusqlite::Result<Track> {
     Ok(Track {
         id: row.get(0)?,
         source: Source::from_db(&row.get::<_, String>(1)?),
@@ -69,7 +70,7 @@ fn track_from_row(row: &Row) -> rusqlite::Result<Track> {
     })
 }
 
-fn album_from_row(row: &Row) -> rusqlite::Result<Album> {
+pub(crate) fn album_from_row(row: &Row) -> rusqlite::Result<Album> {
     Ok(Album {
         id: row.get(0)?,
         source: Source::from_db(&row.get::<_, String>(1)?),
@@ -82,7 +83,7 @@ fn album_from_row(row: &Row) -> rusqlite::Result<Album> {
     })
 }
 
-fn artist_from_row(row: &Row) -> rusqlite::Result<Artist> {
+pub(crate) fn artist_from_row(row: &Row) -> rusqlite::Result<Artist> {
     Ok(Artist {
         name: row.get(0)?,
         album_count: row.get::<_, i64>(1)?.max(0) as u32,
@@ -91,7 +92,7 @@ fn artist_from_row(row: &Row) -> rusqlite::Result<Artist> {
     })
 }
 
-fn collect<T, P: Params>(
+pub(crate) fn collect<T, P: Params>(
     conn: &Connection,
     sql: &str,
     params: P,
