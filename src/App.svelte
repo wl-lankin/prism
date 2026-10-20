@@ -1,5 +1,6 @@
 <script lang="ts">
   import { getCurrentWindow } from '@tauri-apps/api/window';
+  import About from './lib/components/About.svelte';
   import AlbumGrid from './lib/components/AlbumGrid.svelte';
   import AlbumView from './lib/components/AlbumView.svelte';
   import ArtistList from './lib/components/ArtistList.svelte';
@@ -8,6 +9,7 @@
   import FlowRing, { type RingMode } from './lib/components/FlowRing.svelte';
   import Icon from './lib/components/Icon.svelte';
   import SearchPalette from './lib/components/SearchPalette.svelte';
+  import Settings from './lib/components/Settings.svelte';
   import Sidebar from './lib/components/Sidebar.svelte';
   import SongList from './lib/components/SongList.svelte';
   import TitleBar from './lib/components/TitleBar.svelte';
@@ -17,9 +19,10 @@
   import { t, tc, type Key } from './lib/i18n';
   import { playerPlayFiles, playerToggle, windowVibrancy } from './lib/ipc';
   import { initLibrary, library } from './lib/stores/library.svelte';
-  import { go, nav, type View } from './lib/stores/nav.svelte';
+  import { go, nav, overlays, type View } from './lib/stores/nav.svelte';
   import { notice, notify } from './lib/stores/notice.svelte';
   import { initPlayer, player } from './lib/stores/player.svelte';
+  import { initSettings } from './lib/stores/settings.svelte';
 
   /** The Flow ring sits half out of the transport strip: centred on its top edge. */
   const RING = 84;
@@ -49,6 +52,10 @@
   });
 
   $effect(() => initLibrary());
+
+  $effect(() => {
+    initSettings().catch((err) => console.error('loading the settings failed', err));
+  });
 
   // Files dropped onto the window play at once, without being indexed.
   $effect(() => {
@@ -181,8 +188,10 @@
               <ArtistView name={nav.param} />
             {:else if nav.view === 'songs'}
               <SongList />
+            {:else if nav.view === 'settings'}
+              <Settings />
             {:else}
-              <!-- Settings arrive with Task 12; Favorites and Playlists in later versions. -->
+              <!-- Favorites and Playlists arrive in later versions. -->
               <div class="placeholder">
                 <h1>{t(titles[nav.view])}</h1>
                 <p>{t(`view.${nav.view}.lead`)}</p>
@@ -210,6 +219,10 @@
 </div>
 
 <SearchPalette bind:open={searching} />
+
+{#if overlays.about}
+  <About onclose={() => (overlays.about = false)} />
+{/if}
 
 <style>
   :global(html),

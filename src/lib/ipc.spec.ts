@@ -29,6 +29,9 @@ it('maps every command onto its fixed name and argument keys', async () => {
     [ipc.libraryTrackCount, 'library_track_count', undefined],
     [() => ipc.libraryTracksRange(100, 50), 'library_tracks_range', { offset: 100, limit: 50 }],
     [() => ipc.librarySearch('tear', 20), 'library_search', { q: 'tear', limit: 20 }],
+    [ipc.settingsGet, 'settings_get', undefined],
+    [() => ipc.settingsSet({ gapless: false }), 'settings_set', { patch: { gapless: false } }],
+    [ipc.audioDevices, 'audio_devices', undefined],
   ];
   for (const [run, command, args] of calls) {
     invoke.mockClear();

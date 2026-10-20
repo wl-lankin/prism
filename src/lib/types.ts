@@ -84,6 +84,20 @@ export interface PlayerState {
   queueLength: number;
 }
 
+export type LanguagePref = 'system' | 'en' | 'de';
+export type ReplayGainMode = 'off' | 'track' | 'album';
+
+/** `<appConfig>/settings.json`, as `settings_get` / `settings_set` return it. */
+export interface Settings {
+  language: LanguagePref;
+  /** 0..1 */
+  volume: number;
+  /** A name from `audio_devices`; null is the system default. */
+  outputDevice: string | null;
+  gapless: boolean;
+  replayGain: ReplayGainMode;
+}
+
 export interface PlayerError {
   trackId: string;
   message: string;

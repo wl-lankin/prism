@@ -9,6 +9,7 @@ import type {
   ScanProgress,
   ScanReport,
   SearchResult,
+  Settings,
   Track,
 } from './types';
 
@@ -63,6 +64,15 @@ export const libraryTrackCount = () => call<number>('library_track_count');
 export const libraryTracksRange = (offset: number, limit: number) =>
   call<Track[]>('library_tracks_range', { offset, limit });
 export const librarySearch = (q: string, limit: number) => call<SearchResult>('library_search', { q, limit });
+
+// Settings.
+
+export const settingsGet = () => call<Settings>('settings_get');
+/** Merges `patch` into the settings, saves them and applies them to the player at once.
+ *  Resolves with the full settings. */
+export const settingsSet = (patch: Partial<Settings>) => call<Settings>('settings_set', { patch });
+/** Output device names, as `outputDevice` takes them. */
+export const audioDevices = () => call<string[]>('audio_devices');
 
 // Window.
 

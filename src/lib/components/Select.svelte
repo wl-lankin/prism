@@ -1,0 +1,343 @@
+<script lang="ts" module>
+  export interface SelectOption {
+    value: string;
+    label: string;
+    /** A quieter second line, e.g. "not connected". */
+    note?: string;
+  }
+
+  let ids = 0;
+</script>
+
+<script lang="ts">
+  import { tick } from 'svelte';
+  import Icon from './Icon.svelte';
+
+  /** A select-only combobox (WAI-ARIA pattern) drawn in the Prism style: the button keeps
+   *  focus, the list follows with `aria-activedescendant`. Keys: Enter, Space, Alt+Down and
+   *  the arrows open it; arrows, Home, End and typing a letter move; Enter or Space picks;
+   *  Esc and Tab close. */
+  let {
+    value,
+    options,
+    label,
+    disabled = false,
+    onchange,
+  }: {
+    value: string;
+    options: SelectOption[];
+    /** The accessible name (the visible label lives next to it in the row). */
+    label: string;
+    disabled?: boolean;
+    onchange?: (value: string) => void;
+  } = $props();
+
+  const id = `select-${++ids}`;
+  let open = $state(false);
+  let active = $state(0);
+  let upward = $state(false);
+  let button: HTMLButtonElement | undefined = $state();
+  let list: HTMLUListElement | undefined = $state();
+
+  const selectedIndex = $derived(Math.max(0, options.findIndex((option) => option.value === value)));
+  const selected = $derived(options[selectedIndex]);
+
+  async function show() {
+    if (disabled || open || options.length === 0) return;
+    active = selectedIndex;
+    // Open upwards when the list would run past the bottom of the window.
+    const rect = button?.getBoundingClientRect();
+    const needed = Math.min(options.length * 40 + 12, 300);
+    upward = !!rect && rect.bottom + needed > window.innerHeight - 16 && rect.top > needed;
+    open = true;
+    await tick();
+    list?.querySelector(`#${id}-${active}`)?.scrollIntoView?.({ block: 'nearest' });
+  }
+
+  function hide() {
+    open = false;
+  }
+
+  function choose(index: number) {
+    const option = options[index];
+    hide();
+    button?.focus();
+    if (option && option.value !== value) onchange?.(option.value);
+  }
+
+  function move(index: number) {
+    active = Math.max(0, Math.min(options.length - 1, index));
+    tick().then(() => list?.querySelector(`#${id}-${active}`)?.scrollIntoView?.({ block: 'nearest' }));
+  }
+
+  /** Jumps to the next option starting with `letter`, after the active one. */
+  function typeahead(letter: string) {
+    const lower = letter.toLowerCase();
+    for (let step = 1; step <= options.length; step++) {
+      const index = (active + step) % options.length;
+      if (options[index].label.toLowerCase().startsWith(lower)) {
+        move(index);
+        return;
+      }
+    }
+  }
+
+  function onkeydown(event: KeyboardEvent) {
+    if (disabled) return;
+    if (!open) {
+      if (['ArrowDown', 'ArrowUp', 'Enter', ' '].includes(event.key)) {
+        event.preventDefault();
+        void show().then(() => {
+          if (event.key === 'ArrowUp' && !event.altKey) move(selectedIndex - 1);
+        });
+      }
+      return;
+    }
+    switch (event.key) {
+      case 'ArrowDown':
+        event.preventDefault();
+        if (event.altKey) choose(active);
+        else move(active + 1);
+        break;
+      case 'ArrowUp':
+        event.preventDefault();
+        if (event.altKey) choose(active);
+        else move(active - 1);
+        break;
+      case 'Home':
+      case 'PageUp':
+        event.preventDefault();
+        move(0);
+        break;
+      case 'End':
+      case 'PageDown':
+        event.preventDefault();
+        move(options.length - 1);
+        break;
+      case 'Enter':
+      case ' ':
+        event.preventDefault();
+        choose(active);
+        break;
+      case 'Escape':
+        // Only the list closes, not a dialog around it.
+        event.preventDefault();
+        event.stopPropagation();
+        hide();
+        break;
+      case 'Tab':
+        hide();
+        break;
+      default:
+        if (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey) typeahead(event.key);
+    }
+  }
+
+  function onwindowpointerdown(event: PointerEvent) {
+    if (!open) return;
+    const target = event.target as Node | null;
+    if (target && (button?.contains(target) || list?.contains(target))) return;
+    hide();
+  }
+</script>
+
+<svelte:window onpointerdown={onwindowpointerdown} onblur={hide} />
+
+<div class="select" class:open>
+  <button
+    bind:this={button}
+    type="button"
+    class="trigger"
+    role="combobox"
+    aria-label={label}
+    aria-haspopup="listbox"
+    aria-expanded={open}
+    aria-controls={`${id}-list`}
+    aria-activedescendant={open ? `${id}-${active}` : undefined}
+    {disabled}
+    onclick={() => (open ? hide() : show())}
+    {onkeydown}
+    onblur={(event) => {
+      // Clicking an option keeps focus (pointerdown is prevented); anything else closes.
+      if (!list?.contains(event.relatedTarget as Node | null)) hide();
+    }}
+  >
+    <span class="value">{selected?.label ?? ''}</span>
+    {#if selected?.note}<span class="note">{selected.note}</span>{/if}
+    <span class="chevron"><Icon name="chevronDown" size={16} /></span>
+  </button>
+
+  {#if open}
+    <ul
+      bind:this={list}
+      id={`${id}-list`}
+      class="list"
+      class:upward
+      role="listbox"
+      aria-label={label}
+      tabindex="-1"
+      onpointerdown={(event) => event.preventDefault()}
+    >
+      {#each options as option, index (option.value)}
+        <li
+          id={`${id}-${index}`}
+          role="option"
+          class="option"
+          class:active={index === active}
+          aria-selected={option.value === value}
+          onpointermove={() => (active = index)}
+          onclick={() => choose(index)}
+          onkeydown={() => {}}
+        >
+          <span class="mark">{#if option.value === value}<Icon name="check" size={16} />{/if}</span>
+          <span class="text">
+            <span class="label">{option.label}</span>
+            {#if option.note}<span class="note">{option.note}</span>{/if}
+          </span>
+        </li>
+      {/each}
+    </ul>
+  {/if}
+</div>
+
+<style>
+  .select {
+    position: relative;
+    width: 100%;
+  }
+
+  .trigger {
+    width: 100%;
+    height: 36px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 8px 0 12px;
+    border: 0;
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.055);
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+    color: var(--text);
+    font: inherit;
+    font-size: 13.5px;
+    text-align: left;
+    cursor: pointer;
+    transition:
+      background-color var(--dur) ease-out,
+      box-shadow var(--dur) ease-out;
+  }
+
+  .trigger:hover:not(:disabled),
+  .open .trigger {
+    background: rgba(255, 255, 255, 0.085);
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+  }
+
+  .trigger:focus-visible {
+    outline: 2px solid var(--spec-4);
+    outline-offset: 2px;
+  }
+
+  .trigger:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+
+  .value {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .note {
+    flex: none;
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+
+  .chevron {
+    margin-left: auto;
+    flex: none;
+    display: grid;
+    color: var(--text-dim);
+    transition: transform var(--dur) ease-out;
+  }
+
+  .open .chevron {
+    transform: rotate(180deg);
+  }
+
+  .list {
+    position: absolute;
+    z-index: 10;
+    top: calc(100% + 6px);
+    left: 0;
+    right: 0;
+    max-height: 300px;
+    overflow-y: auto;
+    margin: 0;
+    padding: 5px;
+    list-style: none;
+    border-radius: 12px;
+    background: var(--raised);
+    box-shadow:
+      0 0 0 1px rgba(255, 255, 255, 0.09),
+      0 18px 40px -8px rgba(0, 0, 0, 0.7),
+      0 4px 12px rgba(0, 0, 0, 0.35);
+    animation: drop var(--dur) ease-out;
+    scrollbar-color: auto;
+  }
+
+  .list.upward {
+    top: auto;
+    bottom: calc(100% + 6px);
+  }
+
+  .list:focus {
+    outline: none;
+  }
+
+  .option {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 34px;
+    padding: 6px 10px 6px 6px;
+    border-radius: 8px;
+    font-size: 13.5px;
+    cursor: pointer;
+  }
+
+  .option.active {
+    background: rgba(255, 255, 255, 0.08);
+  }
+
+  .mark {
+    width: 16px;
+    flex: none;
+    display: grid;
+    color: var(--spec-3);
+  }
+
+  .text {
+    min-width: 0;
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+  }
+
+  .label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  @keyframes drop {
+    from {
+      opacity: 0;
+      transform: translateY(-3px);
+    }
+  }
+</style>
