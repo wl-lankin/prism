@@ -17,9 +17,9 @@ use super::model::{album_id, track_id, Source, Track};
 pub const UNKNOWN_ARTIST: &str = "Unknown artist";
 pub const UNKNOWN_ALBUM: &str = "Unknown album";
 
-/// Containers neither lofty nor symphonia can parse. They are indexed from the file name
-/// with an unknown duration so the playback engine can still offer them.
-const UNPARSED_EXTENSIONS: &[&str] = &["wma", "tta", "dsf", "dff"];
+/// Containers neither lofty nor symphonia can parse. They are read with ffprobe; without
+/// ffprobe they are indexed from the file name with duration 0 (and re-read on every scan).
+pub(crate) const UNPARSED_EXTENSIONS: &[&str] = &["wma", "tta", "dsf", "dff"];
 
 /// Everything read from one audio file: the Track fields plus the raw embedded cover.
 #[derive(Debug, Clone)]
@@ -29,21 +29,23 @@ pub struct TrackMeta {
 }
 
 /// Reads tags and stream properties with lofty, falling back to a symphonia probe for
-/// duration and format when lofty cannot read the file.
+/// duration and format when lofty cannot read the file, and to ffprobe for the containers
+/// neither of them parses.
 pub fn read(path: &Path) -> anyhow::Result<TrackMeta> {
     let extension = extension_of(path);
-    match lofty::read_from_path(path) {
-        Ok(file) => Ok(from_lofty(path, &extension, &file)),
-        Err(lofty_err) => match probe(path, &extension) {
-            Ok(probed) => Ok(probed),
-            Err(_) if UNPARSED_EXTENSIONS.contains(&extension.as_str()) => {
-                Ok(minimal(path, &extension))
-            }
-            Err(probe_err) => Err(anyhow::anyhow!(
-                "unreadable audio file: {lofty_err}; probe: {probe_err:#}"
-            )),
-        },
+    let lofty_err = match lofty::read_from_path(path) {
+        Ok(file) => return Ok(from_lofty(path, &extension, &file)),
+        Err(err) => err,
+    };
+    if UNPARSED_EXTENSIONS.contains(&extension.as_str()) {
+        return Ok(match ffprobe(path) {
+            Some(fields) => build(path, &extension, fields, None),
+            None => minimal(path, &extension),
+        });
     }
+    probe(path, &extension).map_err(|probe_err| {
+        anyhow::anyhow!("unreadable audio file: {lofty_err}; probe: {probe_err:#}")
+    })
 }
 
 fn extension_of(path: &Path) -> String {
@@ -136,8 +138,7 @@ fn parse_gain(value: Option<&str>) -> Option<f32> {
 }
 
 fn tag_value(tags: &[&Tag], key: ItemKey) -> Option<String> {
-    tags.iter()
-        .find_map(|tag| non_empty(tag.get_string(key)))
+    tags.iter().find_map(|tag| non_empty(tag.get_string(key)))
 }
 
 fn from_lofty(path: &Path, extension: &str, file: &TaggedFile) -> TrackMeta {
@@ -196,6 +197,73 @@ fn from_lofty(path: &Path, extension: &str, file: &TaggedFile) -> TrackMeta {
         .filter(|data| !data.is_empty());
 
     build(path, extension, fields, cover)
+}
+
+/// Tags and duration from `ffprobe`, or `None` when ffprobe is missing or fails.
+fn ffprobe(path: &Path) -> Option<Fields> {
+    let program = crate::tools::ffprobe_path()?;
+    let output = crate::tools::command(&program)
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration:format_tags",
+            "-of",
+            "json",
+        ])
+        .arg(path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    fields_from_ffprobe(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Leading number of "4" or "4/12".
+fn leading_number(value: &str) -> Option<u32> {
+    let digits: String = value
+        .trim()
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    digits.parse().ok().filter(|n| *n > 0)
+}
+
+fn fields_from_ffprobe(json: &str) -> Option<Fields> {
+    let value: serde_json::Value = serde_json::from_str(json).ok()?;
+    let format = value.get("format")?;
+    let tags: std::collections::HashMap<String, String> = format
+        .get("tags")
+        .and_then(|tags| tags.as_object())
+        .map(|tags| {
+            tags.iter()
+                .filter_map(|(key, value)| Some((key.to_lowercase(), value.as_str()?.to_string())))
+                .collect()
+        })
+        .unwrap_or_default();
+    let tag = |keys: &[&str]| keys.iter().find_map(|key| non_empty(tags.get(*key)));
+    let duration_ms = format
+        .get("duration")
+        .and_then(|d| d.as_str())
+        .and_then(|d| d.parse::<f64>().ok())
+        .filter(|d| d.is_finite() && *d > 0.0)
+        .map(|d| (d * 1000.0).round() as u64)
+        .unwrap_or(0);
+    Some(Fields {
+        title: tag(&["title"]),
+        artist: tag(&["artist"]),
+        album_artist: tag(&["album_artist", "albumartist", "wm/albumartist"]),
+        album: tag(&["album"]),
+        track_no: tag(&["track", "tracknumber", "wm/tracknumber"]).and_then(|t| leading_number(&t)),
+        disc_no: tag(&["disc", "discnumber", "wm/partofset"]).and_then(|d| leading_number(&d)),
+        year: tag(&["date", "year", "wm/year"])
+            .and_then(|d| leading_number(&d.chars().take(4).collect::<String>()))
+            .map(|y| y as i32),
+        genre: tag(&["genre"]),
+        duration_ms,
+        ..Fields::default()
+    })
 }
 
 fn probe(path: &Path, extension: &str) -> anyhow::Result<TrackMeta> {
@@ -309,6 +377,49 @@ mod tests {
             .unwrap()
             .embedded_cover
             .is_none());
+    }
+
+    #[test]
+    fn wma_tags_via_ffprobe() {
+        if crate::tools::ffprobe_path().is_none() {
+            println!("ffprobe not found: skipping wma_tags_via_ffprobe");
+            return;
+        }
+        let track = read(&fixtures().join("wma.wma")).unwrap().track;
+        assert_eq!(track.title, "Wma");
+        assert_eq!(track.artist, "Fixture Artist");
+        assert_eq!(track.album, "Probe Album");
+        assert_eq!(track.track_no, Some(3));
+        assert_eq!(track.year, Some(2024));
+        assert_eq!(track.format, "wma");
+        assert!(
+            (900..=1100).contains(&track.duration_ms),
+            "duration {}",
+            track.duration_ms
+        );
+        let tta = read(&fixtures().join("tta.tta")).unwrap().track;
+        assert!(
+            (900..=1100).contains(&tta.duration_ms),
+            "tta {}",
+            tta.duration_ms
+        );
+    }
+
+    #[test]
+    fn maps_ffprobe_json() {
+        let json = r#"{"format":{"duration":"61.500000","tags":{"TITLE":"T","Artist":"A",
+            "album":"Al","album_artist":"AA","track":"4/12","disc":"2/2","date":"1999-05-01",
+            "genre":"Jazz"}}}"#;
+        let fields = fields_from_ffprobe(json).unwrap();
+        assert_eq!(fields.title.as_deref(), Some("T"));
+        assert_eq!(fields.artist.as_deref(), Some("A"));
+        assert_eq!(fields.album.as_deref(), Some("Al"));
+        assert_eq!(fields.album_artist.as_deref(), Some("AA"));
+        assert_eq!(fields.track_no, Some(4));
+        assert_eq!(fields.disc_no, Some(2));
+        assert_eq!(fields.year, Some(1999));
+        assert_eq!(fields.genre.as_deref(), Some("Jazz"));
+        assert_eq!(fields.duration_ms, 61_500);
     }
 
     #[test]

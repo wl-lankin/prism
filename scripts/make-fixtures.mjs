@@ -79,7 +79,8 @@ try {
   const opusArgs = hasEncoder('libopus') ? ['-c:a', 'libopus'] : ['-c:a', 'opus', '-strict', '-2'];
   if (!hasEncoder('libopus')) console.warn('libopus missing: using the native ffmpeg opus encoder');
   ffmpeg([...sine, ...mono, ...bitexact, ...opusArgs, '-b:a', '24k', ...meta({ title: 'Opus' }), join(out, 'opus.opus')]);
-  ffmpeg([...sine, ...mono, ...bitexact, '-c:a', 'wmav2', '-b:a', '32k', ...meta({ title: 'Wma' }), join(out, 'wma.wma')]);
+  ffmpeg([...sine, ...mono, ...bitexact, '-c:a', 'wmav2', '-b:a', '32k',
+    ...meta({ title: 'Wma', artist: 'Fixture Artist', album: 'Probe Album', track: '3', date: '2024' }), join(out, 'wma.wma')]);
   ffmpeg([...sine, ...mono, ...bitexact, '-c:a', 'wavpack', ...meta({ title: 'WavPack' }), join(out, 'wv.wv')]);
   ffmpeg([...sine, ...mono, ...bitexact, '-c:a', 'tta', join(out, 'tta.tta')]);
   ffmpeg([...sine, ...mono, ...bitexact, '-c:a', 'aac', '-b:a', '32k', ...meta({ title: 'Aac' }), join(out, 'aac.m4a')]);

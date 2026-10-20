@@ -13,19 +13,63 @@ use crate::AppState;
 /// Changes are collected for this long before the affected folder is rescanned.
 pub const DEBOUNCE: Duration = Duration::from_secs(2);
 
-/// The library folder that contains `path`: the longest matching root.
-pub fn root_for<'a>(path: &Path, roots: &'a [PathBuf]) -> Option<&'a PathBuf> {
-    roots
+/// A watched library folder: the key it is stored under and its canonical form, which is
+/// how some platforms report events (macOS FSEvents says `/private/var/...` for `/var/...`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WatchRoot {
+    pub key: PathBuf,
+    pub canonical: PathBuf,
+}
+
+impl WatchRoot {
+    pub fn new(key: &Path) -> WatchRoot {
+        WatchRoot {
+            key: key.to_path_buf(),
+            canonical: canonicalize_lossy(key),
+        }
+    }
+}
+
+/// Canonicalizes the longest existing ancestor of `path` and appends the rest, so paths of
+/// deleted files still resolve. Falls back to `path` itself.
+pub fn canonicalize_lossy(path: &Path) -> PathBuf {
+    for ancestor in path.ancestors() {
+        if let Ok(canonical) = ancestor.canonicalize() {
+            return match path.strip_prefix(ancestor) {
+                Ok(rest) if !rest.as_os_str().is_empty() => canonical.join(rest),
+                _ => canonical,
+            };
+        }
+    }
+    path.to_path_buf()
+}
+
+/// The library key of the folder that contains `path`: the longest matching root, compared
+/// as given first and canonicalized second.
+pub fn root_for<'a>(path: &Path, roots: &'a [WatchRoot]) -> Option<&'a PathBuf> {
+    let longest = |matches: Vec<&'a WatchRoot>, by: fn(&WatchRoot) -> &PathBuf| {
+        matches
+            .into_iter()
+            .max_by_key(|root| by(root).components().count())
+            .map(|root| &root.key)
+    };
+    let raw: Vec<&WatchRoot> = roots.iter().filter(|r| path.starts_with(&r.key)).collect();
+    if !raw.is_empty() {
+        return longest(raw, |r| &r.key);
+    }
+    let canonical = canonicalize_lossy(path);
+    let matched: Vec<&WatchRoot> = roots
         .iter()
-        .filter(|root| path.starts_with(root))
-        .max_by_key(|root| root.components().count())
+        .filter(|r| canonical.starts_with(&r.canonical))
+        .collect();
+    longest(matched, |r| &r.canonical)
 }
 
 /// Watches library folders recursively and reports, per debounce window, each library
 /// folder that saw a change.
 pub struct FolderWatcher {
     debouncer: Debouncer<RecommendedWatcher>,
-    roots: Arc<Mutex<Vec<PathBuf>>>,
+    roots: Arc<Mutex<Vec<WatchRoot>>>,
 }
 
 impl FolderWatcher {
@@ -33,15 +77,23 @@ impl FolderWatcher {
         debounce: Duration,
         on_change: impl Fn(PathBuf) + Send + 'static,
     ) -> anyhow::Result<FolderWatcher> {
-        let roots: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
+        let roots: Arc<Mutex<Vec<WatchRoot>>> = Arc::new(Mutex::new(Vec::new()));
         let shared = Arc::clone(&roots);
         let debouncer = new_debouncer(debounce, move |result: DebounceEventResult| {
-            let Ok(events) = result else {
-                return;
-            };
             let roots = match shared.lock() {
                 Ok(roots) => roots.clone(),
                 Err(_) => return,
+            };
+            let events = match result {
+                Ok(events) => events,
+                Err(err) => {
+                    // Events were lost: rescan everything rather than miss a change.
+                    eprintln!("folder watcher error: {err}");
+                    for root in roots {
+                        on_change(root.key);
+                    }
+                    return;
+                }
             };
             let mut affected: Vec<PathBuf> = Vec::new();
             for event in events {
@@ -65,8 +117,8 @@ impl FolderWatcher {
             .watch(folder, RecursiveMode::Recursive)
             .with_context(|| format!("watching {}", folder.display()))?;
         let mut roots = self.roots.lock().map_err(|_| poisoned())?;
-        if !roots.iter().any(|root| root == folder) {
-            roots.push(folder.to_path_buf());
+        if !roots.iter().any(|root| root.key == folder) {
+            roots.push(WatchRoot::new(folder));
         }
         Ok(())
     }
@@ -75,7 +127,7 @@ impl FolderWatcher {
         self.roots
             .lock()
             .map_err(|_| poisoned())?
-            .retain(|root| root != folder);
+            .retain(|root| root.key != folder);
         self.debouncer
             .watcher()
             .unwatch(folder)
@@ -97,6 +149,10 @@ pub fn start(app: AppHandle, folders: Vec<PathBuf>) {
     let handle = app.clone();
     let watcher = FolderWatcher::new(DEBOUNCE, move |folder| {
         let state = handle.state::<AppState>();
+        // A folder removed from the library is ignored until it is unwatched.
+        if !state.library.is_registered(&folder).unwrap_or(false) {
+            return;
+        }
         let emit = tauri_emitter(handle.clone());
         if let Err(err) = state.library.rescan_folder(&folder, &emit) {
             eprintln!("rescanning {} failed: {err:#}", folder.display());
@@ -127,20 +183,44 @@ mod tests {
 
     #[test]
     fn root_for_picks_the_longest_containing_root() {
-        let roots = vec![
-            PathBuf::from("/music"),
-            PathBuf::from("/music/rock"),
-            PathBuf::from("/other"),
-        ];
+        let roots: Vec<WatchRoot> = ["/music", "/music/rock", "/other"]
+            .iter()
+            .map(|key| WatchRoot {
+                key: PathBuf::from(key),
+                canonical: PathBuf::from(key),
+            })
+            .collect();
         assert_eq!(
             root_for(Path::new("/music/rock/a/b.mp3"), &roots),
-            Some(&roots[1])
+            Some(&roots[1].key)
         );
         assert_eq!(
             root_for(Path::new("/music/jazz.mp3"), &roots),
-            Some(&roots[0])
+            Some(&roots[0].key)
         );
         assert_eq!(root_for(Path::new("/musicals/x.mp3"), &roots), None);
+    }
+
+    #[test]
+    fn matches_events_reported_under_the_canonical_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let canonical = dir.path().canonicalize().unwrap();
+        // The library knows the folder under an alias; events arrive under the real path.
+        let roots = vec![WatchRoot {
+            key: PathBuf::from("/alias/music"),
+            canonical: canonical.clone(),
+        }];
+        std::fs::create_dir(dir.path().join("album")).unwrap();
+        let existing = dir.path().join("album");
+        let deleted = dir.path().join("album").join("gone.mp3");
+        assert_eq!(root_for(&existing, &roots), Some(&roots[0].key));
+        assert_eq!(root_for(&deleted, &roots), Some(&roots[0].key));
+        assert_eq!(
+            canonicalize_lossy(&deleted),
+            canonical.join("album").join("gone.mp3")
+        );
+        let elsewhere = tempfile::tempdir().unwrap();
+        assert_eq!(root_for(elsewhere.path(), &roots), None);
     }
 
     #[test]

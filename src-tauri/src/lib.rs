@@ -1,5 +1,6 @@
 pub mod db;
 pub mod library;
+pub mod tools;
 
 use std::sync::Arc;
 

@@ -70,7 +70,7 @@ impl Library {
         path: &Path,
         emit: &dyn Fn(LibraryEvent),
     ) -> anyhow::Result<ScanReport> {
-        let path = std::path::absolute(path)?;
+        let path = normalize(path)?;
         if !path.is_dir() {
             anyhow::bail!("{} is not a folder", path.display());
         }
@@ -86,7 +86,7 @@ impl Library {
     /// Forgets a folder and every track indexed from it.
     pub fn remove_folder(&self, path: &Path, emit: &dyn Fn(LibraryEvent)) -> anyhow::Result<()> {
         let _scan = self.scan_lock.lock().map_err(|_| poisoned())?;
-        let key = folder_key(path);
+        let key = folder_key(&normalize(path)?);
         let mut conn = lock(&self.db)?;
         let tx = conn.transaction()?;
         let albums: Vec<String> = {
@@ -109,9 +109,10 @@ impl Library {
         path: &Path,
         emit: &dyn Fn(LibraryEvent),
     ) -> anyhow::Result<ScanReport> {
-        let key = folder_key(path);
+        let path = normalize(path)?;
+        let key = folder_key(&path);
         let online_before = self.online(&key)?;
-        let report = self.scan(path, emit)?;
+        let report = self.scan(&path, emit)?;
         let changed = report.added + report.updated + report.removed > 0;
         if changed || self.online(&key)? != online_before {
             emit(LibraryEvent::Changed);
@@ -141,6 +142,12 @@ impl Library {
         Ok(reports)
     }
 
+    /// Whether `path` is a library folder (after the same normalization as `add_folder`).
+    pub fn is_registered(&self, path: &Path) -> anyhow::Result<bool> {
+        let key = folder_key(&normalize(path)?);
+        scan::is_registered(&*lock(&self.db)?, &key)
+    }
+
     fn online(&self, key: &str) -> anyhow::Result<Option<bool>> {
         let conn = lock(&self.db)?;
         let online = conn
@@ -166,6 +173,11 @@ impl Library {
 
 fn poisoned() -> anyhow::Error {
     anyhow::anyhow!("library scan lock poisoned")
+}
+
+/// The one spelling a folder is stored under: absolute, as `std::path::absolute` gives it.
+fn normalize(path: &Path) -> anyhow::Result<PathBuf> {
+    Ok(std::path::absolute(path)?)
 }
 
 /// Emits library events to the webview as `library://changed` and `library://scan-progress`.
@@ -284,6 +296,32 @@ mod tests {
             ),
             0
         );
+    }
+
+    #[test]
+    fn removed_folder_does_not_come_back() {
+        let (library, _covers) = library();
+        let dir = copy_fixtures(&["corrupt.flac"]);
+        library.add_folder(dir.path(), &|_| {}).unwrap();
+        assert!(library.is_registered(dir.path()).unwrap());
+        // A non-normalized spelling of the same folder must remove it too.
+        let spelled = dir.path().join("cover").join("..");
+        if std::path::absolute(&spelled).unwrap() == dir.path() {
+            library.remove_folder(&spelled, &|_| {}).unwrap();
+        } else {
+            library.remove_folder(dir.path(), &|_| {}).unwrap();
+        }
+        assert!(!library.is_registered(dir.path()).unwrap());
+        // The watcher (or anything else) rescanning the old path must not resurrect it.
+        let events = RefCell::new(Vec::new());
+        let report = library
+            .rescan_folder(dir.path(), &|event| events.borrow_mut().push(event))
+            .unwrap();
+        assert_eq!(report, ScanReport::default());
+        assert!(events.into_inner().is_empty());
+        assert_eq!(count(&library, "SELECT COUNT(*) FROM folders"), 0);
+        assert_eq!(count(&library, "SELECT COUNT(*) FROM tracks"), 0);
+        assert_eq!(count(&library, "SELECT COUNT(*) FROM albums"), 0);
     }
 
     #[test]

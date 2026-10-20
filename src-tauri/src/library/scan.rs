@@ -5,7 +5,7 @@ use std::sync::MutexGuard;
 use std::time::UNIX_EPOCH;
 
 use rayon::prelude::*;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use walkdir::WalkDir;
 
@@ -71,6 +71,15 @@ struct Indexed {
     album_id: String,
     mtime: Option<i64>,
     size: Option<i64>,
+    duration_ms: i64,
+    format: String,
+}
+
+impl Indexed {
+    /// A row from a format only ffprobe can read that was indexed without ffprobe.
+    fn needs_reread(&self) -> bool {
+        self.duration_ms == 0 && tags::UNPARSED_EXTENSIONS.contains(&self.format.as_str())
+    }
 }
 
 struct Pending {
@@ -80,9 +89,11 @@ struct Pending {
     size: i64,
 }
 
-/// Indexes one library folder: new and changed files are read (in parallel), unchanged ones
-/// are skipped, vanished ones removed. A missing or unreadable folder is marked offline and
-/// its tracks are kept.
+/// Indexes one registered library folder: new and changed files are read (in parallel),
+/// unchanged ones are skipped, vanished ones removed. A missing or unreadable folder is
+/// marked offline and its tracks are kept. A folder that is not registered in `folders`
+/// (for example one just removed) is left alone and yields an empty report. Callers
+/// serialize scans (see `Library`), so the registration check cannot race a removal.
 pub fn scan_folder(
     db: &Db,
     covers: &CoverStore,
@@ -91,6 +102,11 @@ pub fn scan_folder(
 ) -> anyhow::Result<ScanReport> {
     let key = folder_key(folder);
     let mut report = ScanReport::default();
+
+    if !is_registered(&*lock(db)?, &key)? {
+        return Ok(report);
+    }
+    reconcile_albums(db)?;
 
     if !folder.is_dir() || std::fs::read_dir(folder).is_err() {
         let conn = lock(db)?;
@@ -108,14 +124,23 @@ pub fn scan_folder(
                         let (mtime, size) = file_stamp(&meta);
                         found.push((entry.into_path(), mtime, size));
                     }
-                    Err(err) => report
-                        .failed
-                        .push((entry.path().display().to_string(), err.to_string())),
+                    Err(err) => {
+                        // Keep its indexed row: unreadable is not deleted.
+                        unreadable_dirs.push(entry.path().to_path_buf());
+                        report
+                            .failed
+                            .push((entry.path().display().to_string(), err.to_string()));
+                    }
                 }
             }
             Ok(_) => {}
             Err(err) => {
-                let path = err.path().map(Path::to_path_buf).unwrap_or_default();
+                // An error without a path is attributed to the whole folder, which keeps
+                // every indexed track of this folder.
+                let path = match err.path() {
+                    Some(path) => path.to_path_buf(),
+                    None => folder.to_path_buf(),
+                };
                 if err.loop_ancestor().is_none() {
                     unreadable_dirs.push(path.clone());
                 }
@@ -137,7 +162,9 @@ pub fn scan_folder(
             continue;
         }
         match indexed.get(&id) {
-            Some(row) if row.mtime == Some(mtime) && row.size == Some(size) => {
+            Some(row)
+                if row.mtime == Some(mtime) && row.size == Some(size) && !row.needs_reread() =>
+            {
                 report.unchanged += 1;
                 done += 1;
             }
@@ -151,7 +178,6 @@ pub fn scan_folder(
     }
     progress(ScanProgress { done, total });
 
-    let mut touched_albums: HashSet<String> = HashSet::new();
     let mut folder_covers: HashMap<PathBuf, Option<String>> = HashMap::new();
     for chunk in pending.chunks(CHUNK) {
         let results: Vec<anyhow::Result<(Track, Option<String>)>> = chunk
@@ -169,6 +195,9 @@ pub fn scan_folder(
 
         let mut conn = lock(db)?;
         let tx = conn.transaction()?;
+        // Albums are rebuilt in the same transaction as their tracks, so an interrupted
+        // scan never leaves committed tracks without their album rows.
+        let mut touched_albums: HashSet<String> = HashSet::new();
         for (item, result) in chunk.iter().zip(results) {
             let (mut track, embedded) = match result {
                 Ok(read) => read,
@@ -193,6 +222,7 @@ pub fn scan_folder(
             }
             touched_albums.insert(track.album_id);
         }
+        rebuild_albums(&tx, touched_albums.iter())?;
         tx.commit()?;
         done += chunk.len() as u32;
         progress(ScanProgress { done, total });
@@ -200,6 +230,7 @@ pub fn scan_folder(
 
     let mut conn = lock(db)?;
     let tx = conn.transaction()?;
+    let mut touched_albums: HashSet<String> = HashSet::new();
     for (id, row) in &indexed {
         if seen.contains(id) {
             continue;
@@ -225,8 +256,9 @@ pub fn scan_folder(
 
 fn load_indexed(db: &Db, key: &str) -> anyhow::Result<HashMap<String, Indexed>> {
     let conn = lock(db)?;
-    let mut stmt =
-        conn.prepare("SELECT id, path, album_id, mtime, size FROM tracks WHERE folder = ?1")?;
+    let mut stmt = conn.prepare(
+        "SELECT id, path, album_id, mtime, size, duration_ms, format FROM tracks WHERE folder = ?1",
+    )?;
     let rows = stmt.query_map([key], |row| {
         Ok((
             row.get::<_, String>(0)?,
@@ -235,18 +267,47 @@ fn load_indexed(db: &Db, key: &str) -> anyhow::Result<HashMap<String, Indexed>> 
                 album_id: row.get(2)?,
                 mtime: row.get(3)?,
                 size: row.get(4)?,
+                duration_ms: row.get(5)?,
+                format: row.get(6)?,
             },
         ))
     })?;
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
+/// Updates the online flag of a registered folder. Never registers one.
 fn set_online(conn: &Connection, key: &str, online: bool) -> anyhow::Result<()> {
     conn.execute(
-        "INSERT INTO folders (path, online) VALUES (?1, ?2)
-         ON CONFLICT(path) DO UPDATE SET online = excluded.online",
+        "UPDATE folders SET online = ?2 WHERE path = ?1",
         params![key, online as i64],
     )?;
+    Ok(())
+}
+
+pub(crate) fn is_registered(conn: &Connection, key: &str) -> anyhow::Result<bool> {
+    Ok(conn
+        .query_row("SELECT 1 FROM folders WHERE path = ?1", [key], |_| Ok(()))
+        .optional()?
+        .is_some())
+}
+
+/// Creates album rows for tracks whose album is missing, e.g. after a crash between a
+/// track write and its album rebuild in older builds or an aborted scan.
+fn reconcile_albums(db: &Db) -> anyhow::Result<()> {
+    let mut conn = lock(db)?;
+    let missing: Vec<String> = {
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT album_id FROM tracks WHERE album_id NOT IN (SELECT id FROM albums)",
+        )?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        rows.collect::<Result<_, _>>()?
+    };
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let tx = conn.transaction()?;
+    rebuild_albums(&tx, missing.iter())?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -414,8 +475,50 @@ pub(crate) mod tests {
     }
 
     impl Harness {
+        /// Registers the folder (scans skip unregistered folders), then scans it.
         pub fn scan(&self, folder: &Path) -> ScanReport {
+            self.db
+                .0
+                .lock()
+                .unwrap()
+                .execute(
+                    "INSERT INTO folders (path, online) VALUES (?1, 1) ON CONFLICT(path) DO NOTHING",
+                    [folder_key(folder)],
+                )
+                .unwrap();
             scan_folder(&self.db, &self.covers, folder, |_| {}).unwrap()
+        }
+
+        fn insert_row(
+            &self,
+            id: &str,
+            path: &Path,
+            folder: &Path,
+            album_id: &str,
+            extra: (i64, i64, i64, &str),
+        ) {
+            let (mtime, size, duration_ms, format) = extra;
+            self.db
+                .0
+                .lock()
+                .unwrap()
+                .execute(
+                    "INSERT INTO tracks (id, source, title, artist, album_artist, album, album_id,
+                        duration_ms, format, path, folder, mtime, size)
+                     VALUES (?1, 'local', 'Orphan', 'Orphan Artist', 'Orphan Artist', 'Orphan Album',
+                        ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    params![
+                        id,
+                        album_id,
+                        duration_ms,
+                        format,
+                        path.to_string_lossy(),
+                        folder_key(folder),
+                        mtime,
+                        size
+                    ],
+                )
+                .unwrap();
         }
 
         pub fn count(&self, sql: &str) -> i64 {
@@ -587,6 +690,64 @@ pub(crate) mod tests {
             h.count("SELECT COUNT(*) FROM tracks_fts WHERE tracks_fts MATCH 'alpha'"),
             0
         );
+    }
+
+    #[test]
+    fn albums_missing_after_an_interrupted_scan_are_rebuilt() {
+        let h = harness();
+        let dir = copy_fixtures(&["corrupt.flac"]);
+        h.scan(dir.path());
+        // A track committed by a chunk whose album row was never written (scan interrupted).
+        let other = tempfile::tempdir().unwrap();
+        h.insert_row(
+            "local:orphan",
+            &other.path().join("x.mp3"),
+            other.path(),
+            "local:orphan-album",
+            (0, 0, 1000, "mp3"),
+        );
+        assert_eq!(
+            h.count("SELECT COUNT(*) FROM albums WHERE id = 'local:orphan-album'"),
+            0
+        );
+        let report = h.scan(dir.path());
+        assert_eq!(report.added + report.updated + report.removed, 0);
+        assert_eq!(
+            h.count("SELECT track_count FROM albums WHERE id = 'local:orphan-album'"),
+            1
+        );
+    }
+
+    #[test]
+    fn unregistered_folder_is_not_scanned() {
+        let h = harness();
+        let dir = copy_fixtures(&["corrupt.flac"]);
+        let report = scan_folder(&h.db, &h.covers, dir.path(), |_| {}).unwrap();
+        assert_eq!(report, ScanReport::default());
+        assert_eq!(h.count("SELECT COUNT(*) FROM folders"), 0);
+        assert_eq!(h.count("SELECT COUNT(*) FROM tracks"), 0);
+        let missing = dir.path().join("missing");
+        scan_folder(&h.db, &h.covers, &missing, |_| {}).unwrap();
+        assert_eq!(h.count("SELECT COUNT(*) FROM folders"), 0);
+    }
+
+    #[test]
+    fn zero_duration_rows_of_unparsed_formats_are_reread() {
+        let h = harness();
+        let dir = copy_fixtures(&["corrupt.flac"]);
+        h.scan(dir.path());
+        let wma = dir.path().join("wma.wma");
+        h.db.0
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE tracks SET duration_ms = 0 WHERE id = ?1",
+                [track_id(&wma)],
+            )
+            .unwrap();
+        let report = h.scan(dir.path());
+        assert_eq!(report.updated, 1, "{report:?}");
+        assert_eq!(report.added + report.removed, 0);
     }
 
     #[test]
