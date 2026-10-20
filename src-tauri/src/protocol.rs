@@ -6,7 +6,7 @@
 
 use std::io::Cursor;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use image::codecs::jpeg::JpegEncoder;
 use image::imageops::FilterType;
@@ -80,6 +80,22 @@ pub fn handle(store: &CoverStore, cache: &Path, path: &str) -> Response<Vec<u8>>
         .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
         .body(body)
         .unwrap_or_else(|_| Response::new(Vec::new()))
+}
+
+/// The cached JPEG of cover `id` at `size` px (one of 96, 300, 600), resized now when it is
+/// not cached yet. `None` when the cover is unknown or cannot be decoded.
+pub fn cached_cover(store: &CoverStore, cache: &Path, id: &str, size: u32) -> Option<PathBuf> {
+    if !SIZES.contains(&size) {
+        return None;
+    }
+    let original = store.path(id)?;
+    let cached = cache.join(size.to_string()).join(format!("{id}.jpg"));
+    if cached.is_file() {
+        return Some(cached);
+    }
+    let bytes = resize(&original, size).ok()?;
+    write_atomic(&cached, &bytes).ok()?;
+    Some(cached)
 }
 
 enum ResizeError {

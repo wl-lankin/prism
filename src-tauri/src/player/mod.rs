@@ -18,6 +18,15 @@ pub const EVENT_STATE: &str = "player://state";
 /// Payload: [`PlayerError`]. Sent when a track cannot be opened or decoded.
 pub const EVENT_ERROR: &str = "player://error";
 
+/// Delivers every event to each of `sinks`, in order.
+pub fn fan_out(sinks: Vec<EventSink>) -> EventSink {
+    Arc::new(move |event| {
+        for sink in &sinks {
+            sink(event.clone());
+        }
+    })
+}
+
 /// Emits player events to every webview window. `TrackChanged` is internal: the frontend
 /// sees the new track in the next `player://state`.
 pub fn tauri_sink(app: AppHandle) -> EventSink {

@@ -2,6 +2,7 @@ pub mod audio;
 pub mod commands;
 pub mod db;
 pub mod library;
+pub mod media_controls;
 pub mod player;
 pub mod protocol;
 pub mod tools;
@@ -16,7 +17,8 @@ use db::Db;
 use library::covers::CoverStore;
 use library::scan::lock;
 use library::{query, tauri_emitter, watch, Library};
-use player::{tauri_sink, Player, Resolver};
+use media_controls::MediaBridge;
+use player::{fan_out, tauri_sink, Player, Resolver};
 
 /// Shared backend state, managed by Tauri.
 pub struct AppState {
@@ -31,6 +33,23 @@ fn library_resolver(library: &Library) -> Resolver {
         let conn = lock(&db).ok()?;
         query::track(&conn, id).ok().flatten()
     })
+}
+
+/// The native handle media controls attach to: the main window's HWND on Windows, nothing
+/// elsewhere.
+fn main_window_handle(app: &tauri::App) -> Option<usize> {
+    #[cfg(target_os = "windows")]
+    {
+        match app.get_webview_window("main").map(|window| window.hwnd()) {
+            Some(Ok(hwnd)) => Some(hwnd.0 as usize),
+            _ => None,
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = app;
+        None
+    }
 }
 
 fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
@@ -51,15 +70,17 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
     let library = Arc::new(Library::new(db, Arc::new(CoverStore::new(cover_dir))));
     let folders = library.folders()?;
     let handle = app.handle().clone();
+    let media = MediaBridge::new();
     let player = Player::spawn(
         Arc::new(CpalOutputFactory),
         library_resolver(&library),
-        tauri_sink(handle.clone()),
+        fan_out(vec![tauri_sink(handle.clone()), media.sink()]),
     );
     app.manage(AppState {
         library: Arc::clone(&library),
         player,
     });
+    media.start(handle.clone(), main_window_handle(app));
 
     watch::start(handle.clone(), folders);
 
