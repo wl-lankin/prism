@@ -59,12 +59,12 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
         .context("resolving the app data dir")?;
     std::fs::create_dir_all(&data_dir)
         .with_context(|| format!("creating {}", data_dir.display()))?;
-    let cover_dir = app
+    let cover_cache = app
         .path()
         .app_cache_dir()
         .context("resolving the app cache dir")?
-        .join("covers")
-        .join("original");
+        .join("covers");
+    let cover_dir = cover_cache.join("original");
 
     let db = Arc::new(Db::open(&data_dir.join("library.db"))?);
     let library = Arc::new(Library::new(db, Arc::new(CoverStore::new(cover_dir))));
@@ -80,7 +80,7 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
         library: Arc::clone(&library),
         player,
     });
-    media.start(handle.clone(), main_window_handle(app));
+    media.start(handle.clone(), main_window_handle(app), cover_cache);
 
     watch::start(handle.clone(), folders);
 

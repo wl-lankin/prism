@@ -98,6 +98,28 @@ pub fn cached_cover(store: &CoverStore, cache: &Path, id: &str, size: u32) -> Op
     Some(cached)
 }
 
+/// Neutral cover for tracks without one: the app icon on the surface color.
+/// Cached at `<cache>/600/_placeholder.jpg`; the leading underscore cannot collide with a
+/// cover id (those are hex).
+pub fn placeholder_cover(cache: &Path) -> Option<PathBuf> {
+    let target = cache.join("600").join("_placeholder.jpg");
+    if target.is_file() {
+        return Some(target);
+    }
+    let icon = image::load_from_memory(include_bytes!("../icons/icon.png")).ok()?;
+    let side = 600u32;
+    let logo = flatten(&icon.resize(side / 2, side / 2, FilterType::Lanczos3));
+    let mut canvas = RgbImage::from_pixel(side, side, SURFACE);
+    let offset = ((side - logo.width()) / 2, (side - logo.height()) / 2);
+    image::imageops::replace(&mut canvas, &logo, offset.0 as i64, offset.1 as i64);
+    let mut out = Cursor::new(Vec::new());
+    canvas
+        .write_with_encoder(JpegEncoder::new_with_quality(&mut out, JPEG_QUALITY))
+        .ok()?;
+    write_atomic(&target, &out.into_inner()).ok()?;
+    Some(target)
+}
+
 enum ResizeError {
     /// The bytes are not a decodable image: the client cannot fix this, but it is not our fault.
     Undecodable(#[allow(dead_code)] ImageError),
@@ -195,6 +217,16 @@ mod tests {
         );
         let decoded = image::load_from_memory(response.body()).unwrap();
         assert!(decoded.width() <= 96 && decoded.height() <= 96);
+    }
+
+    #[test]
+    fn placeholder_cover_is_a_cached_600px_jpeg() {
+        let (root, _store) = setup();
+        let path = placeholder_cover(root.path()).unwrap();
+        assert_eq!(path, root.path().join("600").join("_placeholder.jpg"));
+        let decoded = image::load_from_memory(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (600, 600));
+        assert_eq!(placeholder_cover(root.path()), Some(path));
     }
 
     #[test]

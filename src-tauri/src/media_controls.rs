@@ -57,8 +57,37 @@ pub fn to_metadata(track: &Track, cover_file: Option<&Path>) -> OwnedMetadata {
         title: track.title.clone(),
         artist: track.artist.clone(),
         album: track.album.clone(),
-        cover_url: cover_file.map(|path| format!("file://{}", path.display())),
+        cover_url: cover_file.map(|path| cover_url(path, cfg!(target_os = "windows"))),
         duration: Duration::from_millis(track.duration_ms),
+    }
+}
+
+/// The `file://` URL of a cover. Windows (souvlaki strips the prefix and opens the rest as a
+/// path) needs the raw path; elsewhere the OS parses a real URL, so the path is
+/// percent-encoded.
+pub fn cover_url(path: &Path, raw_path: bool) -> String {
+    let text = path.to_string_lossy();
+    if raw_path {
+        return format!("file://{text}");
+    }
+    let mut url = String::from("file://");
+    for byte in text.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
+                url.push(byte as char)
+            }
+            other => url.push_str(&format!("%{other:02X}")),
+        }
+    }
+    url
+}
+
+/// Clamps a seek target to the track; an unknown duration (0) clamps nothing.
+fn clamp_seek(ms: u64, duration_ms: u64) -> u64 {
+    if duration_ms == 0 {
+        ms
+    } else {
+        ms.min(duration_ms)
     }
 }
 
@@ -79,7 +108,7 @@ pub fn action_for(event: &MediaControlEvent, state: &PlayerState) -> Option<Acti
             SeekDirection::Forward => state.position_ms.saturating_add(ms),
             SeekDirection::Backward => state.position_ms.saturating_sub(ms),
         };
-        Some(Action::Seek(target.min(state.duration_ms)))
+        Some(Action::Seek(clamp_seek(target, state.duration_ms)))
     };
     match event {
         MediaControlEvent::Play => (state.status == PlayerStatus::Paused).then_some(Action::Toggle),
@@ -89,9 +118,10 @@ pub fn action_for(event: &MediaControlEvent, state: &PlayerState) -> Option<Acti
         MediaControlEvent::Toggle => Some(Action::Toggle),
         MediaControlEvent::Next => Some(Action::Next),
         MediaControlEvent::Previous => Some(Action::Prev),
-        MediaControlEvent::SetPosition(MediaPosition(position)) => Some(Action::Seek(
-            (position.as_millis() as u64).min(state.duration_ms),
-        )),
+        MediaControlEvent::SetPosition(MediaPosition(position)) => Some(Action::Seek(clamp_seek(
+            position.as_millis() as u64,
+            state.duration_ms,
+        ))),
         MediaControlEvent::Seek(direction) => seek_by(*direction, SEEK_STEP_MS),
         MediaControlEvent::SeekBy(direction, amount) => {
             seek_by(*direction, amount.as_millis() as u64)
@@ -138,18 +168,22 @@ fn push(
         return;
     }
     if track_changed {
-        if let Some(track) = &state.track {
-            let cover = cover_for(track);
-            let metadata = to_metadata(track, cover.as_deref());
-            if let Err(err) = controls.set_metadata(metadata.as_metadata()) {
-                eprintln!("updating the media metadata failed: {err:?}");
+        match &state.track {
+            Some(track) => {
+                let cover = cover_for(track);
+                let metadata = to_metadata(track, cover.as_deref());
+                match controls.set_metadata(metadata.as_metadata()) {
+                    // Remembered only on success, so a failed update is retried.
+                    Ok(()) => pushed.track_id = Some(track.id.clone()),
+                    Err(err) => eprintln!("updating the media metadata failed: {err:?}"),
+                }
             }
+            None => pushed.track_id = None,
         }
     }
     if let Err(err) = controls.set_playback(playback_for(state)) {
         eprintln!("updating the media playback state failed: {err:?}");
     }
-    pushed.track_id = track_id.map(str::to_string);
     pushed.status = Some(state.status);
     pushed.position_ms = state.position_ms;
     pushed.at = Some(Instant::now());
@@ -183,7 +217,7 @@ impl MediaBridge {
 
     /// Starts the worker. `hwnd` is the main window handle (Windows) or `None`. The worker
     /// keeps draining states even when the OS controls fail to initialise.
-    pub fn start(&self, app: AppHandle, hwnd: Option<usize>) {
+    pub fn start(&self, app: AppHandle, hwnd: Option<usize>, cover_cache: PathBuf) {
         let receiver = match self.pending.lock() {
             Ok(mut pending) => pending.take(),
             Err(poisoned) => poisoned.into_inner().take(),
@@ -192,7 +226,7 @@ impl MediaBridge {
         let spawned = std::thread::Builder::new()
             .name("prism-media-controls".into())
             .spawn(move || {
-                let run = catch_unwind(AssertUnwindSafe(|| run(receiver, app, hwnd)));
+                let run = catch_unwind(AssertUnwindSafe(|| run(receiver, app, hwnd, cover_cache)));
                 if run.is_err() {
                     eprintln!("the media controls stopped after a panic");
                 }
@@ -228,20 +262,26 @@ fn create(app: &AppHandle, hwnd: Option<usize>) -> Option<MediaControls> {
     };
     let handle = app.clone();
     let attached = controls.attach(move |event| {
-        let Some(state) = handle.try_state::<AppState>() else {
-            return;
-        };
-        let Some(action) = action_for(&event, &state.player.state()) else {
-            return;
-        };
-        let result = match action {
-            Action::Toggle => state.player.toggle(),
-            Action::Next => state.player.next(),
-            Action::Prev => state.player.prev(),
-            Action::Seek(ms) => state.player.seek(ms),
-        };
-        if let Err(err) = result {
-            eprintln!("a media key could not be applied: {err}");
+        // A panic must not unwind into the OS callback.
+        let handled = catch_unwind(AssertUnwindSafe(|| {
+            let Some(state) = handle.try_state::<AppState>() else {
+                return;
+            };
+            let Some(action) = action_for(&event, &state.player.state()) else {
+                return;
+            };
+            let result = match action {
+                Action::Toggle => state.player.toggle(),
+                Action::Next => state.player.next(),
+                Action::Prev => state.player.prev(),
+                Action::Seek(ms) => state.player.seek(ms),
+            };
+            if let Err(err) = result {
+                eprintln!("a media key could not be applied: {err}");
+            }
+        }));
+        if handled.is_err() {
+            eprintln!("a media key panicked");
         }
     });
     match attached {
@@ -253,14 +293,18 @@ fn create(app: &AppHandle, hwnd: Option<usize>) -> Option<MediaControls> {
     }
 }
 
-fn run(receiver: Receiver<PlayerState>, app: AppHandle, hwnd: Option<usize>) {
+fn run(receiver: Receiver<PlayerState>, app: AppHandle, hwnd: Option<usize>, cover_cache: PathBuf) {
     let mut controls = create(&app, hwnd);
     let cover_app = app.clone();
     let cover_for: CoverFor = Box::new(move |track| {
-        let id = track.cover_id.as_deref()?;
-        let state = cover_app.try_state::<AppState>()?;
-        let store = &state.library.covers;
-        crate::protocol::cached_cover(store, store.dir().parent()?, id, COVER_SIZE)
+        let own = || {
+            let id = track.cover_id.as_deref()?;
+            let state = cover_app.try_state::<AppState>()?;
+            crate::protocol::cached_cover(&state.library.covers, &cover_cache, id, COVER_SIZE)
+        };
+        // The overlay keeps the previous artwork unless a new one is set, so a track
+        // without a usable cover gets the placeholder.
+        own().or_else(|| crate::protocol::placeholder_cover(&cover_cache))
     });
     let mut pushed = Pushed::default();
     while let Ok(mut state) = receiver.recv() {
@@ -328,11 +372,37 @@ mod tests {
         assert_eq!(metadata.duration, Duration::from_millis(215_500));
         assert_eq!(
             metadata.cover_url,
-            Some(format!("file://{}", cover.display()))
+            Some(cover_url(&cover, cfg!(target_os = "windows")))
         );
         let borrowed = metadata.as_metadata();
         assert_eq!(borrowed.title, Some("Song"));
         assert_eq!(borrowed.duration, Some(Duration::from_millis(215_500)));
+    }
+
+    #[test]
+    fn cover_url_is_raw_for_windows_and_encoded_elsewhere() {
+        let windows = Path::new(r"C:\Users\Jo Doe\cache\c#1.jpg");
+        assert_eq!(
+            cover_url(windows, true),
+            r"file://C:\Users\Jo Doe\cache\c#1.jpg"
+        );
+        let mac = Path::new("/Users/Jo Doe/Library/Caches/c#1 (ü).jpg");
+        assert_eq!(
+            cover_url(mac, false),
+            "file:///Users/Jo%20Doe/Library/Caches/c%231%20%28%C3%BC%29.jpg"
+        );
+    }
+
+    #[test]
+    fn seeks_clamp_to_a_known_duration_only() {
+        let mut playing = state(PlayerStatus::Playing, 60_000);
+        playing.duration_ms = 0;
+        let seek = MediaControlEvent::SetPosition(MediaPosition(Duration::from_secs(90)));
+        assert_eq!(action_for(&seek, &playing), Some(Action::Seek(90_000)));
+        assert_eq!(
+            action_for(&MediaControlEvent::Seek(SeekDirection::Forward), &playing),
+            Some(Action::Seek(70_000))
+        );
     }
 
     #[test]
