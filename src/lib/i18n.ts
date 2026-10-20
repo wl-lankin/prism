@@ -42,7 +42,6 @@ const en = {
   'transport.volume': 'Volume',
   'transport.mute': 'Mute',
   'transport.unmute': 'Unmute',
-  'transport.favorite': 'Add to favorites',
 
   'flow.failed': 'Playback could not start: {message}',
 
@@ -52,7 +51,6 @@ const en = {
   'view.songs.lead': 'Every track in your library, in one list.',
   'view.album.lead': 'Album details appear here.',
   'view.artist.lead': 'Artist details appear here.',
-  'view.favorites.lead': 'Favorites from every source arrive in a later version.',
   'view.playlists.lead': 'Playlists arrive in a later version.',
   'view.count.albums': '{count} albums',
   'view.count.albums.one': '1 album',
@@ -89,6 +87,23 @@ const en = {
   'songs.time': 'Time',
 
   'artist.missing': 'This artist is no longer in your library.',
+
+  'favorites.toggle': 'Favorite',
+  'favorites.toggleItem': 'Favorite: {name}',
+  'favorites.add': 'Add to favorites',
+  'favorites.remove': 'Remove from favorites',
+  'favorites.failed': 'The favorite could not be saved: {message}',
+  'favorites.loadFailed': 'The favorites could not be loaded: {message}',
+  'favorites.kinds': 'Favorites by kind',
+  'favorites.all': 'All',
+  'favorites.empty.track': 'No favorite songs yet',
+  'favorites.empty.trackLead': 'Click the heart next to a song, or in the player bar while it plays, to keep it here.',
+  'favorites.empty.album': 'No favorite albums yet',
+  'favorites.empty.albumLead': 'Open an album and click the heart next to Play.',
+  'favorites.empty.artist': 'No favorite artists yet',
+  'favorites.empty.artistLead': 'Open an artist and click the heart next to Play.',
+  'favorites.emptySource': 'None of these favorites come from {source}.',
+  'favorites.browse': 'Browse albums',
 
   'search.open': 'Search',
   'search.label': 'Search the library',
@@ -189,7 +204,6 @@ const de: Record<Key, string> = {
   'transport.volume': 'Lautstärke',
   'transport.mute': 'Stumm',
   'transport.unmute': 'Ton an',
-  'transport.favorite': 'Zu Favoriten hinzufügen',
 
   'flow.failed': 'Wiedergabe konnte nicht starten: {message}',
 
@@ -199,7 +213,6 @@ const de: Record<Key, string> = {
   'view.songs.lead': 'Alle Titel deiner Mediathek in einer Liste.',
   'view.album.lead': 'Hier erscheinen die Details zum Album.',
   'view.artist.lead': 'Hier erscheinen die Details zum Interpreten.',
-  'view.favorites.lead': 'Favoriten aus allen Quellen kommen in einer späteren Version.',
   'view.playlists.lead': 'Playlists kommen in einer späteren Version.',
   'view.count.albums': '{count} Alben',
   'view.count.albums.one': '1 Album',
@@ -236,6 +249,23 @@ const de: Record<Key, string> = {
   'songs.time': 'Dauer',
 
   'artist.missing': 'Dieser Interpret ist nicht mehr in deiner Mediathek.',
+
+  'favorites.toggle': 'Favorit',
+  'favorites.toggleItem': 'Favorit: {name}',
+  'favorites.add': 'Zu Favoriten hinzufügen',
+  'favorites.remove': 'Aus Favoriten entfernen',
+  'favorites.failed': 'Der Favorit konnte nicht gespeichert werden: {message}',
+  'favorites.loadFailed': 'Die Favoriten konnten nicht geladen werden: {message}',
+  'favorites.kinds': 'Favoriten nach Art',
+  'favorites.all': 'Alle',
+  'favorites.empty.track': 'Noch keine Lieblingstitel',
+  'favorites.empty.trackLead': 'Klicke auf das Herz neben einem Titel oder in der Wiedergabeleiste, um ihn hier zu sammeln.',
+  'favorites.empty.album': 'Noch keine Lieblingsalben',
+  'favorites.empty.albumLead': 'Öffne ein Album und klicke auf das Herz neben Abspielen.',
+  'favorites.empty.artist': 'Noch keine Lieblingsinterpreten',
+  'favorites.empty.artistLead': 'Öffne einen Interpreten und klicke auf das Herz neben Abspielen.',
+  'favorites.emptySource': 'Keiner dieser Favoriten stammt aus {source}.',
+  'favorites.browse': 'Alben ansehen',
 
   'search.open': 'Suchen',
   'search.label': 'Mediathek durchsuchen',

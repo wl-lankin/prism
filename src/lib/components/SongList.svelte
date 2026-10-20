@@ -6,11 +6,13 @@
   import { saveScroll, savedScroll } from '../scroll';
   import { library } from '../stores/library.svelte';
   import { go } from '../stores/nav.svelte';
+  import { FAVORITE_KEY, isFavoriteKey, toggleFavorite } from '../stores/favorites.svelte';
   import { player } from '../stores/player.svelte';
   import type { Track } from '../types';
   import { evictPages, pagesFor } from '../pages';
   import { visibleRange } from '../virtual';
   import Cover from './Cover.svelte';
+  import Heart from './Heart.svelte';
   import NowPlayingBars from './NowPlayingBars.svelte';
   import ViewHead from './ViewHead.svelte';
 
@@ -134,6 +136,12 @@
     } else if (event.key === 'Enter' && selected >= 0) {
       event.preventDefault();
       void playSongsFrom(selected);
+    } else if (isFavoriteKey(event) && selected >= 0) {
+      const page = pages.get(Math.floor(selected / PAGE));
+      const track = page?.version === library.version ? page.tracks[selected % PAGE] : undefined;
+      if (!track) return;
+      event.preventDefault();
+      void toggleFavorite('track', track.id);
     }
   }
 </script>
@@ -147,6 +155,7 @@
     <span>{t('songs.title')}</span>
     <span>{t('songs.artist')}</span>
     <span>{t('songs.album')}</span>
+    <span></span>
     <span class="time">{t('songs.time')}</span>
   </div>
 
@@ -154,6 +163,7 @@
     class="list"
     role="listbox"
     tabindex="0"
+    aria-keyshortcuts={FAVORITE_KEY}
     aria-label={t('nav.songs')}
     aria-activedescendant={activeId}
     style="height:{total * ROW}px"
@@ -199,12 +209,14 @@
             <button type="button" class="cell dim link" tabindex="-1" onclick={() => go('album', track.albumId)}>
               {track.album}
             </button>
+            <Heart kind="track" id={track.id} size={16} tabindex={-1} ghost revealed={selected === row.index} label={t('favorites.toggleItem', { name: track.title })} />
             <span class="time">{formatDuration(track.durationMs)}</span>
           {:else}
             <span class="ghost-cover"></span>
             <span class="ghost" style="width:46%"></span>
             <span class="ghost" style="width:38%"></span>
             <span class="ghost" style="width:52%"></span>
+            <span></span>
             <span></span>
           {/if}
         </div>
@@ -227,7 +239,7 @@
   .cols,
   .row {
     display: grid;
-    grid-template-columns: 40px 32px minmax(0, 2.2fr) minmax(0, 1.4fr) minmax(0, 1.4fr) 56px;
+    grid-template-columns: 40px 32px minmax(0, 2.2fr) minmax(0, 1.4fr) minmax(0, 1.4fr) 30px 56px;
     column-gap: 14px;
     align-items: center;
     padding: 0 12px;
@@ -285,6 +297,12 @@
 
   .row.selected {
     background: rgba(255, 255, 255, 0.075);
+  }
+
+  /* A song's heart shows on hover or selection (Heart's revealed), and always once it is set. */
+  .row:hover :global(.heart.hidden) {
+    opacity: 1;
+    pointer-events: auto;
   }
 
   .list:focus-visible .row.selected {

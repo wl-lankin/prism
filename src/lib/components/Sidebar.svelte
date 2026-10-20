@@ -16,7 +16,7 @@
 
   const top: Item[] = [
     { label: 'nav.home', icon: 'home', view: 'home', match: ['home'] },
-    { label: 'nav.favorites', icon: 'heart', soon: true },
+    { label: 'nav.favorites', icon: 'heart', view: 'favorites', match: ['favorites'] },
     { label: 'nav.playlists', icon: 'playlists', soon: true },
   ];
 

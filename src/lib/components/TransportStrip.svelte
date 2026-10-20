@@ -4,6 +4,7 @@
   import { playerNext, playerPrev, playerSeek, playerSetVolume } from '../ipc';
   import { player } from '../stores/player.svelte';
   import Cover from './Cover.svelte';
+  import Heart from './Heart.svelte';
   import Icon from './Icon.svelte';
   import Slider from './Slider.svelte';
 
@@ -91,7 +92,10 @@
   </div>
 
   <div class="right">
-    <!-- The favorite heart arrives with favorites (M2). -->
+    <!-- Dropped files ("file:" ids) are not in the library; a favorite of one would be an orphan. -->
+    {#if !idle && track && !track.id.startsWith('file:')}
+      <Heart kind="track" id={track.id} label={t('favorites.toggleItem', { name: track.title })} />
+    {/if}
     <button type="button" class="btn small" aria-label={muted ? t('transport.unmute') : t('transport.mute')} title={muted ? t('transport.unmute') : t('transport.mute')} onclick={toggleMute}>
       <Icon name={volumeIcon} size={18} />
     </button>

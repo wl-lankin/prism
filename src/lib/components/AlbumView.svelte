@@ -6,9 +6,11 @@
   import { shuffle } from '../flow';
   import { library } from '../stores/library.svelte';
   import { back, go } from '../stores/nav.svelte';
+  import { FAVORITE_KEY, isFavoriteKey, toggleFavorite } from '../stores/favorites.svelte';
   import { player } from '../stores/player.svelte';
   import type { Track } from '../types';
   import Cover from './Cover.svelte';
+  import Heart from './Heart.svelte';
   import Icon from './Icon.svelte';
   import NowPlayingBars from './NowPlayingBars.svelte';
 
@@ -68,6 +70,7 @@
 
   /** The row a click landed on (rows carry `data-index`). */
   function rowIndex(event: MouseEvent): number | null {
+    if ((event.target as HTMLElement).closest('button')) return null;
     const row = (event.target as HTMLElement).closest<HTMLElement>('[data-index]');
     return row ? Number(row.dataset.index) : null;
   }
@@ -87,6 +90,9 @@
     } else if (event.key === 'Enter' && selected >= 0) {
       event.preventDefault();
       play(selected);
+    } else if (isFavoriteKey(event) && tracks[selected]) {
+      event.preventDefault();
+      void toggleFavorite('track', tracks[selected].id);
     }
   }
 </script>
@@ -134,6 +140,7 @@
               <Icon name="shuffle" size={16} />
               {t('album.shuffle')}
             </button>
+            <Heart kind="album" id={albumId} round label={t('favorites.toggleItem', { name: title })} />
           </div>
         </div>
       </header>
@@ -143,6 +150,7 @@
           class="tracks"
           role="listbox"
           tabindex="0"
+          aria-keyshortcuts={FAVORITE_KEY}
           aria-label={title}
           aria-activedescendant={selected >= 0 ? `track-${selected}` : undefined}
           {onkeydown}
@@ -182,6 +190,7 @@
                   <span class="feat">{track.artist}</span>
                 {/if}
               </span>
+              <Heart kind="track" id={track.id} size={16} tabindex={-1} ghost revealed={selected === i} label={t('favorites.toggleItem', { name: track.title })} />
               <span class="time">{formatDuration(track.durationMs)}</span>
             </div>
           {/each}
@@ -335,6 +344,7 @@
 
   .actions {
     display: flex;
+    align-items: center;
     gap: 10px;
   }
 
@@ -352,7 +362,7 @@
 
   .row {
     display: grid;
-    grid-template-columns: 32px minmax(0, 1fr) 56px;
+    grid-template-columns: 32px minmax(0, 1fr) 30px 56px;
     column-gap: 16px;
     align-items: center;
     height: 44px;
@@ -369,6 +379,12 @@
 
   .row.selected {
     background: rgba(255, 255, 255, 0.075);
+  }
+
+  /* A song's heart shows on hover or selection (Heart's revealed), and always once it is set. */
+  .row:hover :global(.heart.hidden) {
+    opacity: 1;
+    pointer-events: auto;
   }
 
   .tracks:focus-visible .row.selected {

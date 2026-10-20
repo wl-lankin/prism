@@ -46,6 +46,11 @@ const invoke = vi.fn(async (cmd: string, args?: Record<string, unknown>): Promis
       return { albums: [album], artists: [artist], tracks: [track(2)] };
     case 'library_album_tracks':
       return [track(1), track(2), track(3)];
+    case 'favorites_tracks':
+      return [track(1), track(2)];
+    case 'favorites_albums':
+    case 'favorites_artists':
+      return [];
     case 'library_tracks_range': {
       const { offset, limit } = args as { offset: number; limit: number };
       return Array.from({ length: limit }, (_, i) => track(offset + i));
@@ -234,5 +239,135 @@ it('fetches songs in pages of 200 and renders only the rows near the viewport', 
   await settle();
   expect(invoke).toHaveBeenCalledWith('library_tracks_range', { offset: 0, limit: 1000 });
   expect(invoke).toHaveBeenCalledWith('player_play', expect.objectContaining({ startIndex: 3 }));
+  unmount(app);
+});
+
+it('renders a favorite heart as pressed and toggles it on click', async () => {
+  const { default: Heart } = await import('./Heart.svelte');
+  const { favorites } = await import('../stores/favorites.svelte');
+  favorites.tracks.add('local:t1');
+  const app = mount(Heart, { target, props: { kind: 'track', id: 'local:t1', label: 'Favorite Song 1' } });
+  flushSync();
+  const button = target.querySelector('button')!;
+  expect(button.getAttribute('aria-pressed')).toBe('true');
+  expect(button.getAttribute('aria-label')).toBe('Favorite Song 1');
+
+  button.click();
+  flushSync();
+  expect(button.getAttribute('aria-pressed')).toBe('false');
+  expect(invoke).toHaveBeenCalledWith('favorites_set', { kind: 'track', id: 'local:t1', on: false });
+
+  button.click();
+  flushSync();
+  expect(button.getAttribute('aria-pressed')).toBe('true');
+  expect(invoke).toHaveBeenLastCalledWith('favorites_set', { kind: 'track', id: 'local:t1', on: true });
+  unmount(app);
+});
+
+it('toggles the favorite of the selected Songs row with "f"', async () => {
+  const { favorites } = await import('../stores/favorites.svelte');
+  favorites.tracks.clear();
+  library.trackCount = 50;
+  library.version++;
+  const app = mount(SongList, { target });
+  await frame();
+  await settle();
+  const list = target.querySelector('[role="listbox"]')!;
+  expect(list.getAttribute('aria-keyshortcuts')).toBe('F');
+  target.querySelectorAll('[role="option"]')[2].dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  flushSync();
+  key(list, 'f');
+  expect(invoke).toHaveBeenCalledWith('favorites_set', { kind: 'track', id: 'local:t2', on: true });
+  expect(favorites.tracks.has('local:t2')).toBe(true);
+  // With a modifier it is not the shortcut.
+  invoke.mockClear();
+  list.dispatchEvent(new KeyboardEvent('keydown', { key: 'f', ctrlKey: true, bubbles: true }));
+  flushSync();
+  expect(invoke).not.toHaveBeenCalledWith('favorites_set', expect.anything());
+  key(list, 'f');
+  expect(invoke).toHaveBeenCalledWith('favorites_set', { kind: 'track', id: 'local:t2', on: false });
+  unmount(app);
+});
+
+it('toggles the favorite of the selected album track with "f"', async () => {
+  const { default: AlbumView } = await import('./AlbumView.svelte');
+  const { favorites } = await import('../stores/favorites.svelte');
+  favorites.tracks.clear();
+  const app = mount(AlbumView, { target, props: { albumId: 'a1' } });
+  await settle();
+  const list = target.querySelector('[role="listbox"]')!;
+  key(list, 'ArrowDown');
+  key(list, 'f');
+  expect(invoke).toHaveBeenCalledWith('favorites_set', { kind: 'track', id: 'local:t1', on: true });
+  unmount(app);
+});
+
+it('hides a row heart that is not set from pointer and screen reader until the row is selected', async () => {
+  const { default: AlbumView } = await import('./AlbumView.svelte');
+  const { favorites } = await import('../stores/favorites.svelte');
+  favorites.tracks.clear();
+  favorites.tracks.add('local:t3');
+  const app = mount(AlbumView, { target, props: { albumId: 'a1' } });
+  await settle();
+  const hearts = [...target.querySelectorAll<HTMLElement>('.tracks .heart')];
+  expect(hearts[0].getAttribute('aria-hidden')).toBe('true');
+  expect(hearts[0].classList.contains('hidden')).toBe(true);
+  expect(hearts[2].getAttribute('aria-hidden')).toBeNull();
+  key(target.querySelector('[role="listbox"]')!, 'ArrowDown');
+  expect(hearts[0].getAttribute('aria-hidden')).toBeNull();
+  expect(hearts[0].classList.contains('hidden')).toBe(false);
+  // A focused heart never stays invisible, even when it is not set.
+  hearts[1].dispatchEvent(new FocusEvent('focus'));
+  flushSync();
+  expect(hearts[1].classList.contains('hidden')).toBe(false);
+  unmount(app);
+});
+
+it('un-hearts the selected Favorites song with "f" and keeps the selection in range', async () => {
+  const { default: FavoritesView } = await import('./FavoritesView.svelte');
+  const { favorites } = await import('../stores/favorites.svelte');
+  favorites.tracks.clear();
+  favorites.tracks.add('local:t1');
+  favorites.tracks.add('local:t2');
+  const app = mount(FavoritesView, { target });
+  await settle();
+  const list = target.querySelector('[role="listbox"]')!;
+  expect(list.querySelectorAll('[role="option"]')).toHaveLength(2);
+  key(list, 'End');
+  expect(list.getAttribute('aria-activedescendant')).toBe('fav-song-1');
+  key(list, 'f');
+  expect(invoke).toHaveBeenCalledWith('favorites_set', { kind: 'track', id: 'local:t2', on: false });
+  await settle();
+  const rows = list.querySelectorAll('[role="option"]');
+  expect(rows).toHaveLength(1);
+  expect(list.getAttribute('aria-activedescendant')).toBe('fav-song-0');
+  expect(rows[0].getAttribute('aria-selected')).toBe('true');
+  unmount(app);
+});
+
+it('shows no transport heart for a dropped file, and one for a library track', async () => {
+  const { default: TransportStrip } = await import('./TransportStrip.svelte');
+  const { player } = await import('../stores/player.svelte');
+  player.status = 'playing';
+  player.track = { ...track(1), id: 'file:C:/drop/a.flac', source: 'local' };
+  const app = mount(TransportStrip, { target });
+  flushSync();
+  expect(target.querySelector('.heart')).toBeNull();
+  player.track = track(1);
+  flushSync();
+  expect(target.querySelector('.heart')?.getAttribute('aria-pressed')).not.toBeNull();
+  player.status = 'idle';
+  player.track = null;
+  flushSync();
+  unmount(app);
+});
+
+it('renders a heart that is not a favorite as not pressed', async () => {
+  const { default: Heart } = await import('./Heart.svelte');
+  const app = mount(Heart, { target, props: { kind: 'album', id: 'nope' } });
+  flushSync();
+  const button = target.querySelector('button')!;
+  expect(button.getAttribute('aria-pressed')).toBe('false');
+  expect(button.getAttribute('aria-label')).toBe('Favorite');
   unmount(app);
 });
