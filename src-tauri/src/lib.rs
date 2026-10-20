@@ -19,12 +19,14 @@ use library::covers::CoverStore;
 use library::scan::lock;
 use library::{query, tauri_emitter, watch, Library};
 use media_controls::MediaBridge;
-use player::{fan_out, tauri_sink, Player, Resolver};
+use player::{fan_out, tauri_sink, with_dropped, DroppedFiles, Player, Resolver};
 
 /// Shared backend state, managed by Tauri.
 pub struct AppState {
     pub library: Arc<Library>,
     pub player: Player,
+    /// Files dropped onto the window, playable without indexing.
+    pub dropped: Arc<DroppedFiles>,
 }
 
 /// Resolves queue entries against the library database.
@@ -74,14 +76,16 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
     let folders = library.folders()?;
     let handle = app.handle().clone();
     let media = MediaBridge::new();
+    let dropped = Arc::new(DroppedFiles::new(Some(Arc::clone(&library.covers))));
     let player = Player::spawn(
         Arc::new(CpalOutputFactory),
-        library_resolver(&library),
+        with_dropped(Arc::clone(&dropped), library_resolver(&library)),
         fan_out(vec![tauri_sink(handle.clone()), media.sink()]),
     );
     app.manage(AppState {
         library: Arc::clone(&library),
         player,
+        dropped,
     });
     media.start(handle.clone(), main_window_handle(app), cover_cache);
 
@@ -111,6 +115,7 @@ pub fn run() {
             commands::player_seek,
             commands::player_set_volume,
             commands::player_state,
+            commands::player_play_files,
             commands::library_add_folder,
             commands::library_remove_folder,
             commands::library_folders,

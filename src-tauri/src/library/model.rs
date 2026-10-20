@@ -120,6 +120,11 @@ pub fn track_id(path: &Path) -> String {
     format!("local:{}", sha1_hex(&normalize_path(path)))
 }
 
+/// Id of a file played without indexing (dropped onto the window): `file:<sha1 of the path>`.
+pub fn file_track_id(path: &Path) -> String {
+    format!("file:{}", sha1_hex(&normalize_path(path)))
+}
+
 pub fn album_id(album_artist: &str, album: &str) -> String {
     let key = format!(
         "{}\u{1f}{}",

@@ -1,6 +1,10 @@
 // Generates the small audio fixtures the Rust library tests read.
 // Run with `node scripts/make-fixtures.mjs`; needs `ffmpeg` on PATH.
 // Every file is a 1-second sine (or derived from one), so the set stays far below 300 KB.
+//
+// `node scripts/make-fixtures.mjs --demo <n>` instead writes a synthetic demo library of
+// <n> tagged FLAC tracks (about 10 per album, fictional names, generated cover art, silent
+// audio) to the gitignored `demo/` folder, for trying the library views at scale.
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -9,6 +13,19 @@ import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const out = join(root, 'src-tauri/tests/fixtures');
+
+const demoFlag = process.argv.indexOf('--demo');
+if (demoFlag !== -1) {
+  const count = Number(process.argv[demoFlag + 1] ?? 3000);
+  if (!Number.isInteger(count) || count < 1) {
+    console.error('usage: node scripts/make-fixtures.mjs --demo <number of tracks>');
+    process.exit(1);
+  }
+  const { makeDemo } = await import('./demo-library.mjs');
+  await makeDemo(join(root, 'demo'), count);
+  process.exit(0);
+}
+
 const work = mkdtempSync(join(tmpdir(), 'prism-fixtures-'));
 
 const ffmpeg = (args) =>

@@ -1,5 +1,6 @@
 //! The player service: queue, engine thread and the events it sends to the frontend.
 
+pub mod dropped;
 pub mod engine;
 pub mod queue;
 
@@ -7,6 +8,7 @@ use std::sync::Arc;
 
 use tauri::{AppHandle, Emitter};
 
+pub use dropped::{with_dropped, DroppedFiles, DROPPED_PREFIX};
 pub use engine::{
     default_opener, EventSink, Opener, Player, PlayerError, PlayerEvent, PlayerState, PlayerStatus,
     Resolver, DEFAULT_VOLUME, PRELOAD_MS, RESTART_AFTER_MS,

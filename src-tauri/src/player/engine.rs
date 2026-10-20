@@ -808,6 +808,7 @@ mod tests {
     use super::*;
     use crate::audio::{open_source, Input, OutputEvent, OutputSink};
     use crate::library::tags::{self, fixtures};
+    use crate::player::dropped::{with_dropped, DroppedFiles};
 
     const STEREO_44K: StreamSpec = StreamSpec {
         sample_rate: 44_100,
@@ -924,13 +925,17 @@ mod tests {
     const FAST: f64 = 20.0;
 
     fn harness(tracks: Vec<Track>, speed: f64, opener: Option<Opener>) -> Harness {
+        let resolver: Resolver =
+            Arc::new(move |id: &str| tracks.iter().find(|track| track.id == id).cloned());
+        harness_with(resolver, speed, opener)
+    }
+
+    fn harness_with(resolver: Resolver, speed: f64, opener: Option<Opener>) -> Harness {
         let played = Arc::new(Mutex::new(Vec::new()));
         let factory = Arc::new(InstantFactory {
             speed,
             played: Arc::clone(&played),
         });
-        let resolver: Resolver =
-            Arc::new(move |id: &str| tracks.iter().find(|track| track.id == id).cloned());
         let (tx, events) = crossbeam_channel::unbounded();
         let sink: EventSink = Arc::new(move |event| {
             let _ = tx.send(event);
@@ -1026,6 +1031,27 @@ mod tests {
         let state = h.player.state();
         assert_eq!(state.status, PlayerStatus::Idle);
         assert_eq!(state.queue_length, 2);
+    }
+
+    #[test]
+    fn dropped_file_plays_without_indexing() {
+        let dropped = Arc::new(DroppedFiles::new(None));
+        let file = fixtures().join("tagged.mp3").to_string_lossy().into_owned();
+        let ids = dropped.add(&[file]);
+        // The library knows nothing: only the dropped-files map can resolve the id.
+        let h = harness_with(
+            with_dropped(dropped, Arc::new(|_id: &str| None)),
+            FAST,
+            None,
+        );
+        h.player.play(ids.clone(), 0).unwrap();
+        let events = collect_until(&h.events, Duration::from_secs(10), back_to_idle);
+        assert_eq!(changes(&events), ids);
+        assert!(errors(&events).is_empty());
+        assert!(
+            !h.played.lock().unwrap().is_empty(),
+            "samples reached the output"
+        );
     }
 
     #[test]
