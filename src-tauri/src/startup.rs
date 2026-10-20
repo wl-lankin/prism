@@ -312,6 +312,14 @@ impl StartupNotice {
     pub fn take(&self) -> Option<String> {
         self.0.lock().unwrap_or_else(PoisonError::into_inner).take()
     }
+
+    /// Whether a notice waits for the main window.
+    pub fn is_pending(&self) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_some()
+    }
 }
 
 /// Returns the startup notice once and clears it.

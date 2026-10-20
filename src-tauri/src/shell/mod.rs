@@ -113,8 +113,10 @@ pub enum MainAtStart {
     StayClosed,
 }
 
-pub fn main_at_start(autostart: bool) -> MainAtStart {
-    if autostart {
+/// Started at sign-in the window stays closed, unless a startup notice (a quarantined library
+/// file) waits for it: that message must not get lost in a hidden window.
+pub fn main_at_start(autostart: bool, notice_pending: bool) -> MainAtStart {
+    if autostart && !notice_pending {
         MainAtStart::StayClosed
     } else {
         MainAtStart::Show
@@ -124,7 +126,10 @@ pub fn main_at_start(autostart: bool) -> MainAtStart {
 /// Shows the main window at the end of setup (its first frame is the page's own `--bg`), or,
 /// started at sign-in, leaves it hidden and marks it closed.
 pub fn start_main(app: &AppHandle, autostart: bool) {
-    match main_at_start(autostart) {
+    let notice_pending = app
+        .try_state::<crate::startup::StartupNotice>()
+        .is_some_and(|notice| notice.is_pending());
+    match main_at_start(autostart, notice_pending) {
         MainAtStart::StayClosed => {
             if let Some(state) = app.try_state::<ShellState>() {
                 state.set_main_closed(true);
@@ -202,8 +207,8 @@ pub fn apply_setting(app: &AppHandle, change: &Change) -> Result<(), String> {
                     .map_err(|err| format!("keeping the mini player on top failed: {err}"))?;
             }
         }
-        // Already registered by `settings_set` before saving; the same shortcut again is a
-        // no-op.
+        // `settings_set` applies these two itself, before saving and outside the settings
+        // lock, so a refusal reaches the UI and nothing is saved.
         Change::MiniShortcut(accelerator) => shortcut::apply(app, accelerator)?,
         Change::StartWithSystem(on) => shortcut::apply_start_with_system(app, *on)?,
         other => eprintln!("setting changed: {other:?}"),
@@ -225,8 +230,11 @@ mod tests {
 
     #[test]
     fn autostart_keeps_the_main_window_closed() {
-        assert_eq!(main_at_start(true), MainAtStart::StayClosed);
-        assert_eq!(main_at_start(false), MainAtStart::Show);
+        assert_eq!(main_at_start(true, false), MainAtStart::StayClosed);
+        assert_eq!(main_at_start(false, false), MainAtStart::Show);
+        // A quarantine notice must reach a visible window, also at sign-in.
+        assert_eq!(main_at_start(true, true), MainAtStart::Show);
+        assert_eq!(main_at_start(false, true), MainAtStart::Show);
     }
 
     /// Created hidden, so a start at sign-in never flashes the window; setup shows it.

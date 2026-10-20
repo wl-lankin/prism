@@ -401,14 +401,28 @@ pub async fn settings_set(app: AppHandle, patch: serde_json::Value) -> Result<Se
     let notify = app.clone();
     let saved = blocking(move || {
         let state = app_state(&app).map_err(anyhow::Error::msg)?;
-        // A new shortcut is registered first and only saved when the system took it; the
-        // error (invalid or taken) goes to the UI as it is.
-        let previous = state.settings.get().mini_shortcut;
+        // The shortcut and the start with the system go to the system first, outside the
+        // settings lock (registering waits for the main thread), and are only saved when the
+        // system took them; the error (invalid, taken, refused) goes to the UI as it is.
+        let before = state.settings.get();
         let shortcut = patch.get("miniShortcut").and_then(|value| value.as_str());
+        // Also applied when unchanged: that retries a shortcut the system refused at startup.
         if let Some(accelerator) = shortcut {
             shell::shortcut::apply(&app, accelerator).map_err(anyhow::Error::msg)?;
         }
-        let registered = shortcut.is_some();
+        let registered = shortcut.is_some_and(|accelerator| accelerator != before.mini_shortcut);
+        let autostart = patch
+            .get("startWithSystem")
+            .and_then(|value| value.as_bool())
+            .filter(|on| *on != before.start_with_system);
+        if let Some(on) = autostart {
+            if let Err(err) = shell::shortcut::apply_start_with_system(&app, on) {
+                if registered {
+                    restore_shortcut(&app, &before.mini_shortcut);
+                }
+                return Err(anyhow::Error::msg(err));
+            }
+        }
         let saved = state.settings.update(patch, |changes| {
             for change in changes {
                 let sent = match change {
@@ -417,6 +431,8 @@ pub async fn settings_set(app: AppHandle, patch: serde_json::Value) -> Result<Se
                     Change::Gapless(gapless) => state.player.set_gapless(*gapless),
                     Change::ReplayGain(mode) => state.player.set_replay_gain(*mode),
                     Change::Crossfade(mode, ms) => state.player.set_crossfade(*mode, *ms),
+                    // Applied above, before the save.
+                    Change::MiniShortcut(_) | Change::StartWithSystem(_) => Ok(()),
                     other => shell::apply_setting(&app, other),
                 };
                 if let Err(err) = sent {
@@ -424,10 +440,15 @@ pub async fn settings_set(app: AppHandle, patch: serde_json::Value) -> Result<Se
                 }
             }
         });
-        if saved.is_err() && registered {
-            // Not saved: the saved shortcut goes back in place.
-            if let Err(err) = shell::shortcut::apply(&app, &previous) {
-                eprintln!("restoring the previous shortcut failed: {err}");
+        if saved.is_err() {
+            // Not saved: the system goes back to what the file says.
+            if registered {
+                restore_shortcut(&app, &before.mini_shortcut);
+            }
+            if let Some(on) = autostart {
+                if let Err(err) = shell::shortcut::apply_start_with_system(&app, !on) {
+                    eprintln!("restoring the start with the system failed: {err}");
+                }
             }
         }
         saved
@@ -438,6 +459,12 @@ pub async fn settings_set(app: AppHandle, patch: serde_json::Value) -> Result<Se
         eprintln!("emitting the settings change failed: {err}");
     }
     Ok(saved)
+}
+
+fn restore_shortcut(app: &AppHandle, accelerator: &str) {
+    if let Err(err) = shell::shortcut::apply(app, accelerator) {
+        eprintln!("restoring the previous shortcut failed: {err}");
+    }
 }
 
 /// Names of the output devices, as `outputDevice` takes them.

@@ -93,4 +93,19 @@ it('names keys in platform words', () => {
   expect(describeShortcut('CommandOrControl+Alt+P', true)).toBe('Cmd+Option+P');
   expect(describeShortcut('Control+Shift+Up', true)).toBe('Ctrl+Shift+Up');
   expect(describeShortcut('Super+Alt+1', false)).toBe('Win+Alt+1');
+  expect(describeShortcut('CommandOrControl+Alt+Minus', false)).toBe('Ctrl+Alt+-');
+  expect(describeShortcut('CommandOrControl+BracketLeft', true)).toBe('Cmd+[');
+  expect(describeShortcut('CommandOrControl+Alt+Numpad7', false)).toBe('Ctrl+Alt+Num 7');
+  expect(describeShortcut('CommandOrControl+Alt+PageDown', false)).toBe('Ctrl+Alt+Page Down');
+});
+
+it('stores code names the shortcut parser reads and shows them as key caps', () => {
+  const { button, onchange } = setup();
+  record(button);
+  press(button, '+', 'NumpadAdd', { ctrlKey: true, altKey: true });
+  expect(onchange).toHaveBeenCalledWith('CommandOrControl+Alt+NumpadAdd');
+  unmount(mounted.pop()!);
+  setup('CommandOrControl+Alt+NumpadAdd');
+  const caps = [...target.querySelectorAll('kbd')].map((kbd) => kbd.textContent);
+  expect(caps).toEqual(['Ctrl', 'Alt', 'Num +']);
 });

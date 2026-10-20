@@ -313,6 +313,25 @@ it('shows why a shortcut was refused and keeps the old one', async () => {
   });
   expect(settings.miniShortcut).toBe('CommandOrControl+Alt+P');
   expect(recorder.textContent).toContain('Ctrl+Alt+P');
+  const error = target.querySelector('[role="alert"]')!;
+  expect(recorder.getAttribute('aria-describedby')).toBe(error.id);
+});
+
+it('flips start with system back when the system refuses it', async () => {
+  await updateSettings({ startWithSystem: false });
+  mounted.push(mount(Settings, { target }));
+  flushSync();
+  invoke.mockImplementationOnce(async () => {
+    throw 'turning on the start with the system failed: access denied';
+  });
+  const toggle = target.querySelector<HTMLButtonElement>('[role="switch"][aria-labelledby="label-autostart"]')!;
+  toggle.click();
+  await vi.waitFor(() => {
+    flushSync();
+    expect(target.querySelector('[role="alert"]')?.textContent).toContain('The start with the system could not be changed');
+  });
+  expect(settings.startWithSystem).toBe(false);
+  expect(toggle.getAttribute('aria-checked')).toBe('false');
 });
 
 it('places the list inside the clipping scroller, flipping up when below is short', () => {

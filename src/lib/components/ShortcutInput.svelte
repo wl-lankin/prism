@@ -39,16 +39,54 @@
     return parts.join('+');
   }
 
-  /** An accelerator in the platform's words: Ctrl+Alt+P, Cmd+Option+P. */
-  export function describeShortcut(accelerator: string, mac: boolean): string {
+  /** How keys stored by their code name read on a key cap. */
+  const KEY_WORDS: Record<string, string> = {
+    minus: '-',
+    equal: '=',
+    bracketleft: '[',
+    bracketright: ']',
+    backquote: '`',
+    backslash: '\\',
+    semicolon: ';',
+    quote: "'",
+    comma: ',',
+    period: '.',
+    slash: '/',
+    numpadadd: 'Num +',
+    numpadsubtract: 'Num -',
+    numpadmultiply: 'Num *',
+    numpaddivide: 'Num /',
+    numpaddecimal: 'Num .',
+    numpadenter: 'Num Enter',
+    numpadequal: 'Num =',
+    pageup: 'Page Up',
+    pagedown: 'Page Down',
+    printscreen: 'Print Screen',
+    scrolllock: 'Scroll Lock',
+    capslock: 'Caps Lock',
+    numlock: 'Num Lock',
+    escape: 'Esc',
+  };
+
+  /** The keys of an accelerator in the platform's words, one entry per key cap. */
+  export function shortcutKeys(accelerator: string, mac: boolean): string[] {
     const words: Record<string, string> = mac
       ? { commandorcontrol: 'Cmd', cmdorctrl: 'Cmd', command: 'Cmd', cmd: 'Cmd', super: 'Cmd', control: 'Ctrl', ctrl: 'Ctrl', alt: 'Option', option: 'Option', shift: 'Shift' }
       : { commandorcontrol: 'Ctrl', cmdorctrl: 'Ctrl', control: 'Ctrl', ctrl: 'Ctrl', super: 'Win', command: 'Win', cmd: 'Win', alt: 'Alt', option: 'Alt', shift: 'Shift' };
     return accelerator
       .split('+')
       .filter(Boolean)
-      .map((part) => words[part.toLowerCase()] ?? part)
-      .join('+');
+      .map((part) => {
+        const lower = part.toLowerCase();
+        const numpad = /^numpad(\d)$/.exec(lower);
+        if (numpad) return `Num ${numpad[1]}`;
+        return words[lower] ?? KEY_WORDS[lower] ?? part;
+      });
+  }
+
+  /** An accelerator in the platform's words: Ctrl+Alt+P, Cmd+Option+P. */
+  export function describeShortcut(accelerator: string, mac: boolean): string {
+    return shortcutKeys(accelerator, mac).join('+');
   }
 </script>
 
@@ -57,10 +95,20 @@
 
   /** Records a global shortcut: click (or Enter), then press the keys. It needs Ctrl, Alt or
    *  Cmd plus one other key; Esc cancels, Backspace goes back to the default. */
-  let { value, onchange }: { value: string; onchange: (accelerator: string) => void } = $props();
+  let {
+    value,
+    onchange,
+    describedby,
+  }: {
+    value: string;
+    onchange: (accelerator: string) => void;
+    /** The id of a message about the shortcut (why the last one was refused). */
+    describedby?: string;
+  } = $props();
 
   let recording = $state(false);
-  const shown = $derived(describeShortcut(value, IS_MAC));
+  const keys = $derived(shortcutKeys(value, IS_MAC));
+  const shown = $derived(keys.join('+'));
 
   function onkeydown(event: KeyboardEvent) {
     if (!recording) return;
@@ -91,6 +139,7 @@
   class:recording
   aria-pressed={recording}
   aria-label={recording ? t('settings.shortcut.record') : t('settings.shortcut.label', { keys: shown })}
+  aria-describedby={describedby}
   onclick={() => (recording = !recording)}
   onblur={() => (recording = false)}
   {onkeydown}
@@ -98,7 +147,7 @@
   {#if recording}
     <span class="prompt">{t('settings.shortcut.record')}</span>
   {:else}
-    {#each shown.split('+') as part, index (index)}
+    {#each keys as part, index (index)}
       {#if index > 0}<span class="plus" aria-hidden="true">+</span>{/if}<kbd>{part}</kbd>
     {/each}
   {/if}

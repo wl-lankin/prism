@@ -166,6 +166,17 @@
   }
 
   let shortcutError = $state<string | null>(null);
+  let systemError = $state<string | null>(null);
+
+  /** The system may refuse the sign-in entry; then nothing is saved and the switch flips back. */
+  async function changeStartWithSystem(on: boolean) {
+    systemError = null;
+    try {
+      await updateSettings({ startWithSystem: on });
+    } catch (err) {
+      systemError = t('settings.startWithSystemFailed', { message: String(err) });
+    }
+  }
 
   async function changeShortcut(accelerator: string) {
     shortcutError = null;
@@ -399,11 +410,15 @@
             <span class="hint">{t('settings.shortcutHint')}</span>
           </div>
           <div class="control">
-            <ShortcutInput value={settings.miniShortcut} onchange={changeShortcut} />
+            <ShortcutInput
+              value={settings.miniShortcut}
+              onchange={changeShortcut}
+              describedby={shortcutError ? 'shortcut-error' : undefined}
+            />
           </div>
         </div>
       </div>
-      {#if shortcutError}<p class="error" role="alert">{shortcutError}</p>{/if}
+      {#if shortcutError}<p class="error" id="shortcut-error" role="alert">{shortcutError}</p>{/if}
     </section>
 
     <section aria-labelledby="settings-covers">
@@ -436,7 +451,7 @@
         <div class="row">
           <div class="row-text">
             <span class="row-label" id="label-autostart">{t('settings.startWithSystem')}</span>
-            <span class="hint">{t('settings.startWithSystemHint')}</span>
+            <span class="hint">{t(IS_MAC ? 'settings.startWithSystemHintMac' : 'settings.startWithSystemHint')}</span>
           </div>
           <div class="control end">
             <button
@@ -445,13 +460,14 @@
               role="switch"
               aria-checked={settings.startWithSystem}
               aria-labelledby="label-autostart"
-              onclick={() => change({ startWithSystem: !settings.startWithSystem })}
+              onclick={() => changeStartWithSystem(!settings.startWithSystem)}
             >
               <i></i>
             </button>
           </div>
         </div>
       </div>
+      {#if systemError}<p class="error" role="alert">{systemError}</p>{/if}
     </section>
 
     <section aria-labelledby="settings-language">

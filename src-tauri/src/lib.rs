@@ -109,6 +109,13 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
 
     let config_dir = dirs.config;
     let settings = Arc::new(SettingsStore::load(&config_dir.join("settings.json")));
+    // The system's own sign-in entry wins over the saved value (only read here).
+    let saved_start = settings.get().start_with_system;
+    if let Some(on) = shell::shortcut::start_with_system_on_os(app.handle(), saved_start) {
+        if let Err(err) = settings.set(serde_json::json!({ "startWithSystem": on })) {
+            eprintln!("following the start with the system failed: {err:#}");
+        }
+    }
     let initial = settings.get();
     app.manage(shell::ShellState::default());
     app.manage(shell::shortcut::CurrentShortcut::default());

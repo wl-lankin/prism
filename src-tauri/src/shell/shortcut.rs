@@ -133,6 +133,26 @@ pub fn is_autostart(args: &[String]) -> bool {
 pub trait Launcher {
     fn enable(&self) -> Result<(), String>;
     fn disable(&self) -> Result<(), String>;
+    fn is_enabled(&self) -> Result<bool, String>;
+}
+
+/// The value `startWithSystem` should have at startup: the system's own state wins (the user
+/// may have removed the entry in the Task Manager or the Login Items). `None` when the saved
+/// value already matches or the system cannot tell. Only reads, never writes.
+pub fn start_with_system_drift(launcher: &dyn Launcher, saved: bool) -> Option<bool> {
+    match launcher.is_enabled() {
+        Ok(on) if on != saved => Some(on),
+        Ok(_) => None,
+        Err(err) => {
+            eprintln!("reading the start with the system failed: {err}");
+            None
+        }
+    }
+}
+
+/// [`start_with_system_drift`] for the running app.
+pub fn start_with_system_on_os(app: &AppHandle, saved: bool) -> Option<bool> {
+    start_with_system_drift(&PluginLauncher(app), saved)
 }
 
 pub fn set_start_with_system(launcher: &dyn Launcher, on: bool) -> Result<(), String> {
@@ -157,12 +177,18 @@ impl Launcher for PluginLauncher<'_> {
     }
 
     fn disable(&self) -> Result<(), String> {
-        let launch = self.0.autolaunch();
         // Nothing to remove when it was never on (the Run value is missing).
-        if !launch.is_enabled().unwrap_or(true) {
+        if !self.is_enabled().unwrap_or(true) {
             return Ok(());
         }
-        launch.disable().map_err(|err| err.to_string())
+        self.0.autolaunch().disable().map_err(|err| err.to_string())
+    }
+
+    fn is_enabled(&self) -> Result<bool, String> {
+        self.0
+            .autolaunch()
+            .is_enabled()
+            .map_err(|err| err.to_string())
     }
 }
 
@@ -288,6 +314,8 @@ mod tests {
     struct FakeLauncher {
         calls: RefCell<Vec<&'static str>>,
         fail: bool,
+        /// What the system reports; `None` cannot tell.
+        on_os: Option<bool>,
     }
 
     impl Launcher for FakeLauncher {
@@ -304,6 +332,30 @@ mod tests {
             self.calls.borrow_mut().push("disable");
             Ok(())
         }
+
+        fn is_enabled(&self) -> Result<bool, String> {
+            self.on_os.ok_or_else(|| "unknown".to_string())
+        }
+    }
+
+    #[test]
+    fn startup_trusts_the_system_state_and_only_reads() {
+        let on = FakeLauncher {
+            on_os: Some(true),
+            ..FakeLauncher::default()
+        };
+        assert_eq!(start_with_system_drift(&on, false), Some(true));
+        assert_eq!(start_with_system_drift(&on, true), None);
+        let off = FakeLauncher {
+            on_os: Some(false),
+            ..FakeLauncher::default()
+        };
+        assert_eq!(start_with_system_drift(&off, true), Some(false));
+        // The system cannot tell: the saved value stays.
+        let unknown = FakeLauncher::default();
+        assert_eq!(start_with_system_drift(&unknown, true), None);
+        assert!(on.calls.borrow().is_empty());
+        assert!(off.calls.borrow().is_empty());
     }
 
     #[test]
