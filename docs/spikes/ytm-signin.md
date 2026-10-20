@@ -43,3 +43,10 @@ If neither path works on Windows, stop and decide before continuing past M1.
 5. If it is blocked: click "Open Google sign-in", sign in there, close it, then close and reopen the YouTube Music window (or reload it) and check whether you are signed in.
 6. When signed in, start a song and click "Probe" in Settings. The JSON appears below the buttons. Click play/pause and next inside the YouTube Music window to confirm they work.
 7. Report back: (a) was sign-in allowed in `ytm`, (b) the exact Google message if blocked, (c) did the `ytm-signin` route carry the session, (d) the probe JSON while signed in, (e) anything odd (CAPTCHA loops, repeated 2FA, Premium prompts).
+
+## Owner test result (2026-10-20, Windows)
+
+- Signing in directly inside the `ytm` window ended on YouTube's error page "Bei deiner Anmeldung in YouTube ist ein Problem aufgetreten".
+- The `ytm-signin` route worked: sign in on accounts.google.com in its own window, then reopen YouTube Music in the same data directory. The session carried over and YouTube Music showed the owner signed in.
+- Probe while signed in: mediaSession metadata present (title, artist, artwork 320x180 from yt3.googleusercontent.com), `#play-pause-button` and `.next-button` found, playback state readable, user agent is the stock WebView2/Edge 155 string.
+- Conclusion: YouTube Music is feasible on Windows. M5 signs in through the accounts.google.com route, then shows music.youtube.com as a child view inside the main window. macOS stays open until an M6 build exists.
