@@ -2,6 +2,7 @@ pub mod covers;
 pub mod favorites;
 pub mod history;
 pub mod model;
+pub mod playlists;
 pub mod query;
 pub mod scan;
 pub mod tags;

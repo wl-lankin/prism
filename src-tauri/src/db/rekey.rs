@@ -38,6 +38,13 @@ pub const TRACK_ID_REFS: &[TrackIdRef] = &[
         filter: None,
         unique: true,
     },
+    // Entries may repeat a track, so the column is not unique.
+    TrackIdRef {
+        table: "playlist_tracks",
+        column: "track_id",
+        filter: None,
+        unique: false,
+    },
 ];
 
 /// How many rows that keep their id `migrate_0003` names individually in the log.
