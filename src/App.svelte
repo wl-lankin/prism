@@ -239,10 +239,12 @@
   }
 
   /* The app card fills the window's width and top; there is no frame around it, so it never
-     reads as a window inside a window. Below the card a transparent strip half a ring high
-     lets the Flow ring hang out of the card's bottom edge. */
+     reads as a window inside a window. Below the card a transparent strip lets the Flow ring
+     hang half out of the card's bottom edge; it is half a ring high plus room for the ring's
+     bezel and glow, so nothing is cut off at the window edge. */
   .window {
-    --frame-bottom: calc(var(--ring-size) / 2);
+    --ring-room: 14px;
+    --frame-bottom: calc(var(--ring-size) / 2 + var(--ring-room));
     position: fixed;
     inset: 0;
     padding-bottom: var(--frame-bottom);
@@ -257,7 +259,9 @@
     display: grid;
     grid-template-columns: 220px minmax(0, 1fr);
     grid-template-rows: minmax(0, 1fr) auto;
-    border-radius: 8px 8px var(--radius-l) var(--radius-l);
+    /* The window has no OS frame or shadow (that would paint the transparent strip), so the
+       card draws its own rounded corners and edge. */
+    border-radius: var(--radius-l);
     background: var(--surface);
     box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.07);
     overflow: hidden;
@@ -403,7 +407,7 @@
     left: 50%;
     /* Centred on the card's bottom edge: the upper half sits in the transport strip, the
        lower half hangs out of the app into the transparent strip below. */
-    bottom: 0;
+    bottom: var(--ring-room);
     width: var(--ring);
     height: var(--ring);
     transform: translateX(-50%);
