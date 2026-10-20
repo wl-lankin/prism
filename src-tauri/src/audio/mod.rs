@@ -7,10 +7,13 @@
 //! Threading contract: `Playback` and `OutputSink` are not `Send`; build them on the engine
 //! thread and pass the `Arc<dyn OutputFactory>` in. Open sources (`open_source[_with]`) off the
 //! engine thread and hand them over with [`Playback::set_source`] / [`Playback::queue_next`].
+//! Each source is then decoded ahead on a thread of its own ([`ReadAhead`]), so a slow read
+//! or seek never blocks the engine thread.
 
 pub mod ffmpeg;
 pub mod gain;
 pub mod output;
+pub mod readahead;
 pub mod resample;
 pub mod ring;
 pub mod source;
@@ -24,16 +27,23 @@ use crossbeam_channel::Receiver;
 pub use output::{
     list_devices, CpalOutputFactory, NullSink, Output, OutputEvent, OutputFactory, OutputSink,
 };
+pub use readahead::{ReadAhead, ReadOutcome, READ_AHEAD_MS};
 pub use resample::Resampler;
 pub use source::{
     open_source, open_source_with, AudioSource, DecoderPanic, Input, StreamSpec,
     FFMPEG_DEFAULT_SPEC,
 };
 
-use source::guarded;
-
 /// How long to wait between attempts to open an output device.
 const REOPEN_BACKOFF: Duration = Duration::from_secs(1);
+/// The most one `pump` waits for a decode thread that has nothing buffered yet and is not
+/// inside a source call, i.e. one that is starting up or waiting for a CPU (right after a
+/// start, seek or hand-over, when nothing new would be audible anyway). Such a thread always
+/// makes progress; normally it takes well under a millisecond, but with every core busy (a
+/// library scan) a new thread was measured waiting several hundred. The cap is a safety net,
+/// not a timing. Source I/O is never waited for this long: a thread inside one read or seek
+/// is given up on after [`readahead::SLOW_CALL`].
+const STARVE_WAIT: Duration = Duration::from_secs(2);
 
 /// What a [`Playback::pump`] call did. Errors from `pump` are always source (decode) errors.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,8 +74,8 @@ pub struct Playback {
     resume_ms: Option<u64>,
     volume: f32,
     paused: bool,
-    current: Option<Box<dyn AudioSource>>,
-    next: Option<Box<dyn AudioSource>>,
+    current: Option<ReadAhead>,
+    next: Option<ReadAhead>,
     resampler: Option<Resampler>,
     decoded: Vec<f32>,
     /// Output-spec samples waiting for room in the sink.
@@ -140,10 +150,10 @@ impl Playback {
     }
 
     /// Replaces the current source immediately (drops anything queued in the sink and the
-    /// pre-opened next source).
+    /// pre-opened next source) and starts decoding it ahead.
     pub fn set_source(&mut self, source: Box<dyn AudioSource>) -> anyhow::Result<()> {
         self.resampler = Some(Resampler::new(source.spec(), self.sink.spec())?);
-        self.current = Some(source);
+        self.current = Some(ReadAhead::spawn(source, READ_AHEAD_MS));
         self.next = None;
         self.gain = 1.0;
         self.next_gain = 1.0;
@@ -155,9 +165,10 @@ impl Playback {
 
     /// Pre-opened source to continue with when the current one ends. With the same spec the
     /// sample boundary is continuous.
-    /// The next source starts at gain 1.0; see [`Playback::set_next_gain`].
+    /// The next source starts at gain 1.0; see [`Playback::set_next_gain`]. It is decoded
+    /// ahead from now on, so its start is ready when the current one ends.
     pub fn queue_next(&mut self, source: Option<Box<dyn AudioSource>>) {
-        self.next = source;
+        self.next = source.map(|source| ReadAhead::spawn(source, READ_AHEAD_MS));
         self.next_gain = 1.0;
     }
 
@@ -169,16 +180,23 @@ impl Playback {
         self.clear_buffers();
     }
 
-    /// Seeks the current source. Blocks for as long as the source's seek takes (an FFmpeg
-    /// source restarts FFmpeg and waits for its first output).
+    /// Seeks the current source without waiting: the decode thread seeks while `pump` keeps
+    /// returning (an FFmpeg restart can take seconds). A seek error arrives as a decode error
+    /// from a later `pump`; the `Result` is kept for callers.
     pub fn seek(&mut self, ms: u64) -> anyhow::Result<()> {
         let Some(current) = self.current.as_mut() else {
             return Ok(());
         };
-        guarded("seek", || current.seek(ms))?;
+        current.seek(ms);
         self.clear_buffers();
         self.base_ms = ms;
         Ok(())
+    }
+
+    /// The current source has been decoded to its end (or failed): only buffered audio is
+    /// left, so this is the moment to queue the next source for a gapless hand-over.
+    pub fn current_exhausted(&self) -> bool {
+        self.current.as_ref().is_some_and(ReadAhead::exhausted)
     }
 
     pub fn set_volume(&mut self, volume: f32) {
@@ -260,8 +278,11 @@ impl Playback {
     }
 
     /// Handles output events and fills the sink as far as it has room, then returns. It does
-    /// not wait for the device; it only blocks for as long as a source's `read` takes (local
-    /// decoding, or an FFmpeg pipe that was primed at open/seek). Call it every few
+    /// not wait for the device or for source I/O: it takes what the decode thread has
+    /// buffered. With nothing buffered it waits for a decode thread that is only starting up
+    /// or busy (capped at [`STARVE_WAIT`]), but at most [`readahead::SLOW_CALL`] for one inside
+    /// a read or seek: a slow source (NAS, FFmpeg restart) costs at most one short wait per
+    /// slow call, and `pump` returns at once while that call runs on. Call it every few
     /// milliseconds. `Err` is always a source error (the engine skips the track); a missing
     /// device is `Ok(NoDevice)`.
     pub fn pump(&mut self) -> anyhow::Result<PumpStatus> {
@@ -304,6 +325,7 @@ impl Playback {
     }
 
     fn fill(&mut self, status: &mut PumpStatus) -> anyhow::Result<PumpStatus> {
+        let wait_until = Instant::now() + STARVE_WAIT;
         loop {
             if self.pending_offset < self.pending.len() {
                 self.pending_offset += self.sink.push(&self.pending[self.pending_offset..]);
@@ -325,18 +347,27 @@ impl Playback {
                 return Ok(PumpStatus::Finished);
             };
             self.decoded.clear();
-            let decoded = &mut self.decoded;
-            let frames = guarded("decoding", || current.read(decoded))?;
-            if frames > 0 {
-                self.frames_read += frames as u64;
-                if self.gain != 1.0 {
-                    let gain = self.gain;
-                    self.decoded
-                        .iter_mut()
-                        .for_each(|sample| *sample = (*sample * gain).clamp(-1.0, 1.0));
+            match current.try_read(&mut self.decoded)? {
+                ReadOutcome::Frames(frames) => {
+                    self.frames_read += frames as u64;
+                    if self.gain != 1.0 {
+                        let gain = self.gain;
+                        self.decoded
+                            .iter_mut()
+                            .for_each(|sample| *sample = (*sample * gain).clamp(-1.0, 1.0));
+                    }
+                    resampler.process(&self.decoded, &mut self.pending)?;
+                    continue;
                 }
-                resampler.process(&self.decoded, &mut self.pending)?;
-                continue;
+                ReadOutcome::Starved => {
+                    let now = Instant::now();
+                    if now < wait_until && current.wait_ready(wait_until - now) {
+                        continue;
+                    }
+                    // Keep playing what the sink holds; the decode thread catches up.
+                    return Ok(*status);
+                }
+                ReadOutcome::End => {}
             }
 
             // The current source ended.
@@ -379,7 +410,9 @@ impl Playback {
         self.sink.set_paused(self.paused);
     }
 
-    /// Continues the current source at the remembered position on the new output.
+    /// Continues the current source at the remembered position on the new output. The seek
+    /// does not wait (the decode thread does it). A queued next source is kept: it has not
+    /// been read from, so it still starts at its beginning when the current one ends.
     fn resume(&mut self) -> anyhow::Result<()> {
         self.pending.clear();
         self.pending_offset = 0;
@@ -389,7 +422,7 @@ impl Playback {
         };
         self.resampler = Some(Resampler::new(current.spec(), self.sink.spec())?);
         if let Some(position) = self.resume_ms.take() {
-            guarded("seek", || current.seek(position))?;
+            current.seek(position);
             self.base_ms = position;
             self.frames_read = 0;
         }
@@ -416,6 +449,7 @@ impl Playback {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audio::readahead::tests::{frame_of, SlowSource};
     use crate::library::tags::fixtures;
     use crossbeam_channel::Sender;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -838,6 +872,163 @@ mod tests {
         assert!(playback.output_error().is_none());
         assert_eq!(playback.pump().unwrap(), PumpStatus::Playing);
         assert!(!factory.last_queue().lock().unwrap().is_empty());
+    }
+
+    /// Pumps and lets the fake device play what it holds until `done`, collecting the output.
+    fn play_until(
+        playback: &mut Playback,
+        factory: &FakeFactory,
+        done: impl Fn(PumpStatus) -> bool,
+    ) -> (Vec<PumpStatus>, Vec<f32>) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut statuses: Vec<PumpStatus> = Vec::new();
+        let mut played = Vec::new();
+        loop {
+            let status = playback.pump().unwrap();
+            if statuses.last() != Some(&status) {
+                statuses.push(status);
+            }
+            played.extend(factory.last_queue().lock().unwrap().drain(..));
+            if done(status) {
+                return (statuses, played);
+            }
+            assert!(Instant::now() < deadline, "{statuses:?}");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn slow_source_does_not_block_pump() {
+        // A 100 ms device that plays 4 times faster than real time. The source stalls for
+        // 500 ms once, in the first read past the initial read-ahead (3 s): soon after the
+        // start, with about 3 s (750 ms at 4x) buffered. Decoding inline, a pump would hit
+        // the stall about 0.8 s in.
+        const SPEED: f64 = 4.0;
+        let factory = FakeFactory::new(STEREO_44K, 4_410 * 2);
+        let mut playback = Playback::new(factory.clone(), None).unwrap();
+        let mut source = SlowSource::new(10);
+        source.stall = Some((140_000, Duration::from_millis(500)));
+        playback.set_source(Box::new(source)).unwrap();
+        let queue = factory.last_queue();
+        // Not timed: the first pump waits for the decode thread to start (a busy machine can
+        // take a while to schedule a new thread); then the read-ahead fills.
+        assert_eq!(playback.pump().unwrap(), PumpStatus::Playing);
+        std::thread::sleep(Duration::from_millis(300));
+
+        let started = Instant::now();
+        let mut last = started;
+        let mut played: Vec<f32> = Vec::new();
+        let mut slowest = Duration::ZERO;
+        let mut under_runs = 0;
+        while started.elapsed() < Duration::from_millis(1_200) {
+            let pumped = Instant::now();
+            assert_eq!(playback.pump().unwrap(), PumpStatus::Playing);
+            slowest = slowest.max(pumped.elapsed());
+            std::thread::sleep(Duration::from_millis(2));
+            let now = Instant::now();
+            let due = ((now - last).as_secs_f64() * SPEED * 44_100.0) as usize * 2;
+            last = now;
+            let mut queue = queue.lock().unwrap();
+            if queue.is_empty() {
+                under_runs += 1;
+            }
+            let take = due.min(queue.len());
+            played.extend(queue.drain(..take));
+        }
+        assert!(
+            slowest < Duration::from_millis(20),
+            "a pump took {slowest:?}"
+        );
+        assert_eq!(under_runs, 0, "the device never ran dry");
+        assert!(
+            played.len() / 2 > 154_350,
+            "playback went on past the stall point (3.5 s): {} frames",
+            played.len() / 2
+        );
+        assert!(
+            played
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .enumerate()
+                .all(|(index, frame)| frame_of(frame[0]) == index as u64),
+            "one continuous run from the buffer"
+        );
+    }
+
+    #[test]
+    fn seek_does_not_block_on_slow_source() {
+        let factory = FakeFactory::new(STEREO_44K, 4_410 * 2);
+        let mut playback = Playback::new(factory.clone(), None).unwrap();
+        let mut source = SlowSource::new(10);
+        source.seek_delay = Duration::from_secs(1);
+        playback.set_source(Box::new(source)).unwrap();
+        playback.pump().unwrap();
+        play_queue(&factory);
+
+        let started = Instant::now();
+        playback.seek(5_000).unwrap();
+        assert!(
+            started.elapsed() < Duration::from_millis(20),
+            "seek took {:?}",
+            started.elapsed()
+        );
+        assert_eq!(playback.position_ms(), 5_000);
+
+        let queue = factory.last_queue();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut pumps = 0;
+        let mut slowest = Duration::ZERO;
+        while queue.lock().unwrap().is_empty() {
+            let pumped = Instant::now();
+            assert_eq!(playback.pump().unwrap(), PumpStatus::Playing);
+            slowest = slowest.max(pumped.elapsed());
+            pumps += 1;
+            assert!(Instant::now() < deadline, "nothing played after the seek");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        // The engine kept pumping through the 1 s seek (one sleep is 2 to 16 ms); at most one
+        // pump waited, for about `SLOW_CALL`, to see that the seek is slow.
+        assert!(pumps >= 10, "only {pumps} pumps during the seek");
+        assert!(
+            slowest < Duration::from_millis(500),
+            "a pump waited for the seek: {slowest:?}"
+        );
+        let first = queue.lock().unwrap()[0];
+        assert_eq!(frame_of(first), 220_500, "the first frames come from 5 s");
+    }
+
+    #[test]
+    fn set_device_during_a_gapless_tail_keeps_the_next_source() {
+        let factory = FakeFactory::new(STEREO_44K, 8_820);
+        let mut playback = Playback::new(factory.clone(), None).unwrap();
+        playback.set_source(wav("gap_a.wav")).unwrap();
+        playback.queue_next(Some(wav("gap_b.wav")));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !playback.current_exhausted() {
+            assert_eq!(playback.pump().unwrap(), PumpStatus::Playing);
+            assert!(Instant::now() < deadline, "gap_a was never fully decoded");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let position = playback.position_ms();
+
+        playback.set_device(Some("USB DAC".into())).unwrap();
+        let (statuses, played) = play_until(&mut playback, &factory, |status| {
+            status == PumpStatus::Finished
+        });
+        assert!(
+            statuses.contains(&PumpStatus::Advanced),
+            "b took over: {statuses:?}"
+        );
+        let a = decode_all("gap_a.wav");
+        let b = decode_all("gap_b.wav");
+        let offset = (position as usize * 44_100 / 1000) * 2;
+        let expected: Vec<f32> = [&a[offset..], &b[..]].concat();
+        assert_eq!(played.len(), expected.len());
+        assert!(
+            played == expected,
+            "a's tail on the new device, then all of b"
+        );
     }
 
     /// Manual check on real hardware: `cargo test -- --ignored smoke_plays`.

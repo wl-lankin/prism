@@ -181,11 +181,14 @@ impl Renderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audio::output::BUFFER_MS;
 
     const SPEC: StreamSpec = StreamSpec {
         sample_rate: 48_000,
         channels: 2,
     };
+    /// The real output's ring at this spec.
+    const RING_FRAMES: usize = (SPEC.sample_rate * BUFFER_MS / 1000) as usize;
     /// Frames in one 20 ms ramp at 48 kHz.
     const RAMP_FRAMES: usize = 960;
 
@@ -199,7 +202,7 @@ mod tests {
 
     #[test]
     fn clear_before_playback_drops_only_the_old_samples() {
-        let (mut writer, mut renderer) = ring(SPEC, 9_600);
+        let (mut writer, mut renderer) = ring(SPEC, RING_FRAMES);
         let a = vec![1.0; 2_000];
         let b = vec![-1.0; 3_000];
         assert_eq!(writer.push(&a), a.len());
@@ -220,8 +223,8 @@ mod tests {
 
     #[test]
     fn clear_while_playing_fades_out_then_plays_all_new_samples() {
-        let (mut writer, mut renderer) = ring(SPEC, 9_600);
-        writer.push(&vec![1.0; 9_600 * 2]);
+        let (mut writer, mut renderer) = ring(SPEC, RING_FRAMES);
+        writer.push(&vec![1.0; RING_FRAMES * 2]);
         render_all(&mut renderer, 2_000); // A is audible at full gain now
         writer.clear();
         let b = vec![-1.0; 4_000];
@@ -251,8 +254,8 @@ mod tests {
 
     #[test]
     fn paused_ramps_down_and_keeps_the_queue() {
-        let (mut writer, mut renderer) = ring(SPEC, 9_600);
-        writer.push(&vec![1.0; 9_600 * 2]);
+        let (mut writer, mut renderer) = ring(SPEC, RING_FRAMES);
+        writer.push(&vec![1.0; RING_FRAMES * 2]);
         render_all(&mut renderer, 2_000);
         writer.set_paused(true);
         render_all(&mut renderer, 2_000);

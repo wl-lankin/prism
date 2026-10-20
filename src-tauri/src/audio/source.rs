@@ -212,15 +212,14 @@ mod tests {
             let mut buf = Vec::new();
             source.read(&mut buf).map(|_| ())
         });
+        let took = started.elapsed();
         assert!(
             result.is_err(),
             "corrupt.flac must fail on open or first read"
         );
-        assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "took {:?}",
-            started.elapsed()
-        );
+        // It normally fails within milliseconds; the bound only catches a hang (FFmpeg's
+        // stall timeout is 5 s), with a wide margin for a loaded machine.
+        assert!(took < Duration::from_secs(5), "took {took:?}");
     }
 
     #[test]

@@ -725,6 +725,9 @@ impl Engine {
             }
         }
         if self.ending && self.playback.is_drained() {
+            // Everything was heard, including a hand-over whose deadline has not come yet
+            // (a track shorter than what was buffered ahead of it).
+            self.settle_handover();
             self.go_idle();
         }
     }
@@ -759,7 +762,9 @@ impl Engine {
         }
     }
 
-    /// Opens the next track once the current one is within [`PRELOAD_MS`] of its end.
+    /// Opens the next track once the current one is within [`PRELOAD_MS`] of its end, or
+    /// once it has been decoded to its end. The second rule needs no duration, so tracks
+    /// whose length the library does not know (often FFmpeg-decoded ones) are gapless too.
     fn maybe_preload(&mut self) {
         if !self.gapless || !matches!(self.preload, Preload::None) || !self.seekable() {
             return;
@@ -771,13 +776,12 @@ impl Engine {
             return;
         };
         // Durations come from the library (FFmpeg sources do not know theirs).
-        if track.duration_ms == 0 {
-            return;
-        }
-        let remaining = track
-            .duration_ms
-            .saturating_sub(self.playback.position_ms());
-        if remaining > PRELOAD_MS {
+        let near_end = track.duration_ms > 0
+            && track
+                .duration_ms
+                .saturating_sub(self.playback.position_ms())
+                <= PRELOAD_MS;
+        if !near_end && !self.playback.current_exhausted() {
             return;
         }
         let Some(id) = self.queue.get(index).map(str::to_string) else {
@@ -920,6 +924,7 @@ mod tests {
     use crossbeam_channel::{Receiver, Sender};
 
     use super::*;
+    use crate::audio::output::BUFFER_MS;
     use crate::audio::{open_source, Input, OutputEvent, OutputSink};
     use crate::library::tags::{self, fixtures};
     use crate::player::dropped::tests::drop_files;
@@ -1044,7 +1049,7 @@ mod tests {
     }
 
     /// The real output's ring (see `audio::output`): the most it holds ahead of the device.
-    const RING_MS: u64 = 200;
+    const RING_MS: u32 = BUFFER_MS;
 
     /// Plays 20 times faster than real time: a 1 s fixture takes 50 ms.
     const FAST: f64 = 20.0;
@@ -1434,6 +1439,40 @@ mod tests {
             while source.read(&mut expected).unwrap() > 0 {}
         }
         let played = h.played.lock().unwrap().clone();
+        assert_eq!(played.len(), expected.len(), "no padding, nothing lost");
+        assert!(played == expected, "one continuous run across the boundary");
+    }
+
+    /// FFmpeg-decoded tracks often have no duration in the library: gapless still works,
+    /// because the next track is opened once the current one is fully decoded.
+    #[test]
+    fn unknown_duration_tracks_are_gapless() {
+        let tracks: Vec<Track> = [("a", "gap_a.wav"), ("b", "gap_b.wav")]
+            .iter()
+            .map(|(id, file)| {
+                let mut track = fixture_track(id, file);
+                track.duration_ms = 0;
+                track
+            })
+            .collect();
+        // 5x: the pre-open starts once "a" is decoded, with up to 200 ms of it left to
+        // play (in real time, up to the 3 s read-ahead).
+        let h = harness(tracks, 5.0, None);
+        h.player.play(ids(&["a", "b"]), 0).unwrap();
+        let events = collect_until(&h.events, Duration::from_secs(10), back_to_idle);
+        assert_eq!(changes(&events), ids(&["a", "b"]));
+        let first = events
+            .iter()
+            .position(|e| matches!(e, PlayerEvent::TrackChanged(_)))
+            .unwrap();
+        assert!(
+            !events[first..]
+                .iter()
+                .any(|e| is_state(e, PlayerStatus::Loading)),
+            "b was pre-opened and handed over, not loaded after a ended"
+        );
+        let played = h.played.lock().unwrap().clone();
+        let expected: Vec<f32> = [decode_all("gap_a.wav"), decode_all("gap_b.wav")].concat();
         assert_eq!(played.len(), expected.len(), "no padding, nothing lost");
         assert!(played == expected, "one continuous run across the boundary");
     }

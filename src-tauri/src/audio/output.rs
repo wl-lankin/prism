@@ -15,7 +15,7 @@ use super::ring::{ring, Renderer, RingWriter};
 use super::source::{StreamSpec, FFMPEG_DEFAULT_SPEC};
 
 /// Ring buffer length.
-const BUFFER_MS: u32 = 200;
+pub(crate) const BUFFER_MS: u32 = 200;
 /// Samples the callback renders per step, from a buffer allocated when the stream opens.
 const BLOCK_SAMPLES: usize = 4096;
 
