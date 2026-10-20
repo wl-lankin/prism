@@ -808,6 +808,7 @@ mod tests {
     use super::*;
     use crate::audio::{open_source, Input, OutputEvent, OutputSink};
     use crate::library::tags::{self, fixtures};
+    use crate::player::dropped::tests::drop_files;
     use crate::player::dropped::{with_dropped, DroppedFiles};
 
     const STEREO_44K: StreamSpec = StreamSpec {
@@ -1037,7 +1038,7 @@ mod tests {
     fn dropped_file_plays_without_indexing() {
         let dropped = Arc::new(DroppedFiles::new(None));
         let file = fixtures().join("tagged.mp3").to_string_lossy().into_owned();
-        let ids = dropped.add(&[file]);
+        let ids = drop_files(&dropped, &[file]);
         // The library knows nothing: only the dropped-files map can resolve the id.
         let h = harness_with(
             with_dropped(dropped, Arc::new(|_id: &str| None)),

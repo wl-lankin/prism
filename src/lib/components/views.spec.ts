@@ -42,6 +42,7 @@ const artist: Artist = { name: 'Lumen Field', albumCount: 1, trackCount: 3, cove
 const invoke = vi.fn(async (cmd: string, args?: Record<string, unknown>): Promise<unknown> => {
   switch (cmd) {
     case 'library_search':
+      if ((args as { q: string }).q === 'zz') return { albums: [], artists: [], tracks: [] };
       return { albums: [album], artists: [artist], tracks: [track(2)] };
     case 'library_album_tracks':
       return [track(1), track(2), track(3)];
@@ -91,6 +92,9 @@ async function settle() {
   }
   flushSync();
 }
+
+/** Page requests wait one animation frame. */
+const frame = () => new Promise((resolve) => requestAnimationFrame(() => resolve(undefined)));
 
 function type(input: HTMLInputElement, value: string) {
   input.value = value;
@@ -155,6 +159,24 @@ it('opens an album with Enter and closes', async () => {
   unmount(app);
 });
 
+it('Enter inside the debounce window searches at once and never acts on the older result', async () => {
+  vi.useFakeTimers();
+  const { go } = await import('../stores/nav.svelte');
+  go('songs');
+  const { app, state, input } = palette();
+  await search(input, 'glass');
+  type(input, 'zz');
+  key(input, 'Enter');
+  await settle();
+  expect(invoke).toHaveBeenLastCalledWith('library_search', { q: 'zz', limit: 8 });
+  expect(nav.view).toBe('songs');
+  expect(state.open).toBe(true);
+  // The pending debounce was cancelled: no second request for the same query.
+  vi.advanceTimersByTime(500);
+  expect(invoke.mock.calls.filter(([c, a]) => c === 'library_search' && (a as { q: string }).q === 'zz')).toHaveLength(1);
+  unmount(app);
+});
+
 it('plays a song with its album as the queue', async () => {
   vi.useFakeTimers();
   const { app, input } = palette();
@@ -187,6 +209,7 @@ it('fetches songs in pages of 200 and renders only the rows near the viewport', 
   library.trackCount = 30_000;
   library.version++;
   const app = mount(SongList, { target });
+  await frame();
   await settle();
   const ranges = invoke.mock.calls.filter(([cmd]) => cmd === 'library_tracks_range');
   expect(ranges).toEqual([['library_tracks_range', { offset: 0, limit: 200 }]]);
@@ -194,10 +217,20 @@ it('fetches songs in pages of 200 and renders only the rows near the viewport', 
   expect(rows.length).toBeGreaterThan(0);
   expect(rows.length).toBeLessThan(60);
   expect(rows[0].textContent).toContain('Song 0');
+  expect(rows[0].getAttribute('aria-posinset')).toBe('1');
+  expect(rows[0].getAttribute('aria-setsize')).toBe('30000');
   expect((target.querySelector('[role="listbox"]') as HTMLElement).style.height).toBe(`${30_000 * 44}px`);
 
+  // A library change hides the old rows at once instead of showing stale ones.
+  library.version++;
+  flushSync();
+  expect(target.querySelector('[role="option"]')?.textContent).not.toContain('Song 0');
+  await frame();
+  await settle();
+  expect(target.querySelector('[role="option"]')?.textContent).toContain('Song 0');
+
   // A double-click plays the list from that row.
-  rows[3].dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+  target.querySelectorAll('[role="option"]')[3].dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
   await settle();
   expect(invoke).toHaveBeenCalledWith('library_tracks_range', { offset: 0, limit: 1000 });
   expect(invoke).toHaveBeenCalledWith('player_play', expect.objectContaining({ startIndex: 3 }));

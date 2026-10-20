@@ -51,6 +51,10 @@
   const ids = $derived(tracks?.map((track) => track.id) ?? []);
   const playingId = $derived(player.track?.id ?? null);
   const backdrop = $derived(coverUrl(coverId, 96));
+  /** The backdrop is blurred at this small width and scaled up: far fewer pixels to blur
+   *  than blurring a full-width image, and it looks the same. */
+  const BACKDROP_PX = 64;
+  let backdropWidth = $state(1000);
 
   function length(ms: number): string {
     const minutes = Math.max(1, Math.round(ms / 60000));
@@ -89,8 +93,8 @@
 
 <div class="scroll">
   {#if backdrop}
-    <div class="backdrop" aria-hidden="true">
-      <img src={backdrop} alt="" draggable="false" />
+    <div class="backdrop" aria-hidden="true" bind:clientWidth={backdropWidth}>
+      <img src={backdrop} alt="" draggable="false" style="--k:{(backdropWidth * 1.3) / BACKDROP_PX}" />
     </div>
   {/if}
 
@@ -217,11 +221,12 @@
     position: absolute;
     left: 50%;
     top: 50%;
-    width: 100%;
-    height: 100%;
+    width: 64px;
+    height: 34px;
+    margin: -17px 0 0 -32px;
     object-fit: cover;
-    transform: translate(-50%, -50%) scale(1.5);
-    filter: blur(60px) saturate(1.35);
+    transform: scale(var(--k, 20));
+    filter: blur(4px) saturate(1.35);
     opacity: 0.55;
     animation: fade var(--dur-l) ease-out;
   }

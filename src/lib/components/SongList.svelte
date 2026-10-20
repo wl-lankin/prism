@@ -8,6 +8,7 @@
   import { go } from '../stores/nav.svelte';
   import { player } from '../stores/player.svelte';
   import type { Track } from '../types';
+  import { evictPages, pagesFor } from '../pages';
   import { visibleRange } from '../virtual';
   import Cover from './Cover.svelte';
   import NowPlayingBars from './NowPlayingBars.svelte';
@@ -21,11 +22,15 @@
 
   const total = $derived(library.trackCount ?? 0);
 
-  let pages = new Map<number, Track[]>();
-  let pending = new Set<number>();
+  /** At most this many pages stay cached; the ones farthest from the view are dropped. */
+  const MAX_PAGES = 20;
+
+  /** Each page remembers the library version it was read at; others are ignored. */
+  const pages = new Map<number, { version: number; tracks: Track[] }>();
+  /** `${version}:${page}` of requests in flight. */
+  const pending = new Set<string>();
   /** Bumped when a page arrives, so the rows re-read the cache. */
   let loaded = $state(0);
-  let cacheVersion = -1;
 
   let scroller = $state<HTMLDivElement>();
   let listTop = $state(0);
@@ -36,40 +41,51 @@
   const range = $derived(visibleRange(scrollTop - listTop, viewport, ROW, total, 8));
   const playingId = $derived(player.track?.id ?? null);
 
-  function ensure(version: number, start: number, end: number) {
-    if (version !== cacheVersion) {
-      cacheVersion = version;
-      pages = new Map();
-      pending = new Set();
-    }
-    if (end <= start) return;
-    for (let page = Math.floor(start / PAGE); page <= Math.floor((end - 1) / PAGE); page++) {
-      if (pages.has(page) || pending.has(page)) continue;
-      pending.add(page);
+  /** Requests the pages the current range needs. Runs one frame after the range settles,
+   *  so a fast scroll does not ask for every page it crosses. */
+  function ensure() {
+    const version = library.version;
+    const needed = pagesFor(range.start, range.end, PAGE);
+    for (const page of needed) {
+      const key = `${version}:${page}`;
+      if (pages.get(page)?.version === version || pending.has(key)) continue;
+      pending.add(key);
       libraryTracksRange(page * PAGE, PAGE)
         .then((tracks) => {
-          if (version !== cacheVersion) return;
-          pages.set(page, tracks ?? []);
+          if (version !== library.version) return;
+          pages.set(page, { version, tracks: tracks ?? [] });
+          const visible = pagesFor(range.start, range.end, PAGE);
+          for (const old of evictPages(pages.keys(), visible, MAX_PAGES)) pages.delete(old);
           loaded++;
         })
         .catch((err) => console.error('loading songs failed', err))
-        .finally(() => {
-          if (version === cacheVersion) pending.delete(page);
-        });
+        .finally(() => pending.delete(key));
     }
   }
 
-  $effect(() => ensure(library.version, range.start, range.end));
+  $effect(() => {
+    void library.version;
+    void range.start;
+    void range.end;
+    const frame = requestAnimationFrame(ensure);
+    return () => cancelAnimationFrame(frame);
+  });
 
   const rows = $derived.by(() => {
     void loaded;
-    void library.version;
+    const version = library.version;
     const out: { index: number; track: Track | undefined }[] = [];
     for (let i = range.start; i < range.end; i++) {
-      out.push({ index: i, track: pages.get(Math.floor(i / PAGE))?.[i % PAGE] });
+      const page = pages.get(Math.floor(i / PAGE));
+      out.push({ index: i, track: page?.version === version ? page.tracks[i % PAGE] : undefined });
     }
     return out;
   });
+
+  /** The active row, only while it is rendered (aria-activedescendant must exist). */
+  const activeId = $derived(
+    selected >= range.start && selected < range.end ? `song-${selected}` : undefined,
+  );
 
   $effect(() => {
     if (!scroller || viewport === 0) return;
@@ -139,7 +155,7 @@
     role="listbox"
     tabindex="0"
     aria-label={t('nav.songs')}
-    aria-activedescendant={selected >= 0 ? `song-${selected}` : undefined}
+    aria-activedescendant={activeId}
     style="height:{total * ROW}px"
     {onkeydown}
     onclick={(event) => {
@@ -165,6 +181,8 @@
           class:playing
           role="option"
           aria-selected={selected === row.index}
+          aria-setsize={total}
+          aria-posinset={row.index + 1}
           data-index={row.index}
         >
           <span class="num">
@@ -225,7 +243,7 @@
     padding: 0 44px;
     font-size: 12px;
     color: rgba(243, 243, 245, 0.45);
-    background: rgba(20, 20, 24, 0.84);
+    background: rgba(20, 20, 24, 0.95);
     backdrop-filter: blur(18px) saturate(1.2);
     box-shadow: 0 1px 0 var(--line);
   }

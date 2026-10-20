@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { flushSync, tick } from 'svelte';
   import { formatDuration } from '../format';
   import { t, tc, type Key } from '../i18n';
   import { librarySearch } from '../ipc';
@@ -41,30 +41,56 @@
   /** Index of each group's first item in `items`. */
   const offsets = $derived(groups.map((_, g) => groups.slice(0, g).reduce((n, group) => n + group.items.length, 0)));
 
+  /** The query the shown result belongs to. */
+  let resultFor = $state('');
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
   // Each keystroke restarts the timer; only the latest request may set the result.
   let seq = 0;
+
+  function search(q: string, mine: number): Promise<void> {
+    return librarySearch(q, LIMIT)
+      .then((found) => {
+        if (mine !== seq) return;
+        result = found ?? { albums: [], artists: [], tracks: [] };
+        resultFor = q;
+        error = null;
+        active = 0;
+      })
+      .catch((err) => {
+        if (mine === seq) error = t('search.failed', { message: String(err) });
+      });
+  }
+
   $effect(() => {
     const q = query.trim();
     const mine = ++seq;
     if (!q) {
       result = null;
+      resultFor = '';
       error = null;
       return;
     }
-    const timer = setTimeout(() => {
-      librarySearch(q, LIMIT)
-        .then((found) => {
-          if (mine !== seq) return;
-          result = found ?? { albums: [], artists: [], tracks: [] };
-          error = null;
-          active = 0;
-        })
-        .catch((err) => {
-          if (mine === seq) error = t('search.failed', { message: String(err) });
-        });
-    }, DEBOUNCE_MS);
+    timer = setTimeout(() => void search(q, mine), DEBOUNCE_MS);
     return () => clearTimeout(timer);
   });
+
+  /** Enter: acts on the result of what is typed now. Inside the debounce window the search
+   *  runs at once and Enter takes its first entry; it never acts on an older query's result. */
+  async function enter() {
+    // Let the debounce effect see the latest keystroke first, so its timer is the one cleared.
+    flushSync();
+    const q = query.trim();
+    if (!q) return;
+    if (q !== resultFor) {
+      clearTimeout(timer);
+      const mine = ++seq;
+      await search(q, mine);
+      if (mine !== seq || resultFor !== q) return;
+    }
+    const item = items[active];
+    if (item) choose(item);
+  }
 
   $effect(() => {
     if (!open) return;
@@ -102,8 +128,7 @@
       move(active - 1);
     } else if (event.key === 'Enter') {
       event.preventDefault();
-      const item = items[active];
-      if (item) choose(item);
+      void enter();
     } else if (event.key === 'Tab') {
       // Focus stays in the field; Tab moves through the results like the arrows.
       event.preventDefault();
@@ -112,9 +137,27 @@
   }
 </script>
 
+<svelte:window
+  onkeydown={(event) => {
+    // Esc closes wherever focus is (the field handles its own keys first).
+    if (open && event.key === 'Escape' && event.target !== input) {
+      event.preventDefault();
+      close();
+    }
+  }}
+/>
+
 {#if open}
   <div class="overlay" role="presentation" onmousedown={(e) => e.target === e.currentTarget && close()}>
-    <div class="palette" role="dialog" aria-modal="true" aria-label={t('search.label')}>
+    <!-- Mouse presses on the palette never take focus from the field. -->
+    <div
+      class="palette"
+      role="dialog"
+      aria-modal="true"
+      aria-label={t('search.label')}
+      tabindex="-1"
+      onmousedown={(e) => e.target !== input && e.preventDefault()}
+    >
       <div class="field">
         <Icon name="search" size={20} />
         <input

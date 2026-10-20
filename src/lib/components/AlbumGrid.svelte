@@ -1,12 +1,12 @@
 <script lang="ts">
-  import type { Snippet } from 'svelte';
+  import { untrack, type Snippet } from 'svelte';
   import { t } from '../i18n';
   import { playAlbum } from '../play';
   import { saveScroll, savedScroll } from '../scroll';
   import { go } from '../stores/nav.svelte';
   import { player } from '../stores/player.svelte';
   import type { Album } from '../types';
-  import { gridLayout, visibleRange } from '../virtual';
+  import { anchorOffset, gridLayout, visibleRange } from '../virtual';
   import Cover from './Cover.svelte';
   import Icon from './Icon.svelte';
   import NowPlayingBars from './NowPlayingBars.svelte';
@@ -53,12 +53,32 @@
 
   const playingAlbum = $derived(player.track?.albumId ?? null);
 
+  let restored = false;
+  let previous: { columns: number; rowHeight: number } | null = null;
+
   $effect(() => {
-    // Restore once the grid has its height.
     if (!scroller || width === 0) return;
-    const top = savedScroll(scrollKey);
-    if (top) scroller.scrollTop = top;
-    scrollTop = scroller.scrollTop;
+    const now = { columns: layout.columns, rowHeight };
+    untrack(() => {
+      if (!scroller) return;
+      if (!restored) {
+        // Restore once the grid has its size.
+        restored = true;
+        const top = savedScroll(scrollKey);
+        if (top) scroller.scrollTop = top;
+      } else if (previous && previous.columns !== now.columns) {
+        // Keep the first visible album first when the window is resized.
+        // The last scroll position seen before the resize: the browser may already have
+        // clamped scrollTop to the new (shorter) grid.
+        const offset = scrollTop - gridTop;
+        if (offset > 0) {
+          scroller.scrollTop =
+            gridTop + anchorOffset(offset, previous.rowHeight, previous.columns, now.rowHeight, now.columns);
+        }
+      }
+      previous = now;
+      scrollTop = scroller.scrollTop;
+    });
   });
 
   function onscroll() {

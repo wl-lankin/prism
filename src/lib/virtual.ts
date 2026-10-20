@@ -30,3 +30,16 @@ export function gridLayout(width: number, minCard: number, gap: number): { colum
   const cardWidth = Math.max(0, (width - (columns - 1) * gap) / columns);
   return { columns, cardWidth };
 }
+
+/**
+ * Where to scroll a card grid after its column count changed so the first visible card stays
+ * first: `offset` px into the old grid (rows of `oldRow` px, `oldColumns` wide) becomes the
+ * offset of that card's new row, keeping the same fraction of the row scrolled past.
+ */
+export function anchorOffset(offset: number, oldRow: number, oldColumns: number, newRow: number, newColumns: number): number {
+  if (offset <= 0 || oldRow <= 0 || newRow <= 0) return Math.max(0, offset);
+  const row = Math.floor(offset / oldRow);
+  const within = (offset - row * oldRow) / oldRow;
+  const first = row * oldColumns;
+  return (Math.floor(first / newColumns) + within) * newRow;
+}

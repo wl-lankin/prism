@@ -1,7 +1,7 @@
 <script lang="ts">
   import { open } from '@tauri-apps/plugin-dialog';
   import logoUrl from '../../../assets/logo.svg';
-  import { t } from '../i18n';
+  import { lang, t } from '../i18n';
   import { libraryAddFolder } from '../ipc';
   import { library, reloadLibrary } from '../stores/library.svelte';
   import Icon from './Icon.svelte';
@@ -57,7 +57,7 @@
         </div>
         <span class="label">
           {scan && scan.total > 0
-            ? t('library.scanning', { done: scan.done.toLocaleString(), total: scan.total.toLocaleString() })
+            ? t('library.scanning', { done: scan.done.toLocaleString(lang()), total: scan.total.toLocaleString(lang()) })
             : t('library.looking')}
         </span>
       {/if}

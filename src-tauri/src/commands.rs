@@ -100,17 +100,15 @@ pub fn player_set_volume(state: State<'_, AppState>, v: f32) -> Result<(), Strin
 }
 
 /// Plays dropped files without indexing them: tags are read on the fly, folders and non-audio
-/// files are skipped. Returns how many files are queued; with none, the player is untouched.
+/// files and network paths (UNC) are skipped. Returns how many files are queued; with none,
+/// the player is untouched. The dropped tracks are kept only when playback was accepted.
 #[tauri::command]
 pub async fn player_play_files(app: AppHandle, paths: Vec<String>) -> Result<u32, String> {
     let dropped = Arc::clone(&app.state::<AppState>().dropped);
-    let ids = blocking(move || Ok(dropped.add(&paths))).await?;
-    if ids.is_empty() {
-        return Ok(0);
-    }
-    let count = ids.len() as u32;
-    app.state::<AppState>().player.play(ids, 0)?;
-    Ok(count)
+    let reader = Arc::clone(&dropped);
+    let tracks = blocking(move || Ok(reader.read(&paths))).await?;
+    let state = app.state::<AppState>();
+    dropped.commit_and_play(tracks, |ids| state.player.play(ids, 0))
 }
 
 #[tauri::command]

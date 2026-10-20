@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { gridLayout, visibleRange } from './virtual';
+import { anchorOffset, gridLayout, visibleRange } from './virtual';
 
 describe('visibleRange', () => {
   it('starts at the top with the overscan after the viewport', () => {
@@ -45,5 +45,20 @@ describe('gridLayout', () => {
   it('always keeps one column', () => {
     expect(gridLayout(100, 180, 24)).toEqual({ columns: 1, cardWidth: 100 });
     expect(gridLayout(0, 180, 24).columns).toBe(1);
+  });
+});
+
+describe('anchorOffset', () => {
+  it('keeps the first visible card at the top when the column count changes', () => {
+    // Row 10 of a 4-column grid starts with card 40; with 5 columns that is row 8.
+    expect(anchorOffset(10 * 250, 250, 4, 200, 5)).toBe(8 * 200);
+    // Half a row scrolled past stays half a row.
+    expect(anchorOffset(10.5 * 250, 250, 4, 200, 5)).toBe(8.5 * 200);
+    // Card 40 in a 3-column grid is in row 13.
+    expect(anchorOffset(10 * 250, 250, 4, 300, 3)).toBe(13 * 300);
+  });
+
+  it('stays at the top', () => {
+    expect(anchorOffset(0, 250, 4, 200, 5)).toBe(0);
   });
 });

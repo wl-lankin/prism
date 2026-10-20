@@ -84,7 +84,6 @@ const en = {
   'album.back': 'Back',
   'album.nowPlaying': 'Now playing',
 
-  'songs.number': 'Number',
   'songs.title': 'Title',
   'songs.artist': 'Artist',
   'songs.album': 'Album',
@@ -99,7 +98,6 @@ const en = {
   'search.empty': 'Nothing matches "{query}".',
   'search.failed': 'Search failed: {message}',
   'search.keys': 'Arrows to move, Enter to open, Esc to close',
-  'search.close': 'Close search',
 
   'drop.hint': 'Drop to play',
   'drop.lead': 'Files play right away without being added to your library.',
@@ -190,7 +188,6 @@ const de: Record<Key, string> = {
   'album.back': 'Zurück',
   'album.nowPlaying': 'Läuft gerade',
 
-  'songs.number': 'Nummer',
   'songs.title': 'Titel',
   'songs.artist': 'Interpret',
   'songs.album': 'Album',
@@ -205,7 +202,6 @@ const de: Record<Key, string> = {
   'search.empty': 'Keine Treffer für „{query}“.',
   'search.failed': 'Suche fehlgeschlagen: {message}',
   'search.keys': 'Pfeiltasten zum Wählen, Enter zum Öffnen, Esc zum Schließen',
-  'search.close': 'Suche schließen',
 
   'drop.hint': 'Zum Abspielen loslassen',
   'drop.lead': 'Die Dateien laufen sofort, ohne in die Mediathek aufgenommen zu werden.',
