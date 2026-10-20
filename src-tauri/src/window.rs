@@ -49,8 +49,13 @@ fn clear_system_chrome(window: &tauri::WebviewWindow) {
 #[cfg(not(target_os = "windows"))]
 fn clear_system_chrome(_window: &tauri::WebviewWindow) {}
 
-/// Clears the main window's background so the area outside the card is see-through. The
-/// window starts with the opaque `--bg` from the config, so there is no white first frame.
+/// Clears the main window's background so the area outside the card is see-through.
+///
+/// The config's `backgroundColor` must stay `#00000000`: on Windows the runtime keeps the
+/// color the window was created with and repaints the whole window surface with it on every
+/// WM_PAINT (resizes, DPI changes, focus changes), ignoring this call and the alpha. Any
+/// non-black color there shows as a tinted band in the transparent strip. `index.html`
+/// paints `--bg` itself, so there is still no white first frame.
 pub fn setup(app: &tauri::App) {
     if let Some(window) = app.get_webview_window("main") {
         clear_system_chrome(&window);
@@ -65,4 +70,19 @@ pub fn setup(app: &tauri::App) {
 #[tauri::command]
 pub fn window_vibrancy(vibrancy: State<'_, Vibrancy>) -> bool {
     vibrancy.0
+}
+
+#[cfg(test)]
+mod tests {
+    /// The runtime repaints the window surface with the creation color (see `setup`), so only
+    /// transparent black keeps the strip below the card see-through.
+    #[test]
+    fn main_window_is_created_with_a_transparent_black_background() {
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let main = &config["app"]["windows"][0];
+        assert_eq!(main["label"], "main");
+        assert_eq!(main["transparent"], true);
+        assert_eq!(main["backgroundColor"], "#00000000");
+    }
 }
