@@ -14,11 +14,15 @@ pub struct SearchResult {
     pub tracks: Vec<Track>,
 }
 
-/// Every `Track` field, from a `tracks` table aliased `t`, in `track_from_row` order.
+/// Every `Track` field, from a `tracks` table aliased `t`, in `track_from_row` order. A track
+/// without its own cover shows the album's online lookup cover; COALESCE is lazy and the
+/// subquery is a primary key search, so tracks with a cover cost nothing extra.
 pub(crate) const TRACK_COLUMNS: &str =
     "t.id, t.source, t.title, t.artist, t.album_artist, t.album, \
     t.album_id, t.track_no, t.disc_no, t.duration_ms, t.year, t.genre, t.format, \
-    t.sample_rate, t.bit_depth, t.bitrate_kbps, t.cover_id, t.path, t.replay_gain_track_db, \
+    t.sample_rate, t.bit_depth, t.bitrate_kbps, \
+    COALESCE(t.cover_id, (SELECT l.cover_id FROM cover_lookups l WHERE l.album_id = t.album_id)), \
+    t.path, t.replay_gain_track_db, \
     t.replay_gain_album_db, t.replay_gain_track_peak, t.replay_gain_album_peak";
 
 /// Every `Album` field, from an `albums` table aliased `a`, in `album_from_row` order.

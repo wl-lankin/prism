@@ -77,6 +77,23 @@ it('keeps the track object while only the position moves', async () => {
   stop();
 });
 
+it('replaces the track object when only its cover changes', async () => {
+  invoke.mockResolvedValue(playing);
+  const stop = await initPlayer();
+  const emit = (payload: PlayerState) =>
+    listeners.get('player://state')!({ event: 'player://state', id: 1, payload });
+  const track = { id: 'local:1', title: 'One', coverId: null } as PlayerState['track'];
+  emit({ ...playing, track });
+  const first = player.track;
+  emit({ ...playing, track: { ...track!, coverId: 'abc123' } });
+  expect(player.track).not.toBe(first);
+  expect(player.track?.coverId).toBe('abc123');
+  const second = player.track;
+  emit({ ...playing, track: { ...track!, coverId: 'abc123' }, positionMs: 2000 });
+  expect(player.track).toBe(second);
+  stop();
+});
+
 it('an event that arrives before the first player_state wins', async () => {
   let resolve!: (state: PlayerState) => void;
   invoke.mockReturnValue(new Promise<PlayerState>((r) => (resolve = r)));
