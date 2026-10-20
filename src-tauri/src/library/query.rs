@@ -161,6 +161,18 @@ pub fn tracks_range(conn: &Connection, offset: u32, limit: u32) -> anyhow::Resul
     collect(conn, &sql, params![limit, offset], track_from_row)
 }
 
+/// Every genre in the library once (case-insensitively; the first spelling in byte order
+/// wins), blank ones left out, sorted case-insensitively.
+pub fn genres(conn: &Connection) -> anyhow::Result<Vec<String>> {
+    collect(
+        conn,
+        "SELECT MIN(genre) FROM tracks WHERE TRIM(COALESCE(genre, '')) <> ''
+         GROUP BY genre COLLATE NOCASE ORDER BY MIN(genre) COLLATE NOCASE",
+        [],
+        |row| row.get(0),
+    )
+}
+
 /// Tracks by FTS (every word as a prefix), albums and artists by substring. Any input is
 /// safe: FTS syntax is quoted away and LIKE wildcards are escaped.
 pub fn search(conn: &Connection, query: &str, limit: u32) -> anyhow::Result<SearchResult> {
@@ -388,6 +400,33 @@ mod tests {
         let conn = db.0.lock().unwrap();
         assert_eq!(track(&conn, "t0").unwrap().unwrap().title, "Teardrop");
         assert!(track(&conn, "nope").unwrap().is_none());
+    }
+
+    #[test]
+    fn genres_are_distinct_and_sorted() {
+        let db = sample();
+        let conn = db.0.lock().unwrap();
+        for (id, genre) in [
+            ("t0", Some("Trip Hop")),
+            ("t1", Some("trip hop")),
+            ("t2", Some("Trip Hop")),
+            ("t3", Some("ambient")),
+            ("t4", Some("  ")),
+            ("t5", Some("")),
+            ("t6", Some("Electronic")),
+        ] {
+            conn.execute(
+                "UPDATE tracks SET genre = ?2 WHERE id = ?1",
+                params![id, genre],
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            genres(&conn).unwrap(),
+            ["ambient", "Electronic", "Trip Hop"]
+        );
+        conn.execute("UPDATE tracks SET genre = NULL", []).unwrap();
+        assert!(genres(&conn).unwrap().is_empty());
     }
 
     #[test]

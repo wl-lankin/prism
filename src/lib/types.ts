@@ -93,7 +93,15 @@ export interface PlayerState {
   queueLength: number;
   /** Bumped whenever the queue's ids change (not when only the position moves). */
   queueVersion: number;
+  /** The Flow the queue was dealt for; null outside Flow. */
+  flow?: FlowVariant | null;
 }
+
+/** Where a Flow draws its tracks from. */
+export type FlowVariant = { kind: 'favorites' } | { kind: 'library' } | { kind: 'genre'; genre: string };
+
+/** What `flow_start` did; favorites without any fall back to the library (`variant`). */
+export type FlowOutcome = { outcome: 'started'; variant: FlowVariant } | { outcome: 'empty' };
 
 export type LanguagePref = 'system' | 'en' | 'de';
 export type ReplayGainMode = 'off' | 'track' | 'album';

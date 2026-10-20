@@ -29,12 +29,12 @@ const en = {
   'window.close': 'Close',
 
   'ring.flow': 'Flow',
-  'ring.flowHint': 'Play all albums shuffled',
+  'ring.flowHint': 'Flow from your favorites. Right-click for more.',
   'ring.play': 'Play',
   'ring.pause': 'Pause',
 
   'transport.idleTitle': 'Nothing playing',
-  'transport.idleHint': 'Click Flow to shuffle your library',
+  'transport.idleHint': 'Click Flow for an endless mix of your favorites',
   'transport.loading': 'Loading',
   'transport.previous': 'Previous',
   'transport.next': 'Next',
@@ -44,6 +44,16 @@ const en = {
   'transport.unmute': 'Unmute',
 
   'flow.failed': 'Playback could not start: {message}',
+  'flow.noFavorites': 'No favorites yet, so Flow plays your whole library.',
+  'flow.menu': 'Start a Flow',
+  'flow.fromFavorites': 'Flow from favorites',
+  'flow.fromLibrary': 'Flow from the whole library',
+  'flow.fromGenre': 'Flow from a genre',
+  'flow.genreFilter': 'Filter genres',
+  'flow.noGenres': 'No genres in your library',
+  'flow.noGenreMatch': 'No genre matches',
+  'flow.genresFailed': 'Genres could not be loaded: {message}',
+  'flow.back': 'Back',
 
   'view.home.lead': 'Albums from your library appear here.',
   'view.albums.lead': 'Albums from your library appear here.',
@@ -191,12 +201,12 @@ const de: Record<Key, string> = {
   'window.close': 'Schließen',
 
   'ring.flow': 'Flow',
-  'ring.flowHint': 'Alle Alben gemischt abspielen',
+  'ring.flowHint': 'Flow aus deinen Favoriten. Rechtsklick für mehr.',
   'ring.play': 'Abspielen',
   'ring.pause': 'Pause',
 
   'transport.idleTitle': 'Keine Wiedergabe',
-  'transport.idleHint': 'Klicke auf Flow, um deine Mediathek zu mischen',
+  'transport.idleHint': 'Klicke auf Flow für einen endlosen Mix deiner Favoriten',
   'transport.loading': 'Wird geladen',
   'transport.previous': 'Zurück',
   'transport.next': 'Weiter',
@@ -206,6 +216,16 @@ const de: Record<Key, string> = {
   'transport.unmute': 'Ton an',
 
   'flow.failed': 'Wiedergabe konnte nicht starten: {message}',
+  'flow.noFavorites': 'Noch keine Favoriten, daher spielt Flow deine ganze Mediathek.',
+  'flow.menu': 'Flow starten',
+  'flow.fromFavorites': 'Flow aus Favoriten',
+  'flow.fromLibrary': 'Flow aus der ganzen Mediathek',
+  'flow.fromGenre': 'Flow aus einem Genre',
+  'flow.genreFilter': 'Genres filtern',
+  'flow.noGenres': 'Keine Genres in deiner Mediathek',
+  'flow.noGenreMatch': 'Kein Genre passt',
+  'flow.genresFailed': 'Genres konnten nicht geladen werden: {message}',
+  'flow.back': 'Zurück',
 
   'view.home.lead': 'Hier erscheinen die Alben aus deiner Mediathek.',
   'view.albums.lead': 'Hier erscheinen die Alben aus deiner Mediathek.',
