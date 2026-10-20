@@ -11,6 +11,7 @@
   import { evictPages, pagesFor } from '../pages';
   import { visibleRange } from '../virtual';
   import Cover from './Cover.svelte';
+  import Heart from './Heart.svelte';
   import NowPlayingBars from './NowPlayingBars.svelte';
   import ViewHead from './ViewHead.svelte';
 
@@ -147,6 +148,7 @@
     <span>{t('songs.title')}</span>
     <span>{t('songs.artist')}</span>
     <span>{t('songs.album')}</span>
+    <span></span>
     <span class="time">{t('songs.time')}</span>
   </div>
 
@@ -199,12 +201,14 @@
             <button type="button" class="cell dim link" tabindex="-1" onclick={() => go('album', track.albumId)}>
               {track.album}
             </button>
+            <Heart kind="track" id={track.id} size={16} tabindex={-1} label={t('favorites.toggleItem', { name: track.title })} />
             <span class="time">{formatDuration(track.durationMs)}</span>
           {:else}
             <span class="ghost-cover"></span>
             <span class="ghost" style="width:46%"></span>
             <span class="ghost" style="width:38%"></span>
             <span class="ghost" style="width:52%"></span>
+            <span></span>
             <span></span>
           {/if}
         </div>
@@ -227,7 +231,7 @@
   .cols,
   .row {
     display: grid;
-    grid-template-columns: 40px 32px minmax(0, 2.2fr) minmax(0, 1.4fr) minmax(0, 1.4fr) 56px;
+    grid-template-columns: 40px 32px minmax(0, 2.2fr) minmax(0, 1.4fr) minmax(0, 1.4fr) 30px 56px;
     column-gap: 14px;
     align-items: center;
     padding: 0 12px;
@@ -285,6 +289,16 @@
 
   .row.selected {
     background: rgba(255, 255, 255, 0.075);
+  }
+
+  /* A song's heart shows on hover or selection, and always once it is set. */
+  .row :global(.heart:not(.on)) {
+    opacity: 0;
+  }
+
+  .row:hover :global(.heart),
+  .row.selected :global(.heart) {
+    opacity: 1;
   }
 
   .list:focus-visible .row.selected {

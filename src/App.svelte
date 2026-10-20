@@ -6,6 +6,7 @@
   import ArtistList from './lib/components/ArtistList.svelte';
   import ArtistView from './lib/components/ArtistView.svelte';
   import EmptyLibrary from './lib/components/EmptyLibrary.svelte';
+  import FavoritesView from './lib/components/FavoritesView.svelte';
   import FlowRing, { type RingMode } from './lib/components/FlowRing.svelte';
   import Icon from './lib/components/Icon.svelte';
   import SearchPalette from './lib/components/SearchPalette.svelte';
@@ -18,6 +19,7 @@
   import { playAllShuffled } from './lib/flow';
   import { t, tc, type Key } from './lib/i18n';
   import { playerPlayFiles, playerToggle, startupNotice, windowVibrancy } from './lib/ipc';
+  import { initFavorites } from './lib/stores/favorites.svelte';
   import { initLibrary, library } from './lib/stores/library.svelte';
   import { go, nav, overlays, type View } from './lib/stores/nav.svelte';
   import { notice, notify } from './lib/stores/notice.svelte';
@@ -53,6 +55,18 @@
   });
 
   $effect(() => initLibrary());
+
+  $effect(() => {
+    let stop: (() => void) | undefined;
+    let gone = false;
+    initFavorites()
+      .then((cleanup) => (gone ? cleanup() : (stop = cleanup)))
+      .catch((err) => console.error('loading the favorites failed', err));
+    return () => {
+      gone = true;
+      stop?.();
+    };
+  });
 
   $effect(() => {
     startupNotice()
@@ -199,8 +213,10 @@
               <SongList />
             {:else if nav.view === 'settings'}
               <Settings />
+            {:else if nav.view === 'favorites'}
+              <FavoritesView />
             {:else}
-              <!-- Favorites and Playlists arrive in later versions. -->
+              <!-- Playlists arrive in a later version. -->
               <div class="placeholder">
                 <h1>{t(titles[nav.view])}</h1>
                 <p>{t(`view.${nav.view}.lead`)}</p>

@@ -43,9 +43,13 @@ it('puts the ring first in the tab order and names disabled entries', () => {
   const app = mount(App, { target });
   flushSync();
   expect(target.querySelector('button')?.classList.contains('ring')).toBe(true);
-  const favorites = [...target.querySelectorAll('.item')].find((b) => b.textContent?.includes('Favorites'));
-  expect(favorites?.getAttribute('aria-disabled')).toBe('true');
-  expect(favorites?.textContent).toContain('Coming soon');
+  const items = [...target.querySelectorAll('.item')];
+  const playlists = items.find((b) => b.textContent?.includes('Playlists'));
+  expect(playlists?.getAttribute('aria-disabled')).toBe('true');
+  expect(playlists?.textContent).toContain('Coming soon');
+  const favorites = items.find((b) => b.textContent?.includes('Favorites'));
+  expect(favorites?.getAttribute('aria-disabled')).toBeNull();
+  expect(favorites?.textContent).not.toContain('Coming soon');
   expect(target.querySelector('[role="status"]')).not.toBeNull();
   expect(document.documentElement.lang).toBe('en');
   unmount(app);

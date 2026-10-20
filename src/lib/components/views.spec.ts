@@ -236,3 +236,35 @@ it('fetches songs in pages of 200 and renders only the rows near the viewport', 
   expect(invoke).toHaveBeenCalledWith('player_play', expect.objectContaining({ startIndex: 3 }));
   unmount(app);
 });
+
+it('renders a favorite heart as pressed and toggles it on click', async () => {
+  const { default: Heart } = await import('./Heart.svelte');
+  const { favorites } = await import('../stores/favorites.svelte');
+  favorites.tracks.add('local:t1');
+  const app = mount(Heart, { target, props: { kind: 'track', id: 'local:t1', label: 'Favorite Song 1' } });
+  flushSync();
+  const button = target.querySelector('button')!;
+  expect(button.getAttribute('aria-pressed')).toBe('true');
+  expect(button.getAttribute('aria-label')).toBe('Favorite Song 1');
+
+  button.click();
+  flushSync();
+  expect(button.getAttribute('aria-pressed')).toBe('false');
+  expect(invoke).toHaveBeenCalledWith('favorites_set', { kind: 'track', id: 'local:t1', on: false });
+
+  button.click();
+  flushSync();
+  expect(button.getAttribute('aria-pressed')).toBe('true');
+  expect(invoke).toHaveBeenLastCalledWith('favorites_set', { kind: 'track', id: 'local:t1', on: true });
+  unmount(app);
+});
+
+it('renders a heart that is not a favorite as not pressed', async () => {
+  const { default: Heart } = await import('./Heart.svelte');
+  const app = mount(Heart, { target, props: { kind: 'album', id: 'nope' } });
+  flushSync();
+  const button = target.querySelector('button')!;
+  expect(button.getAttribute('aria-pressed')).toBe('false');
+  expect(button.getAttribute('aria-label')).toBe('Favorite');
+  unmount(app);
+});

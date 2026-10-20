@@ -1,0 +1,90 @@
+import { SvelteSet } from 'svelte/reactivity';
+import { t } from '../i18n';
+import { favoritesIds, favoritesSet, onFavoritesChanged } from '../ipc';
+import type { FavKind, FavoriteIds } from '../types';
+import { notify } from './notice.svelte';
+
+/** Every favorite id, by kind. Track and album ids, artist names. The sets are filled from
+ *  `favorites_ids` and changed in place, so `has()` in a template follows each id. */
+class FavoritesStore {
+  tracks = new SvelteSet<string>();
+  albums = new SvelteSet<string>();
+  artists = new SvelteSet<string>();
+  /** Bumped whenever the ids were reloaded, so views showing favorite lists refetch them. */
+  version = $state(0);
+}
+
+export const favorites = new FavoritesStore();
+
+function setOf(kind: FavKind): SvelteSet<string> {
+  return kind === 'track' ? favorites.tracks : kind === 'album' ? favorites.albums : favorites.artists;
+}
+
+function replace(set: SvelteSet<string>, ids: string[]) {
+  const next = new Set(ids);
+  for (const id of set) if (!next.has(id)) set.delete(id);
+  for (const id of next) set.add(id);
+}
+
+/** Changes still on their way to the backend: a reload must not undo them meanwhile. */
+const pending = new Map<string, boolean>();
+const pendingKey = (kind: FavKind, id: string) => `${kind}\u0000${id}`;
+
+function apply(ids: FavoriteIds) {
+  replace(favorites.tracks, ids.tracks ?? []);
+  replace(favorites.albums, ids.albums ?? []);
+  replace(favorites.artists, ids.artists ?? []);
+  for (const [key, on] of pending) {
+    const [kind, id] = key.split('\u0000') as [FavKind, string];
+    if (on) setOf(kind).add(id);
+    else setOf(kind).delete(id);
+  }
+  favorites.version++;
+}
+
+async function reload(): Promise<void> {
+  try {
+    apply(await favoritesIds());
+  } catch (err) {
+    console.error('loading the favorites failed', err);
+  }
+}
+
+export function isFavorite(kind: FavKind, id: string): boolean {
+  return setOf(kind).has(id);
+}
+
+/** Shows the change at once, then saves it; a failure puts the old state back with a notice. */
+export async function setFavorite(kind: FavKind, id: string, on: boolean): Promise<void> {
+  const set = setOf(kind);
+  const was = set.has(id);
+  const key = pendingKey(kind, id);
+  pending.set(key, on);
+  if (on) set.add(id);
+  else set.delete(id);
+  try {
+    await favoritesSet(kind, id, on);
+  } catch (err) {
+    // Only undo when no later click has changed the same item since.
+    if (pending.get(key) === on) {
+      if (was) set.add(id);
+      else set.delete(id);
+    }
+    notify(t('favorites.failed', { message: String(err) }));
+  } finally {
+    if (pending.get(key) === on) pending.delete(key);
+  }
+}
+
+/** Loads the favorite ids, then follows `favorites://changed`. Resolves with the cleanup.
+ *  The listener is attached before the first load, so no change between the two is missed. */
+export async function initFavorites(): Promise<() => void> {
+  let stop: (() => void) | undefined;
+  try {
+    stop = await onFavoritesChanged(() => void reload());
+  } catch (err) {
+    console.error('following the favorites failed', err);
+  }
+  await reload();
+  return () => stop?.();
+}

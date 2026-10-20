@@ -9,6 +9,7 @@
   import { player } from '../stores/player.svelte';
   import type { Track } from '../types';
   import Cover from './Cover.svelte';
+  import Heart from './Heart.svelte';
   import Icon from './Icon.svelte';
   import NowPlayingBars from './NowPlayingBars.svelte';
 
@@ -68,6 +69,7 @@
 
   /** The row a click landed on (rows carry `data-index`). */
   function rowIndex(event: MouseEvent): number | null {
+    if ((event.target as HTMLElement).closest('button')) return null;
     const row = (event.target as HTMLElement).closest<HTMLElement>('[data-index]');
     return row ? Number(row.dataset.index) : null;
   }
@@ -134,6 +136,7 @@
               <Icon name="shuffle" size={16} />
               {t('album.shuffle')}
             </button>
+            <Heart kind="album" id={albumId} round label={t('favorites.toggleItem', { name: title })} />
           </div>
         </div>
       </header>
@@ -182,6 +185,7 @@
                   <span class="feat">{track.artist}</span>
                 {/if}
               </span>
+              <Heart kind="track" id={track.id} size={16} tabindex={-1} label={t('favorites.toggleItem', { name: track.title })} />
               <span class="time">{formatDuration(track.durationMs)}</span>
             </div>
           {/each}
@@ -335,6 +339,7 @@
 
   .actions {
     display: flex;
+    align-items: center;
     gap: 10px;
   }
 
@@ -352,7 +357,7 @@
 
   .row {
     display: grid;
-    grid-template-columns: 32px minmax(0, 1fr) 56px;
+    grid-template-columns: 32px minmax(0, 1fr) 30px 56px;
     column-gap: 16px;
     align-items: center;
     height: 44px;
@@ -369,6 +374,16 @@
 
   .row.selected {
     background: rgba(255, 255, 255, 0.075);
+  }
+
+  /* A song's heart shows on hover or selection, and always once it is set. */
+  .row :global(.heart:not(.on)) {
+    opacity: 0;
+  }
+
+  .row:hover :global(.heart),
+  .row.selected :global(.heart) {
+    opacity: 1;
   }
 
   .tracks:focus-visible .row.selected {

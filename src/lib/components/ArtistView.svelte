@@ -9,6 +9,7 @@
   import type { Album } from '../types';
   import AlbumGrid from './AlbumGrid.svelte';
   import Cover from './Cover.svelte';
+  import Heart from './Heart.svelte';
   import Icon from './Icon.svelte';
 
   /** One artist: their albums in the card grid, plus play and shuffle for all of them. */
@@ -75,6 +76,7 @@
           <Icon name="shuffle" size={16} />
           {t('album.shuffle')}
         </button>
+        <Heart kind="artist" id={name} round label={t('favorites.toggleItem', { name })} />
       </div>
     </div>
   </header>
@@ -143,6 +145,7 @@
 
   .actions {
     display: flex;
+    align-items: center;
     gap: 10px;
   }
 
