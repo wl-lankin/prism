@@ -76,12 +76,11 @@ mod tests {
         }
         let db = Db::open(&path).unwrap();
         assert_eq!(user_version(&db), 1);
-        let mode: String = db
-            .0
-            .lock()
-            .unwrap()
-            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
-            .unwrap();
+        let mode: String =
+            db.0.lock()
+                .unwrap()
+                .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+                .unwrap();
         assert_eq!(mode, "wal");
         drop(db);
         let _ = std::fs::remove_dir_all(&dir);
@@ -120,7 +119,8 @@ mod tests {
         upsert("Angel");
         assert_eq!(hits("tear*"), 0);
         assert_eq!(hits("angel*"), 1);
-        conn.execute("DELETE FROM tracks WHERE id = 't1'", []).unwrap();
+        conn.execute("DELETE FROM tracks WHERE id = 't1'", [])
+            .unwrap();
         assert_eq!(hits("angel*"), 0);
     }
 

@@ -131,7 +131,10 @@ mod tests {
         assert_eq!(first, track_id(path));
         assert!(first.starts_with("local:"));
         assert_eq!(first.len(), "local:".len() + 40);
-        assert_ne!(first, track_id(Path::new("C:\\Music\\does-not-exist\\b.flac")));
+        assert_ne!(
+            first,
+            track_id(Path::new("C:\\Music\\does-not-exist\\b.flac"))
+        );
     }
 
     #[cfg(windows)]

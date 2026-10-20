@@ -17,3 +17,8 @@ it('returns null without an id', () => {
   expect(coverUrl(null, 600)).toBeNull();
   expect(coverUrl('', 600)).toBeNull();
 });
+
+it('treats Android like Windows and encodes the id', () => {
+  vi.stubGlobal('navigator', { userAgent: 'Mozilla/5.0 (Linux; Android 14)' });
+  expect(coverUrl('a/b c', 96)).toBe('http://prism.localhost/cover/a%2Fb%20c/96');
+});

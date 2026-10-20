@@ -5,10 +5,12 @@
 //! bound of 96, 300 or 600 px as JPEG. Resized covers are cached on disk.
 
 use std::io::Cursor;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 
 use image::codecs::jpeg::JpegEncoder;
 use image::imageops::FilterType;
+use image::{DynamicImage, ImageError, Rgb, RgbImage};
 use tauri::http::{header, Request, Response, StatusCode};
 use tauri::{Manager, Runtime, UriSchemeContext, UriSchemeResponder};
 
@@ -26,16 +28,21 @@ pub fn register<R: Runtime>(
     let app = ctx.app_handle().clone();
     let path = request.uri().path().to_string();
     tauri::async_runtime::spawn_blocking(move || {
-        let store = &app.state::<AppState>().library.covers;
-        let response = match store.dir().parent() {
-            Some(cache) => handle(store, cache, &path),
-            None => plain(StatusCode::INTERNAL_SERVER_ERROR, "no cache dir"),
-        };
+        // A panic in a decoder must still answer the request.
+        let response = catch_unwind(AssertUnwindSafe(|| {
+            let store = &app.state::<AppState>().library.covers;
+            match store.dir().parent() {
+                Some(cache) => handle(store, cache, &path),
+                None => plain(StatusCode::INTERNAL_SERVER_ERROR, "no cache dir"),
+            }
+        }))
+        .unwrap_or_else(|_| plain(StatusCode::INTERNAL_SERVER_ERROR, "cover handler panicked"));
         responder.respond(response);
     });
 }
 
-/// Serves `/cover/<id>/<size>`. `cache` is the directory holding one subfolder per size.
+/// Serves `/cover/<id>/<size>`. `path` is the URI path only; the query string is already
+/// stripped by `Uri::path()`. `cache` is the directory holding one subfolder per size.
 pub fn handle(store: &CoverStore, cache: &Path, path: &str) -> Response<Vec<u8>> {
     let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
     let [kind, id, size] = parts.as_slice() else {
@@ -58,7 +65,12 @@ pub fn handle(store: &CoverStore, cache: &Path, path: &str) -> Response<Vec<u8>>
                 let _ = write_atomic(&cached, &bytes);
                 bytes
             }
-            Err(_) => return plain(StatusCode::UNPROCESSABLE_ENTITY, "cover cannot be decoded"),
+            Err(ResizeError::Undecodable(_)) => {
+                return plain(StatusCode::UNPROCESSABLE_ENTITY, "cover cannot be decoded")
+            }
+            Err(ResizeError::Internal(_)) => {
+                return plain(StatusCode::INTERNAL_SERVER_ERROR, "cover cannot be served")
+            }
         },
     };
     Response::builder()
@@ -70,11 +82,43 @@ pub fn handle(store: &CoverStore, cache: &Path, path: &str) -> Response<Vec<u8>>
         .unwrap_or_else(|_| Response::new(Vec::new()))
 }
 
-fn resize(original: &Path, size: u32) -> anyhow::Result<Vec<u8>> {
-    let image = image::open(original)?;
-    let resized = image.resize(size, size, FilterType::Lanczos3).to_rgb8();
+enum ResizeError {
+    /// The bytes are not a decodable image: the client cannot fix this, but it is not our fault.
+    Undecodable(#[allow(dead_code)] ImageError),
+    /// Disk or encoder failure.
+    Internal(#[allow(dead_code)] String),
+}
+
+/// Background for transparent covers: the `--surface` token.
+const SURFACE: Rgb<u8> = Rgb([0x14, 0x14, 0x18]);
+
+fn flatten(image: &DynamicImage) -> RgbImage {
+    let rgba = image.to_rgba8();
+    RgbImage::from_fn(rgba.width(), rgba.height(), |x, y| {
+        let [r, g, b, a] = rgba.get_pixel(x, y).0;
+        let mix = |fg: u8, bg: u8| {
+            ((fg as u32 * a as u32 + bg as u32 * (255 - a as u32) + 127) / 255) as u8
+        };
+        Rgb([mix(r, SURFACE[0]), mix(g, SURFACE[1]), mix(b, SURFACE[2])])
+    })
+}
+
+fn resize(original: &Path, size: u32) -> Result<Vec<u8>, ResizeError> {
+    let bytes = std::fs::read(original).map_err(|e| ResizeError::Internal(e.to_string()))?;
+    let image = image::load_from_memory(&bytes).map_err(|e| match e {
+        ImageError::IoError(io) => ResizeError::Internal(io.to_string()),
+        other => ResizeError::Undecodable(other),
+    })?;
+    // Never upscale: a small cover keeps its own size.
+    let image = if image.width() <= size && image.height() <= size {
+        image
+    } else {
+        image.resize(size, size, FilterType::Lanczos3)
+    };
+    let flat = flatten(&image);
     let mut out = Cursor::new(Vec::new());
-    resized.write_with_encoder(JpegEncoder::new_with_quality(&mut out, JPEG_QUALITY))?;
+    flat.write_with_encoder(JpegEncoder::new_with_quality(&mut out, JPEG_QUALITY))
+        .map_err(|e| ResizeError::Internal(e.to_string()))?;
     Ok(out.into_inner())
 }
 
@@ -88,10 +132,11 @@ fn write_atomic(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
         std::process::id(),
         std::thread::current().id()
     ));
-    std::fs::write(&temp, bytes)?;
-    std::fs::rename(&temp, target).inspect_err(|_| {
-        let _ = std::fs::remove_file(&temp);
-    })
+    std::fs::write(&temp, bytes)
+        .and_then(|()| std::fs::rename(&temp, target))
+        .inspect_err(|_| {
+            let _ = std::fs::remove_file(&temp);
+        })
 }
 
 fn plain(status: StatusCode, message: &str) -> Response<Vec<u8>> {
@@ -153,6 +198,7 @@ mod tests {
             format!("/cover/{id}"),
             format!("/other/{id}/96"),
             format!("/cover/{id}/96/extra"),
+            format!("/cover/{id}/96/"),
         ] {
             let response = handle(&store, root.path(), &path);
             assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}");
@@ -160,6 +206,49 @@ mod tests {
         // Traversal ids never reach the filesystem: the store rejects them as unknown.
         let response = handle(&store, root.path(), "/cover/../96");
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn never_upscales() {
+        let (root, store) = setup();
+        let id = store.store_bytes(&png(50, 50)).unwrap();
+        let response = handle(&store, root.path(), &format!("/cover/{id}/300"));
+        assert_eq!(response.status(), StatusCode::OK);
+        let decoded = image::load_from_memory(response.body()).unwrap();
+        assert!(decoded.width() <= 50 && decoded.height() <= 50);
+    }
+
+    #[test]
+    fn transparent_cover_is_flattened_onto_surface() {
+        let (root, store) = setup();
+        let clear = image::RgbaImage::from_pixel(8, 8, image::Rgba([255, 255, 255, 0]));
+        let mut out = Cursor::new(Vec::new());
+        clear.write_to(&mut out, ImageFormat::Png).unwrap();
+        let id = store.store_bytes(&out.into_inner()).unwrap();
+        let response = handle(&store, root.path(), &format!("/cover/{id}/96"));
+        let pixel = image::load_from_memory(response.body())
+            .unwrap()
+            .to_rgb8()
+            .get_pixel(4, 4)
+            .0;
+        assert!(
+            pixel
+                .iter()
+                .zip([0x14u8, 0x14, 0x18])
+                .all(|(a, b)| a.abs_diff(b) <= 3),
+            "{pixel:?}"
+        );
+    }
+
+    #[test]
+    fn undecodable_cover_is_422() {
+        let (root, store) = setup();
+        let mut bytes = png(10, 10);
+        bytes.truncate(40);
+        bytes.extend_from_slice(b"garbage garbage garbage");
+        let id = store.store_bytes(&bytes).unwrap();
+        let response = handle(&store, root.path(), &format!("/cover/{id}/96"));
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[test]
