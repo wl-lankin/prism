@@ -32,7 +32,7 @@ it('mounts the app shell with the idle Flow ring and the empty library', async (
     flushSync();
     expect(target.querySelector('h1')?.textContent).toBe('Your library is empty');
   });
-  expect(target.querySelector('.ring')?.getAttribute('aria-label')).toBe('Play all albums shuffled');
+  expect(target.querySelector('.ring')?.getAttribute('aria-label')).toBe('Flow from your favorites. Right-click or hold for more.');
   expect(target.querySelector('.ring .label')?.textContent).toBe('Flow');
   unmount(app);
 });

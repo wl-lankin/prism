@@ -8,6 +8,7 @@ use rusqlite::Connection;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::audio::list_devices;
+use crate::flow::{FlowOutcome, FlowVariant};
 use crate::library::favorites::{self, FavKind, FavoriteIds};
 use crate::library::model::{Album, Artist, Folder, Track};
 use crate::library::playlists::{self, Playlist, PlaylistEntry};
@@ -232,6 +233,21 @@ pub async fn library_tracks_range(
 pub async fn library_search(app: AppHandle, q: String, limit: u32) -> Result<SearchResult, String> {
     let limit = limit.min(MAX_PAGE);
     read(&app, move |conn| query::search(conn, &q, limit)).await
+}
+
+/// Every genre once, blank ones left out, sorted case-insensitively.
+#[tauri::command]
+pub async fn library_genres(app: AppHandle) -> Result<Vec<String>, String> {
+    read(&app, query::genres).await
+}
+
+// Flow
+
+/// Plays a new Flow; favorites without any fall back to the whole library.
+#[tauri::command]
+pub async fn flow_start(app: AppHandle, variant: FlowVariant) -> Result<FlowOutcome, String> {
+    let flow = Arc::clone(&app.state::<AppState>().flow);
+    blocking(move || flow.start(variant)).await
 }
 
 // Favorites

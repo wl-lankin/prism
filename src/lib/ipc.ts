@@ -5,6 +5,8 @@ import type {
   Artist,
   FavKind,
   FavoriteIds,
+  FlowOutcome,
+  FlowVariant,
   Folder,
   PlayerError,
   PlayerState,
@@ -76,6 +78,13 @@ export const libraryTrackCount = () => call<number>('library_track_count');
 export const libraryTracksRange = (offset: number, limit: number) =>
   call<Track[]>('library_tracks_range', { offset, limit });
 export const librarySearch = (q: string, limit: number) => call<SearchResult>('library_search', { q, limit });
+/** Every genre once, blank ones left out, sorted case-insensitively. */
+export const libraryGenres = () => call<string[]>('library_genres');
+
+// Flow.
+
+/** Plays a new endless Flow; favorites without any fall back to the whole library. */
+export const flowStart = (variant: FlowVariant) => call<FlowOutcome>('flow_start', { variant });
 
 // Favorites.
 

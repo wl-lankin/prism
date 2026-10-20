@@ -13,19 +13,20 @@ pub mod thumbs;
 pub mod tools;
 pub mod window;
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::Context;
 use tauri::Manager;
 
 use audio::CpalOutputFactory;
+use flow::FlowService;
 use library::covers::CoverStore;
 use library::scan::lock;
 use library::{query, tauri_emitter, watch, Library, LibraryOptions};
 use media_controls::MediaBridge;
 use player::{
-    default_opener, fan_out, tauri_sink, with_dropped, DroppedFiles, Player, PlayerOptions,
-    Resolver,
+    default_opener, fan_out, tauri_sink, with_dropped, DroppedFiles, EventSink, Player,
+    PlayerOptions, Resolver,
 };
 use settings::SettingsStore;
 use startup::{
@@ -37,6 +38,8 @@ use startup::{
 pub struct AppState {
     pub library: Arc<Library>,
     pub player: Player,
+    /// Starts Flows and keeps them going.
+    pub flow: Arc<FlowService>,
     /// Files dropped onto the window, playable without indexing.
     pub dropped: Arc<DroppedFiles>,
     pub settings: Arc<SettingsStore>,
@@ -131,6 +134,10 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
     let handle = app.handle().clone();
     let media = MediaBridge::new();
     let dropped = Arc::new(DroppedFiles::new(Some(Arc::clone(&library.covers))));
+    // The Flow service needs the player's handle and the player needs the service's sink:
+    // the sink is plugged in once both exist.
+    let flow_sink: Arc<OnceLock<EventSink>> = Arc::default();
+    let to_flow = Arc::clone(&flow_sink);
     let player = Player::spawn_with_options(
         Arc::new(CpalOutputFactory),
         with_dropped(Arc::clone(&dropped), library_resolver(&library)),
@@ -138,6 +145,11 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
             tauri_sink(handle.clone()),
             media.sink(),
             library::history::spawn_recorder(Arc::clone(&library.db)),
+            Arc::new(move |event| {
+                if let Some(sink) = to_flow.get() {
+                    sink(event);
+                }
+            }),
         ]),
         default_opener(),
         PlayerOptions {
@@ -178,10 +190,13 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
             })
         },
     );
+    let (flow, sink) = FlowService::spawn(Arc::clone(&library.db), player.handle());
+    let _ = flow_sink.set(sink);
     app.manage(AppState {
         lookup,
         library: Arc::clone(&library),
         player,
+        flow,
         dropped,
         settings,
         thumbs: Arc::new(thumbs::ResizeGate::new(thumbs::ResizeGate::default_limit())),
@@ -249,6 +264,8 @@ pub fn run() {
             commands::library_track_count,
             commands::library_tracks_range,
             commands::library_search,
+            commands::library_genres,
+            commands::flow_start,
             commands::favorites_set,
             commands::favorites_ids,
             commands::favorites_tracks,

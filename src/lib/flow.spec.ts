@@ -1,46 +1,100 @@
-import { beforeEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 
 const invoke = vi.fn(async (..._args: unknown[]): Promise<unknown> => undefined);
 vi.mock('@tauri-apps/api/core', () => ({ invoke: (...args: unknown[]) => invoke(...args) }));
 
-const { FLOW_CAP, playAllShuffled, shuffle } = await import('./flow');
+const { HOLD_MS, activateIdle, holdToOpen, playFlow, shuffle } = await import('./flow');
+const { notice } = await import('./stores/notice.svelte');
+const { nav } = await import('./stores/nav.svelte');
+const { setLang, strings } = await import('./i18n');
 
-function library(albums: number, tracksPerAlbum: number) {
-  invoke.mockImplementation(async (...call: unknown[]) => {
-    const [cmd, args] = call as [string, { albumId?: string } | undefined];
-    if (cmd === 'library_albums') return Array.from({ length: albums }, (_, i) => ({ id: `a${i}` }));
-    if (cmd === 'library_album_tracks') {
-      return Array.from({ length: tracksPerAlbum }, (_, i) => ({ id: `${args?.albumId}-t${i}` }));
-    }
-    if (cmd === 'player_play') return undefined;
-    throw new Error(`unexpected ${JSON.stringify([cmd, args])}`);
-  });
+/** `flow_start` answers with `outcome`; every other command resolves empty. */
+function answer(outcome: unknown) {
+  invoke.mockImplementation(async (...call: unknown[]) => (call[0] === 'flow_start' ? outcome : undefined));
 }
 
 beforeEach(() => {
+  setLang('en');
   invoke.mockReset();
+  notice.text = null;
+  nav.view = 'home';
+  nav.param = undefined;
 });
 
-it('reports an empty library without playing', async () => {
-  library(0, 0);
-  expect(await playAllShuffled()).toBe('empty');
-  expect(invoke).not.toHaveBeenCalledWith('player_play', expect.anything());
+afterEach(() => {
+  vi.useRealTimers();
 });
 
-it('plays every track once, from the first', async () => {
-  library(3, 4);
-  expect(await playAllShuffled()).toBe('played');
-  const play = invoke.mock.calls.find(([cmd]) => cmd === 'player_play');
-  const { trackIds, startIndex } = play![1] as { trackIds: string[]; startIndex: number };
-  expect(startIndex).toBe(0);
-  expect(new Set(trackIds).size).toBe(12);
+it('starts a favorites Flow on an idle activation', async () => {
+  answer({ outcome: 'started', variant: { kind: 'favorites' } });
+  expect(await activateIdle()).toBe('started');
+  expect(invoke).toHaveBeenCalledWith('flow_start', { variant: { kind: 'favorites' } });
+  expect(notice.text).toBeNull();
 });
 
-it('caps the queue', async () => {
-  library(30, 100);
-  await playAllShuffled();
-  const play = invoke.mock.calls.find(([cmd]) => cmd === 'player_play');
-  expect((play![1] as { trackIds: string[] }).trackIds).toHaveLength(FLOW_CAP);
+it('says so when favorites fall back to the library', async () => {
+  answer({ outcome: 'started', variant: { kind: 'library' } });
+  expect(await activateIdle()).toBe('started');
+  expect(invoke).toHaveBeenCalledWith('flow_start', { variant: { kind: 'favorites' } });
+  expect(notice.text).toBe(strings.en['flow.noFavorites']);
+});
+
+it('goes to Settings when the library is empty', async () => {
+  answer({ outcome: 'empty' });
+  expect(await activateIdle()).toBe('empty');
+  expect(nav.view).toBe('settings');
+});
+
+it('starts a genre Flow as asked, without a notice', async () => {
+  answer({ outcome: 'started', variant: { kind: 'genre', genre: 'Trip Hop' } });
+  await playFlow({ kind: 'genre', genre: 'Trip Hop' });
+  expect(invoke).toHaveBeenCalledWith('flow_start', { variant: { kind: 'genre', genre: 'Trip Hop' } });
+  expect(notice.text).toBeNull();
+});
+
+it('shows the backend message when the Flow cannot start', async () => {
+  invoke.mockImplementation(async () => {
+    throw 'The audio engine is not running.';
+  });
+  expect(await activateIdle()).toBe('failed');
+  expect(notice.text).toContain('The audio engine is not running.');
+});
+
+it('opens on a long press and swallows the click that ends it', () => {
+  vi.useFakeTimers();
+  const node = document.createElement('div');
+  const button = document.createElement('button');
+  node.append(button);
+  const onhold = vi.fn();
+  const clicked = vi.fn();
+  button.addEventListener('click', clicked);
+  const action = holdToOpen(node, onhold);
+
+  // A second finger (not the primary pointer) never opens it.
+  button.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, isPrimary: false }));
+  vi.advanceTimersByTime(HOLD_MS * 2);
+  expect(onhold).not.toHaveBeenCalled();
+
+  button.dispatchEvent(
+    new PointerEvent('pointerdown', { bubbles: true, button: 0, isPrimary: true, clientX: 40, clientY: 50 }),
+  );
+  vi.advanceTimersByTime(HOLD_MS - 1);
+  expect(onhold).not.toHaveBeenCalled();
+  vi.advanceTimersByTime(1);
+  expect(onhold).toHaveBeenCalledWith(40, 50);
+  button.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
+  button.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  expect(clicked).not.toHaveBeenCalled();
+
+  // A short press is a plain click.
+  button.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, isPrimary: true }));
+  vi.advanceTimersByTime(200);
+  button.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
+  button.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  vi.advanceTimersByTime(HOLD_MS);
+  expect(clicked).toHaveBeenCalledTimes(1);
+  expect(onhold).toHaveBeenCalledTimes(1);
+  action.destroy();
 });
 
 it('shuffles without losing or duplicating items', () => {

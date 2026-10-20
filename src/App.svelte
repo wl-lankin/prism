@@ -7,6 +7,7 @@
   import ArtistView from './lib/components/ArtistView.svelte';
   import EmptyLibrary from './lib/components/EmptyLibrary.svelte';
   import FavoritesView from './lib/components/FavoritesView.svelte';
+  import FlowMenu from './lib/components/FlowMenu.svelte';
   import FlowRing, { type RingMode } from './lib/components/FlowRing.svelte';
   import Icon from './lib/components/Icon.svelte';
   import NowPlaying from './lib/components/NowPlaying.svelte';
@@ -21,12 +22,12 @@
   import TitleBar from './lib/components/TitleBar.svelte';
   import TransportStrip from './lib/components/TransportStrip.svelte';
   import ViewHead from './lib/components/ViewHead.svelte';
-  import { playAllShuffled } from './lib/flow';
+  import { activateIdle, holdToOpen } from './lib/flow';
   import { t, tc, type Key } from './lib/i18n';
   import { playerPlayFiles, playerToggle, startupNotice, windowVibrancy } from './lib/ipc';
   import { initFavorites } from './lib/stores/favorites.svelte';
   import { initLibrary, library } from './lib/stores/library.svelte';
-  import { go, nav, overlays, type View } from './lib/stores/nav.svelte';
+  import { nav, overlays, type View } from './lib/stores/nav.svelte';
   import { notice, notify } from './lib/stores/notice.svelte';
   import { initPlayer, player } from './lib/stores/player.svelte';
   import { initRing, ring } from './lib/stores/ring.svelte';
@@ -56,6 +57,8 @@
   let starting = $state(false);
   let searching = $state(false);
   let dragging = $state(false);
+  /** Where the Flow menu is open, if it is. */
+  let flowMenu: { x: number; y: number } | null = $state(null);
 
   $effect(() => {
     let stop: (() => void) | undefined;
@@ -185,13 +188,22 @@
     if (starting) return;
     starting = true;
     try {
-      // Flow proper arrives in M2; until then an idle click plays the whole library shuffled.
-      if ((await playAllShuffled()) === 'empty') go('settings');
-    } catch (err) {
-      notify(t('flow.failed', { message: String(err) }));
+      // An endless Flow from the favorites (the whole library when there are none yet).
+      await activateIdle();
     } finally {
       starting = false;
     }
+  }
+
+  let dock: HTMLDivElement | undefined = $state();
+
+  /** Opens the Flow menu above the ring (centred on it), so the ring stays in view. */
+  function openFlowMenu() {
+    const box = dock?.getBoundingClientRect();
+    if (!box) return;
+    // The menu hands focus back to whatever had it when it opened: make that the ring.
+    dock?.querySelector<HTMLElement>('.ring')?.focus();
+    flowMenu = { x: box.left + box.width / 2, y: box.top };
   }
 
   /** Views that show the library, and so the empty state when it has no tracks. */
@@ -231,9 +243,19 @@
   <div
     class="ring-dock"
     style="--ring:{ringSize}px;--bezel:{MAIN.bezel}px;--dock-bottom:{dockBottom}px;--notice-lift:{NOTICE_LIFT - dockTop}px"
+    bind:this={dock}
+    use:holdToOpen={openFlowMenu}
   >
     <div class="notice" class:shown={notice.text} role="status" aria-live="polite">{notice.text ?? ''}</div>
-    <FlowRing {mode} {progress} colors={ring.colors} level={ring.level} size={ringSize} onactivate={activate} />
+    <FlowRing
+      {mode}
+      {progress}
+      colors={ring.colors}
+      level={ring.level}
+      size={ringSize}
+      onactivate={activate}
+      oncontextmenu={openFlowMenu}
+    />
   </div>
 
   <div class="card">
@@ -315,6 +337,10 @@
 </div>
 
 <SearchPalette bind:open={searching} />
+
+{#if flowMenu}
+  <FlowMenu x={flowMenu.x} y={flowMenu.y} onclose={() => (flowMenu = null)} />
+{/if}
 
 {#if overlays.about}
   <About onclose={() => (overlays.about = false)} />

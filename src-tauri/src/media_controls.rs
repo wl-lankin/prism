@@ -403,6 +403,7 @@ mod tests {
             queue_index: 0,
             queue_length: 1,
             queue_version: 0,
+            flow: None,
         }
     }
 

@@ -15,6 +15,7 @@ use crate::audio::gain::replaygain_factor;
 use crate::audio::{
     open_source_with, AudioSource, Input, OutputFactory, Playback, PumpStatus, StreamSpec,
 };
+use crate::flow::FlowVariant;
 use crate::library::model::Track;
 use crate::settings::{Crossfade, ReplayGain};
 
@@ -40,6 +41,8 @@ pub struct PlayerState {
     pub queue_length: u32,
     /// Bumped whenever the queue's ids change (not when only the position moves).
     pub queue_version: u64,
+    /// The Flow this queue was dealt for; `None` (`null`) outside Flow.
+    pub flow: Option<FlowVariant>,
 }
 
 /// One entry of `player_queue_range`. `track` is `None` when the id no longer resolves.
@@ -133,6 +136,7 @@ impl PlayerState {
             queue_index: 0,
             queue_length: 0,
             queue_version: 0,
+            flow: None,
         }
     }
 }
@@ -149,7 +153,7 @@ pub fn default_opener() -> Opener {
 }
 
 enum Command {
-    Play(Vec<String>, usize),
+    Play(Vec<String>, usize, Option<FlowVariant>),
     Append(Vec<String>),
     Jump(usize),
     Toggle,
@@ -224,12 +228,23 @@ impl PlayerHandle {
             .map_err(|_| "The audio engine is not running.".to_string())
     }
 
-    /// Replaces the queue with `ids` and starts playing at `start`.
+    /// Replaces the queue with `ids` and starts playing at `start`. Ends a Flow.
     pub fn play(&self, ids: Vec<String>, start: usize) -> Result<(), String> {
-        self.send(Command::Play(ids, start))
+        self.play_with(ids, start, None)
     }
 
-    /// Adds `ids` at the end of the queue; what plays now keeps playing.
+    /// Like [`PlayerHandle::play`], marking the new queue as dealt for `flow` (published as
+    /// `PlayerState::flow` until the next play).
+    pub fn play_with(
+        &self,
+        ids: Vec<String>,
+        start: usize,
+        flow: Option<FlowVariant>,
+    ) -> Result<(), String> {
+        self.send(Command::Play(ids, start, flow))
+    }
+
+    /// Adds `ids` at the end of the queue; what plays now keeps playing (a Flow too).
     pub fn append(&self, ids: Vec<String>) -> Result<(), String> {
         self.send(Command::Append(ids))
     }
@@ -576,6 +591,8 @@ struct Engine {
     queue: Queue,
     /// Bumped whenever the queue's ids change.
     queue_version: u64,
+    /// The Flow the queue was dealt for; set by every play, kept by appends.
+    flow: Option<FlowVariant>,
     sink: EventSink,
     shared: Shared,
     openers: Openers,
@@ -634,6 +651,7 @@ impl Engine {
             playback,
             queue: Queue::new(),
             queue_version: 0,
+            flow: None,
             sink,
             shared,
             openers,
@@ -702,9 +720,10 @@ impl Engine {
         }
         self.dirty = true;
         match command {
-            Command::Play(ids, start) => {
+            Command::Play(ids, start, flow) => {
                 // A pending hand-over is settled at the index it belongs to.
                 self.settle_handover();
+                self.flow = flow;
                 self.queue.set(ids, start);
                 self.queue_changed();
                 self.failures = 0;
@@ -1195,6 +1214,7 @@ impl Engine {
             queue_index: self.shown_index as u32,
             queue_length: self.queue.len() as u32,
             queue_version: self.queue_version,
+            flow: self.flow.clone(),
         }
     }
 
@@ -2276,12 +2296,23 @@ mod tests {
             queue_index: 1,
             queue_length: 2,
             queue_version: 7,
+            flow: None,
         };
         let value = serde_json::to_value(&state).unwrap();
         assert_eq!(value["status"], "loading");
         assert_eq!(value["positionMs"], 5);
         assert_eq!(value["queueLength"], 2);
         assert_eq!(value["queueVersion"], 7);
+        assert!(value["flow"].is_null(), "null outside Flow");
+        let flowing = PlayerState {
+            flow: Some(FlowVariant::Genre {
+                genre: "Jazz".into(),
+            }),
+            ..state
+        };
+        let value = serde_json::to_value(&flowing).unwrap();
+        assert_eq!(value["flow"]["kind"], "genre");
+        assert_eq!(value["flow"]["genre"], "Jazz");
         let error = serde_json::to_value(PlayerError {
             track_id: "t".into(),
             message: "m".into(),
