@@ -77,21 +77,24 @@ pub fn image_extension(bytes: &[u8]) -> Option<&'static str> {
     }
 }
 
+/// The priority of `path` as a folder cover by its file name (0 is best), or `None` when the
+/// name is not one `find_folder_cover` accepts.
+pub fn folder_cover_rank(path: &Path) -> Option<usize> {
+    let stem = path.file_stem()?.to_string_lossy().to_lowercase();
+    let ext = path.extension()?.to_string_lossy().to_lowercase();
+    if !FOLDER_COVER_EXTENSIONS.contains(&ext.as_str()) {
+        return None;
+    }
+    FOLDER_COVER_NAMES.iter().position(|name| *name == stem)
+}
+
 /// Finds a cover image next to the audio files: `cover`, `folder`, `front` or `album`
 /// with a jpg, jpeg, png or webp extension, case-insensitive. Earlier names win.
 pub fn find_folder_cover(dir: &Path) -> Option<PathBuf> {
     let mut best: Option<(usize, PathBuf)> = None;
     for entry in std::fs::read_dir(dir).ok()?.flatten() {
         let path = entry.path();
-        let (Some(stem), Some(ext)) = (path.file_stem(), path.extension()) else {
-            continue;
-        };
-        let stem = stem.to_string_lossy().to_lowercase();
-        let ext = ext.to_string_lossy().to_lowercase();
-        if !FOLDER_COVER_EXTENSIONS.contains(&ext.as_str()) {
-            continue;
-        }
-        let Some(rank) = FOLDER_COVER_NAMES.iter().position(|name| *name == stem) else {
+        let Some(rank) = folder_cover_rank(&path) else {
             continue;
         };
         if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {

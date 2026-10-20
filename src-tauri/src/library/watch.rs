@@ -7,7 +7,9 @@ use notify::{RecommendedWatcher, RecursiveMode};
 use notify_debouncer_mini::{new_debouncer, DebounceEventResult, Debouncer};
 use tauri::{AppHandle, Manager};
 
-use super::tauri_emitter;
+use super::covers::folder_cover_rank;
+use super::scan::is_audio_file;
+use super::{tauri_emitter, Library, LibraryEvent};
 use crate::AppState;
 
 /// Changes are collected for this long before the affected folder is rescanned.
@@ -65,6 +67,19 @@ pub fn root_for<'a>(path: &Path, roots: &'a [WatchRoot]) -> Option<&'a PathBuf> 
     longest(matched, |r| &r.canonical)
 }
 
+/// Whether a change to `path` can affect the index: an audio file, a folder cover file, or a
+/// directory (which may have gained or lost either). Temp files and the like are ignored.
+pub fn is_relevant(path: &Path, is_dir: bool) -> bool {
+    is_dir || is_audio_file(path) || folder_cover_rank(path).is_some()
+}
+
+/// `is_relevant` for a path from a watcher event. A deleted path cannot be asked whether it
+/// was a directory; one without an extension is assumed to have been one.
+fn event_is_relevant(path: &Path) -> bool {
+    let is_dir = path.is_dir() || (!path.exists() && path.extension().is_none());
+    is_relevant(path, is_dir)
+}
+
 /// Watches library folders recursively and reports, per debounce window, each library
 /// folder that saw a change.
 pub struct FolderWatcher {
@@ -97,6 +112,9 @@ impl FolderWatcher {
             };
             let mut affected: Vec<PathBuf> = Vec::new();
             for event in events {
+                if !event_is_relevant(&event.path) {
+                    continue;
+                }
                 if let Some(root) = root_for(&event.path, &roots) {
                     if !affected.contains(root) {
                         affected.push(root.clone());
@@ -123,6 +141,13 @@ impl FolderWatcher {
         Ok(())
     }
 
+    /// Watches `folder` afresh: an OS watch on a folder that went away is dead, so any old
+    /// one is dropped first.
+    pub fn rewatch(&mut self, folder: &Path) -> anyhow::Result<()> {
+        let _ = self.unwatch(folder);
+        self.watch(folder)
+    }
+
     pub fn unwatch(&mut self, folder: &Path) -> anyhow::Result<()> {
         self.roots
             .lock()
@@ -142,9 +167,39 @@ fn poisoned() -> anyhow::Error {
 /// The app-wide watcher, managed as Tauri state. `None` when the OS watcher failed to start.
 pub struct WatchState(pub Mutex<Option<FolderWatcher>>);
 
+/// How often offline folders are checked for coming back.
+pub const OFFLINE_RECHECK: Duration = Duration::from_secs(60);
+
+/// Brings back every offline folder that is readable again: it is watched (via `watch`) and
+/// rescanned, which marks it online and emits `Changed`.
+pub fn recheck_offline(
+    library: &Library,
+    watch: &mut dyn FnMut(&Path) -> anyhow::Result<()>,
+    emit: &dyn Fn(LibraryEvent),
+) {
+    let offline = match library.offline_folders() {
+        Ok(folders) => folders,
+        Err(err) => {
+            eprintln!("listing offline folders failed: {err:#}");
+            return;
+        }
+    };
+    for folder in offline {
+        if !folder.is_dir() || std::fs::read_dir(&folder).is_err() {
+            continue;
+        }
+        if let Err(err) = watch(&folder) {
+            eprintln!("{err:#}");
+        }
+        if let Err(err) = library.rescan_folder(&folder, emit) {
+            eprintln!("rescanning {} failed: {err:#}", folder.display());
+        }
+    }
+}
+
 /// Starts watching `folders`; each change rescans only the affected folder after the
 /// 2 s debounce and emits the library events. Folders that cannot be watched (offline
-/// drives) are skipped.
+/// drives) are skipped here and picked up by a check every 60 s once they are readable.
 pub fn start(app: AppHandle, folders: Vec<PathBuf>) {
     let handle = app.clone();
     let watcher = FolderWatcher::new(DEBOUNCE, move |folder| {
@@ -173,6 +228,21 @@ pub fn start(app: AppHandle, folders: Vec<PathBuf>) {
         }
     };
     app.manage(WatchState(Mutex::new(watcher)));
+
+    let handle = app.clone();
+    std::thread::spawn(move || loop {
+        std::thread::sleep(OFFLINE_RECHECK);
+        let state = handle.state::<AppState>();
+        let watch_state = handle.state::<WatchState>();
+        let mut watch = |folder: &Path| match watch_state.0.lock() {
+            Ok(mut guard) => match guard.as_mut() {
+                Some(watcher) => watcher.rewatch(folder),
+                None => Ok(()),
+            },
+            Err(_) => Err(poisoned()),
+        };
+        recheck_offline(&state.library, &mut watch, &tauri_emitter(handle.clone()));
+    });
 }
 
 #[cfg(test)]
@@ -180,6 +250,52 @@ mod tests {
     use std::sync::mpsc;
 
     use super::*;
+    use crate::library::scan::tests::copy_fixtures;
+    use crate::library::tests::library;
+    use crate::library::LibraryEvent;
+
+    #[test]
+    fn watcher_ignores_temp_files() {
+        assert!(!is_relevant(Path::new("a.flac.tmp"), false));
+        assert!(!is_relevant(Path::new("notes.txt"), false));
+        assert!(!is_relevant(Path::new("~lock.song.flac#"), false));
+        assert!(is_relevant(Path::new("song.FLAC"), false));
+        assert!(is_relevant(Path::new("folder.jpg"), false));
+        assert!(is_relevant(Path::new("Cover.PNG"), false));
+        assert!(!is_relevant(Path::new("holiday.jpg"), false));
+        assert!(is_relevant(Path::new("Album"), true));
+    }
+
+    #[test]
+    fn offline_folders_come_back_when_readable() {
+        let (library, _covers) = library();
+        let dir = copy_fixtures(&["corrupt.flac"]);
+        library.add_folder(dir.path(), &|_| {}).unwrap();
+        let gone = tempfile::tempdir().unwrap().path().join("unplugged");
+        {
+            let conn = library.db.0.lock().unwrap();
+            conn.execute("UPDATE folders SET online = 0", []).unwrap();
+            conn.execute(
+                "INSERT INTO folders (path, online) VALUES (?1, 0)",
+                [gone.to_string_lossy()],
+            )
+            .unwrap();
+        }
+
+        let watched = std::cell::RefCell::new(Vec::new());
+        let events = std::cell::RefCell::new(Vec::new());
+        recheck_offline(
+            &library,
+            &mut |folder| {
+                watched.borrow_mut().push(folder.to_path_buf());
+                Ok(())
+            },
+            &|event| events.borrow_mut().push(event),
+        );
+        assert_eq!(watched.into_inner(), vec![dir.path().to_path_buf()]);
+        assert!(events.into_inner().contains(&LibraryEvent::Changed));
+        assert_eq!(library.offline_folders().unwrap(), vec![gone]);
+    }
 
     #[test]
     fn root_for_picks_the_longest_containing_root() {

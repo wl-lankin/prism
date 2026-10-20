@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::Metadata;
 use std::path::{Path, PathBuf};
-use std::sync::MutexGuard;
+use std::sync::{Mutex, MutexGuard};
 use std::time::UNIX_EPOCH;
 
 use rayon::prelude::*;
@@ -76,11 +76,28 @@ struct Indexed {
 }
 
 impl Indexed {
-    /// A row from a format only ffprobe can read that was indexed without ffprobe.
-    fn needs_reread(&self) -> bool {
-        self.duration_ms == 0 && tags::UNPARSED_EXTENSIONS.contains(&self.format.as_str())
+    /// A row from a format only ffprobe can read that was indexed without ffprobe. Without
+    /// ffprobe now (`reread_unparsed` false) re-reading could not improve it.
+    fn needs_reread(&self, reread_unparsed: bool) -> bool {
+        reread_unparsed
+            && self.duration_ms == 0
+            && tags::UNPARSED_EXTENSIONS.contains(&self.format.as_str())
     }
 }
+
+/// `path -> (mtime, size)` of files whose read failed, so an unchanged failing file is not
+/// read again on every scan. In memory only: a restart tries each failing file once more.
+pub type FailedStamps = HashMap<String, (i64, i64)>;
+
+/// What a scan needs besides the database: decided once per `Library`.
+pub struct ScanInputs<'a> {
+    /// Re-read zero-duration rows of `UNPARSED_EXTENSIONS` (ffprobe is available).
+    pub reread_unparsed: bool,
+    pub failed_stamps: &'a Mutex<FailedStamps>,
+}
+
+/// A read track and its cover as `(id, file name)`, ready to be written under the lock.
+type PreparedTrack = (Track, Option<(String, String)>);
 
 struct Pending {
     id: String,
@@ -102,9 +119,10 @@ pub fn scan_folder(
     db: &Db,
     covers: &CoverStore,
     folder: &Path,
+    inputs: &ScanInputs,
     progress: impl Fn(ScanProgress),
 ) -> anyhow::Result<ScanReport> {
-    scan_folder_with(db, covers, folder, progress, &|dir| {
+    scan_folder_with(db, covers, folder, inputs, progress, &|dir| {
         std::fs::read_dir(dir).map(|_| ())
     })
 }
@@ -118,6 +136,7 @@ fn scan_folder_with(
     db: &Db,
     covers: &CoverStore,
     folder: &Path,
+    inputs: &ScanInputs,
     progress: impl Fn(ScanProgress),
     can_list: &dyn Fn(&Path) -> std::io::Result<()>,
 ) -> anyhow::Result<ScanReport> {
@@ -185,6 +204,11 @@ fn scan_folder_with(
     let mut done = 0u32;
     let mut seen: HashSet<String> = HashSet::with_capacity(found.len());
     let mut pending: Vec<Pending> = Vec::new();
+    let failed_before: FailedStamps = inputs
+        .failed_stamps
+        .lock()
+        .map_err(|_| anyhow::anyhow!("failed stamps lock poisoned"))?
+        .clone();
     for (path, mtime, size) in found {
         // The walk yields paths below `folder`, so the prefix always strips.
         let relative = path.strip_prefix(folder).unwrap_or(&path);
@@ -192,19 +216,23 @@ fn scan_folder_with(
         if !seen.insert(id.clone()) {
             continue;
         }
-        match indexed.get(&id) {
-            Some(row)
-                if row.mtime == Some(mtime) && row.size == Some(size) && !row.needs_reread() =>
-            {
-                report.unchanged += 1;
-                done += 1;
-            }
-            _ => pending.push(Pending {
+        let indexed_unchanged = indexed.get(&id).is_some_and(|row| {
+            row.mtime == Some(mtime)
+                && row.size == Some(size)
+                && !row.needs_reread(inputs.reread_unparsed)
+        });
+        // A file that failed to read and has not changed since fails again: skip it.
+        let failed_unchanged = failed_before.get(&*path.to_string_lossy()) == Some(&(mtime, size));
+        if indexed_unchanged || failed_unchanged {
+            report.unchanged += 1;
+            done += 1;
+        } else {
+            pending.push(Pending {
                 id,
                 path,
                 mtime,
                 size,
-            }),
+            });
         }
     }
     progress(ScanProgress { done, total });
@@ -225,25 +253,47 @@ fn scan_folder_with(
             })
             .collect();
 
+        // Cover files are stat'ed, read and hashed before the database lock is taken; only
+        // the id and file name go into the transaction.
+        let prepared: Vec<anyhow::Result<PreparedTrack>> = chunk
+            .iter()
+            .zip(results)
+            .map(|(item, result)| {
+                let (mut track, embedded) = result?;
+                track.cover_id =
+                    embedded.or_else(|| folder_cover(covers, &mut folder_covers, &item.path));
+                let cover = track
+                    .cover_id
+                    .as_ref()
+                    .map(|id| (id.clone(), cover_file_name(covers, id)));
+                Ok((track, cover))
+            })
+            .collect();
+
         let mut conn = lock(db)?;
         let tx = conn.transaction()?;
         // Albums are rebuilt in the same transaction as their tracks, so an interrupted
         // scan never leaves committed tracks without their album rows.
         let mut touched_albums: HashSet<String> = HashSet::new();
-        for (item, result) in chunk.iter().zip(results) {
-            let (mut track, embedded) = match result {
+        let mut stamps = inputs
+            .failed_stamps
+            .lock()
+            .map_err(|_| anyhow::anyhow!("failed stamps lock poisoned"))?;
+        for (item, result) in chunk.iter().zip(prepared) {
+            let path_key = item.path.to_string_lossy().into_owned();
+            let (track, cover) = match result {
                 Ok(read) => read,
                 Err(err) => {
+                    stamps.insert(path_key, (item.mtime, item.size));
                     report
                         .failed
                         .push((item.path.display().to_string(), format!("{err:#}")));
                     continue;
                 }
             };
-            track.cover_id =
-                embedded.or_else(|| folder_cover(covers, &mut folder_covers, &item.path));
-            if let Some(cover_id) = &track.cover_id {
-                register_cover(&tx, covers, cover_id)?;
+            stamps.remove(&path_key);
+            if let Some((cover_id, file)) = &cover {
+                register_cover(&tx, cover_id, file)?;
             }
             upsert_track(&tx, &track, &key, item.mtime, item.size)?;
             if let Some(previous) = indexed.get(&item.id) {
@@ -259,6 +309,13 @@ fn scan_folder_with(
         done += chunk.len() as u32;
         progress(ScanProgress { done, total });
     }
+
+    // Forget failing files of this folder that are gone.
+    inputs
+        .failed_stamps
+        .lock()
+        .map_err(|_| anyhow::anyhow!("failed stamps lock poisoned"))?
+        .retain(|path, _| !Path::new(path).starts_with(folder) || Path::new(path).exists());
 
     let mut conn = lock(db)?;
     let tx = conn.transaction()?;
@@ -360,14 +417,18 @@ fn folder_cover(
         .clone()
 }
 
-fn register_cover(conn: &Connection, covers: &CoverStore, id: &str) -> anyhow::Result<()> {
-    let file = covers
+/// The file name a stored cover has on disk (stats the cover directory).
+fn cover_file_name(covers: &CoverStore, id: &str) -> String {
+    covers
         .path(id)
         .and_then(|path| {
             path.file_name()
                 .map(|name| name.to_string_lossy().into_owned())
         })
-        .unwrap_or_else(|| id.to_string());
+        .unwrap_or_else(|| id.to_string())
+}
+
+fn register_cover(conn: &Connection, id: &str, file: &str) -> anyhow::Result<()> {
     conn.execute(
         "INSERT INTO covers (id, file) VALUES (?1, ?2)
          ON CONFLICT(id) DO UPDATE SET file = excluded.file",
@@ -481,6 +542,7 @@ pub(crate) fn rebuild_albums<'a>(
 #[cfg(test)]
 pub(crate) mod tests {
     use std::path::PathBuf;
+    use std::sync::Mutex;
     use std::time::Instant;
 
     use rusqlite::params;
@@ -494,6 +556,8 @@ pub(crate) mod tests {
     pub(crate) struct Harness {
         pub db: Db,
         pub covers: CoverStore,
+        pub failed_stamps: Mutex<FailedStamps>,
+        pub reread_unparsed: bool,
         _cover_dir: TempDir,
     }
 
@@ -502,11 +566,20 @@ pub(crate) mod tests {
         Harness {
             db: Db::open_in_memory().unwrap(),
             covers: CoverStore::new(cover_dir.path().join("covers")),
+            failed_stamps: Mutex::new(FailedStamps::new()),
+            reread_unparsed: true,
             _cover_dir: cover_dir,
         }
     }
 
     impl Harness {
+        pub fn inputs(&self) -> ScanInputs<'_> {
+            ScanInputs {
+                reread_unparsed: self.reread_unparsed,
+                failed_stamps: &self.failed_stamps,
+            }
+        }
+
         /// Registers the folder (scans skip unregistered folders), then scans it.
         pub fn scan(&self, folder: &Path) -> ScanReport {
             self.db
@@ -518,7 +591,7 @@ pub(crate) mod tests {
                     [folder_key(folder)],
                 )
                 .unwrap();
-            scan_folder(&self.db, &self.covers, folder, |_| {}).unwrap()
+            scan_folder(&self.db, &self.covers, folder, &self.inputs(), |_| {}).unwrap()
         }
 
         fn insert_row(
@@ -685,8 +758,6 @@ pub(crate) mod tests {
         track_id(&folder_key(folder), path.strip_prefix(folder).unwrap())
     }
 
-    const EMPTY_MOUNT: &str = "no audio files found; treated as offline";
-
     #[test]
     fn empty_mount_point_keeps_tracks() {
         let h = harness();
@@ -711,7 +782,7 @@ pub(crate) mod tests {
         assert_eq!(h.count("SELECT online FROM folders"), 0);
         assert_eq!(
             report.failed,
-            vec![(folder_key(&folder), EMPTY_MOUNT.to_string())]
+            vec![(folder_key(&folder), EMPTY_FOLDER_OFFLINE.to_string())]
         );
     }
 
@@ -739,7 +810,8 @@ pub(crate) mod tests {
                 "access denied",
             ))
         };
-        let report = scan_folder_with(&h.db, &h.covers, &folder, |_| {}, &denied).unwrap();
+        let report =
+            scan_folder_with(&h.db, &h.covers, &folder, &h.inputs(), |_| {}, &denied).unwrap();
         assert_eq!(report.removed, 0);
         assert_eq!(h.count("SELECT COUNT(*) FROM tracks"), before);
         assert_eq!(h.count("SELECT online FROM folders"), 0);
@@ -779,7 +851,10 @@ pub(crate) mod tests {
         let first = h.scan(dir.path());
         assert!(first.added >= 10, "{first:?}");
         let last = std::cell::Cell::new(None);
-        let second = scan_folder(&h.db, &h.covers, dir.path(), |p| last.set(Some(p))).unwrap();
+        let second = scan_folder(&h.db, &h.covers, dir.path(), &h.inputs(), |p| {
+            last.set(Some(p))
+        })
+        .unwrap();
         let total = last.get().expect("progress reported").total;
         assert_eq!(second.added, 0);
         assert_eq!(second.updated, 0);
@@ -846,12 +921,12 @@ pub(crate) mod tests {
     fn unregistered_folder_is_not_scanned() {
         let h = harness();
         let dir = copy_fixtures(&["corrupt.flac"]);
-        let report = scan_folder(&h.db, &h.covers, dir.path(), |_| {}).unwrap();
+        let report = scan_folder(&h.db, &h.covers, dir.path(), &h.inputs(), |_| {}).unwrap();
         assert_eq!(report, ScanReport::default());
         assert_eq!(h.count("SELECT COUNT(*) FROM folders"), 0);
         assert_eq!(h.count("SELECT COUNT(*) FROM tracks"), 0);
         let missing = dir.path().join("missing");
-        scan_folder(&h.db, &h.covers, &missing, |_| {}).unwrap();
+        scan_folder(&h.db, &h.covers, &missing, &h.inputs(), |_| {}).unwrap();
         assert_eq!(h.count("SELECT COUNT(*) FROM folders"), 0);
     }
 
@@ -875,6 +950,58 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn failing_file_not_reread_when_unchanged() {
+        let h = harness();
+        let dir = copy_fixtures(&[]);
+        let corrupt = dir.path().join("corrupt.flac");
+        let first = h.scan(dir.path());
+        assert!(
+            first
+                .failed
+                .iter()
+                .any(|(path, _)| path.ends_with("corrupt.flac")),
+            "{first:?}"
+        );
+        let second = h.scan(dir.path());
+        assert!(second.failed.is_empty(), "{second:?}");
+        assert_eq!(second.unchanged, first.added + 1, "{second:?}");
+        assert_eq!(second.added + second.updated + second.removed, 0);
+
+        // A changed file is read (and fails) again.
+        let mut bytes = std::fs::read(&corrupt).unwrap();
+        bytes.extend_from_slice(&[0; 8]);
+        std::fs::write(&corrupt, bytes).unwrap();
+        let third = h.scan(dir.path());
+        assert!(
+            third
+                .failed
+                .iter()
+                .any(|(path, _)| path.ends_with("corrupt.flac")),
+            "{third:?}"
+        );
+    }
+
+    #[test]
+    fn unparsed_rows_are_left_alone_without_ffprobe() {
+        let mut h = harness();
+        h.reread_unparsed = false;
+        let dir = copy_fixtures(&["corrupt.flac"]);
+        h.scan(dir.path());
+        let wma = dir.path().join("wma.wma");
+        h.db.0
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE tracks SET duration_ms = 0 WHERE id = ?1",
+                [id_in(dir.path(), &wma)],
+            )
+            .unwrap();
+        let report = h.scan(dir.path());
+        assert_eq!(report.updated, 0, "{report:?}");
+    }
+
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "wall-clock bound: run with --release")]
     fn rescan_2000_unchanged_under_1s() {
         let h = harness();
         let dir = tempfile::tempdir().unwrap();

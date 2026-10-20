@@ -15,7 +15,7 @@ use tauri::{AppHandle, Emitter};
 
 use crate::db::Db;
 use covers::CoverStore;
-use scan::{folder_key, lock, rebuild_albums, scan_folder, ScanReport};
+use scan::{folder_key, lock, rebuild_albums, scan_folder, FailedStamps, ScanInputs, ScanReport};
 
 pub const EVENT_CHANGED: &str = "library://changed";
 pub const EVENT_SCAN_PROGRESS: &str = "library://scan-progress";
@@ -43,14 +43,27 @@ pub struct Library {
     pub covers: Arc<CoverStore>,
     /// Scans never overlap: the watcher and user actions may ask for one at the same time.
     scan_lock: Mutex<()>,
+    options: LibraryOptions,
+    /// Files whose read failed, with the stamp they failed at (see `scan::FailedStamps`).
+    failed_stamps: Mutex<FailedStamps>,
+}
+
+/// Decided once when the library is created.
+#[derive(Debug, Clone, Copy)]
+pub struct LibraryOptions {
+    /// Re-read zero-duration rows of formats only ffprobe can parse. Without ffprobe a
+    /// re-read cannot improve them and would only report a change on every scan.
+    pub reread_unparsed: bool,
 }
 
 impl Library {
-    pub fn new(db: Arc<Db>, covers: Arc<CoverStore>) -> Library {
+    pub fn new(db: Arc<Db>, covers: Arc<CoverStore>, options: LibraryOptions) -> Library {
         Library {
             db,
             covers,
             scan_lock: Mutex::new(()),
+            options,
+            failed_stamps: Mutex::new(FailedStamps::new()),
         }
     }
 
@@ -76,14 +89,29 @@ impl Library {
         if !path.is_dir() {
             anyhow::bail!("{} is not a folder", path.display());
         }
+        // The overlap check and the insert are one step: two concurrent adds of overlapping
+        // folders cannot both pass the check.
+        let _scan = self.scan_lock.lock().map_err(|_| poisoned())?;
         self.check_not_nested(&path)?;
         lock(&self.db)?.execute(
             "INSERT INTO folders (path, online) VALUES (?1, 1) ON CONFLICT(path) DO NOTHING",
             [folder_key(&path)],
         )?;
-        let report = self.scan(&path, emit)?;
+        let report = self.scan_locked(&path, emit)?;
         emit(LibraryEvent::Changed);
         Ok(report)
+    }
+
+    /// The registered folders currently marked offline.
+    pub fn offline_folders(&self) -> anyhow::Result<Vec<PathBuf>> {
+        let conn = lock(&self.db)?;
+        let mut stmt = conn.prepare("SELECT path FROM folders WHERE online = 0 ORDER BY rowid")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        Ok(rows
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(PathBuf::from)
+            .collect())
     }
 
     /// Forgets a folder and every track indexed from it.
@@ -189,9 +217,18 @@ impl Library {
 
     fn scan(&self, path: &Path, emit: &dyn Fn(LibraryEvent)) -> anyhow::Result<ScanReport> {
         let _scan = self.scan_lock.lock().map_err(|_| poisoned())?;
+        self.scan_locked(path, emit)
+    }
+
+    /// `scan` for a caller that already holds `scan_lock`.
+    fn scan_locked(&self, path: &Path, emit: &dyn Fn(LibraryEvent)) -> anyhow::Result<ScanReport> {
         let folder = folder_key(path);
         let total = Cell::new(0u32);
-        let result = scan_folder(&self.db, &self.covers, path, |progress| {
+        let inputs = ScanInputs {
+            reread_unparsed: self.options.reread_unparsed,
+            failed_stamps: &self.failed_stamps,
+        };
+        let result = scan_folder(&self.db, &self.covers, path, &inputs, |progress| {
             total.set(progress.total);
             emit(LibraryEvent::ScanProgress(FolderScanProgress {
                 folder: folder.clone(),
@@ -245,17 +282,24 @@ pub fn tauri_emitter(app: AppHandle) -> impl Fn(LibraryEvent) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::cell::RefCell;
 
     use super::*;
     use crate::library::scan::tests::copy_fixtures;
 
-    fn library() -> (Library, tempfile::TempDir) {
+    pub(crate) fn library() -> (Library, tempfile::TempDir) {
+        library_with(LibraryOptions {
+            reread_unparsed: true,
+        })
+    }
+
+    fn library_with(options: LibraryOptions) -> (Library, tempfile::TempDir) {
         let cover_dir = tempfile::tempdir().unwrap();
         let library = Library::new(
             Arc::new(Db::open_in_memory().unwrap()),
             Arc::new(CoverStore::new(cover_dir.path().to_path_buf())),
+            options,
         );
         (library, cover_dir)
     }
@@ -445,6 +489,33 @@ mod tests {
         library.add_folder(&music, &|_| {}).unwrap();
         let upper = PathBuf::from(music.to_string_lossy().to_uppercase()).join("ROCK");
         assert!(library.add_folder(&upper, &|_| {}).is_err());
+    }
+
+    #[test]
+    fn unparsed_rows_quiet_without_ffprobe() {
+        let (library, _covers) = library_with(LibraryOptions {
+            reread_unparsed: false,
+        });
+        let dir = copy_fixtures(&["corrupt.flac"]);
+        library.add_folder(dir.path(), &|_| {}).unwrap();
+        library
+            .db
+            .0
+            .lock()
+            .unwrap()
+            .execute("UPDATE tracks SET duration_ms = 0 WHERE format = 'wma'", [])
+            .unwrap();
+        assert_eq!(
+            count(&library, "SELECT COUNT(*) FROM tracks WHERE format = 'wma'"),
+            1
+        );
+        for _ in 0..2 {
+            let events = RefCell::new(Vec::new());
+            library
+                .rescan_folder(dir.path(), &|event| events.borrow_mut().push(event))
+                .unwrap();
+            assert!(!events.into_inner().contains(&LibraryEvent::Changed));
+        }
     }
 
     #[test]

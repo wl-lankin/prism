@@ -91,7 +91,9 @@ fn sha1_hex(input: &str) -> String {
 }
 
 /// Case folding for id keys: lowercase where the file system usually ignores case
-/// (Windows, macOS, as `library::comparable` does), the identity elsewhere.
+/// (Windows, macOS, as `library::comparable` does), the identity elsewhere. Accepted
+/// consequence: `a.flac` and `A.flac` in one folder of a case-sensitive macOS volume map to
+/// one id.
 fn fold(text: &str) -> String {
     if cfg!(any(windows, target_os = "macos")) {
         text.to_lowercase()

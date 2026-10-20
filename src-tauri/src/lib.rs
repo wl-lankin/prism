@@ -18,7 +18,7 @@ use audio::CpalOutputFactory;
 use db::Db;
 use library::covers::CoverStore;
 use library::scan::lock;
-use library::{query, tauri_emitter, watch, Library};
+use library::{query, tauri_emitter, watch, Library, LibraryOptions};
 use media_controls::MediaBridge;
 use player::{
     default_opener, fan_out, tauri_sink, with_dropped, DroppedFiles, Player, PlayerOptions,
@@ -85,7 +85,13 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
     let initial = settings.get();
 
     let db = Arc::new(Db::open(&data_dir.join("library.db"))?);
-    let library = Arc::new(Library::new(db, Arc::new(CoverStore::new(cover_dir))));
+    let library = Arc::new(Library::new(
+        db,
+        Arc::new(CoverStore::new(cover_dir)),
+        LibraryOptions {
+            reread_unparsed: tools::ffprobe_path().is_some(),
+        },
+    ));
     let folders = library.folders()?;
     let handle = app.handle().clone();
     let media = MediaBridge::new();

@@ -61,9 +61,14 @@ export function initLibrary(): () => void {
     .then(keep)
     .catch(() => {});
   onScanProgress((progress) => {
+    clearTimeout(clearScan);
+    // 0 of 0 means there was nothing to read (or the scan ended early): done, no bar.
+    if (progress.total === 0) {
+      library.scan = null;
+      return;
+    }
     library.scan = progress;
     // A finished scan that changed nothing sends no `changed`; let the bar go by itself.
-    clearTimeout(clearScan);
     if (progress.done >= progress.total) clearScan = setTimeout(() => (library.scan = null), 1500);
   })
     .then(keep)

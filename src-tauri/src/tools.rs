@@ -41,7 +41,13 @@ pub fn file_input(path: &Path) -> OsString {
 }
 
 fn resolve(env_var: &str, name: &str) -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os(env_var).map(PathBuf::from) {
+    resolve_from(std::env::var_os(env_var), name)
+}
+
+/// `resolve` with the value of the environment variable passed in (pure, so tests do not
+/// touch the process environment).
+fn resolve_from(env_value: Option<OsString>, name: &str) -> Option<PathBuf> {
+    if let Some(path) = env_value.map(PathBuf::from) {
         if path.is_file() {
             return Some(path);
         }
@@ -141,10 +147,12 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let fake = dir.path().join("fake-probe");
         std::fs::write(&fake, b"").unwrap();
-        let var = "PRISM_TEST_TOOL_OVERRIDE";
-        std::env::set_var(var, &fake);
-        assert_eq!(resolve(var, "prism-no-such-tool"), Some(fake));
-        std::env::remove_var(var);
-        assert_eq!(resolve(var, "prism-no-such-tool"), None);
+        assert_eq!(
+            resolve_from(Some(fake.clone().into_os_string()), "prism-no-such-tool"),
+            Some(fake)
+        );
+        assert_eq!(resolve_from(None, "prism-no-such-tool"), None);
+        let missing = dir.path().join("missing-probe").into_os_string();
+        assert_eq!(resolve_from(Some(missing), "prism-no-such-tool"), None);
     }
 }
