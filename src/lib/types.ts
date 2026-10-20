@@ -66,6 +66,24 @@ export interface FavoriteIds {
   artists: string[];
 }
 
+export interface Playlist {
+  id: number;
+  name: string;
+  /** Entries, including those whose track is not in the index. */
+  trackCount: number;
+  durationMs: number;
+  /** Up to four distinct cover ids, for a mosaic. */
+  coverIds: string[];
+  updatedAt: number;
+}
+
+export interface PlaylistEntry {
+  position: number;
+  trackId: string;
+  /** Null when the track is not in the index (shown dimmed, skipped when playing). */
+  track: Track | null;
+}
+
 export interface ScanReport {
   added: number;
   updated: number;

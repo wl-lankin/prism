@@ -8,6 +8,8 @@ import type {
   Folder,
   PlayerError,
   PlayerState,
+  Playlist,
+  PlaylistEntry,
   QueueItem,
   ScanProgress,
   ScanReport,
@@ -86,6 +88,19 @@ export const favoritesTracks = () => call<Track[]>('favorites_tracks');
 export const favoritesAlbums = () => call<Album[]>('favorites_albums');
 export const favoritesArtists = () => call<Artist[]>('favorites_artists');
 
+// Playlists.
+
+export const playlistsList = () => call<Playlist[]>('playlists_list');
+export const playlistCreate = (name: string) => call<Playlist>('playlist_create', { name });
+export const playlistRename = (id: number, name: string) => call<void>('playlist_rename', { id, name });
+export const playlistDelete = (id: number) => call<void>('playlist_delete', { id });
+export const playlistEntries = (id: number) => call<PlaylistEntry[]>('playlist_entries', { id });
+export const playlistAdd = (id: number, trackIds: string[]) => call<void>('playlist_add', { id, trackIds });
+export const playlistRemove = (id: number, positions: number[]) =>
+  call<void>('playlist_remove', { id, positions });
+export const playlistMove = (id: number, from: number, to: number) =>
+  call<void>('playlist_move', { id, from, to });
+
 // Settings.
 
 export const settingsGet = () => call<Settings>('settings_get');
@@ -111,5 +126,7 @@ export const onPlayerError = (cb: (error: PlayerError) => void): Promise<Unliste
 export const onLibraryChanged = (cb: () => void): Promise<UnlistenFn> => listen('library://changed', () => cb());
 export const onFavoritesChanged = (cb: () => void): Promise<UnlistenFn> =>
   listen('favorites://changed', () => cb());
+export const onPlaylistsChanged = (cb: () => void): Promise<UnlistenFn> =>
+  listen('playlists://changed', () => cb());
 export const onScanProgress = (cb: (progress: ScanProgress) => void): Promise<UnlistenFn> =>
   listen<ScanProgress>('library://scan-progress', (event) => cb(event.payload));

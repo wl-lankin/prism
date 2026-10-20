@@ -10,6 +10,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use crate::audio::list_devices;
 use crate::library::favorites::{self, FavKind, FavoriteIds};
 use crate::library::model::{Album, Artist, Folder, Track};
+use crate::library::playlists::{self, Playlist, PlaylistEntry};
 use crate::library::query::{self, SearchResult};
 use crate::library::scan::{lock, ScanReport};
 use crate::library::watch::{FolderWatcher, WatchState};
@@ -273,6 +274,78 @@ pub async fn favorites_albums(app: AppHandle) -> Result<Vec<Album>, String> {
 #[tauri::command]
 pub async fn favorites_artists(app: AppHandle) -> Result<Vec<Artist>, String> {
     read(&app, favorites::artists).await
+}
+
+// Playlists
+
+fn emit_playlists_changed(app: &AppHandle) {
+    if let Err(err) = app.emit(playlists::EVENT_CHANGED, ()) {
+        eprintln!("emitting {} failed: {err}", playlists::EVENT_CHANGED);
+    }
+}
+
+#[tauri::command]
+pub async fn playlists_list(app: AppHandle) -> Result<Vec<Playlist>, String> {
+    read(&app, playlists::playlists_list).await
+}
+
+#[tauri::command]
+pub async fn playlist_create(app: AppHandle, name: String) -> Result<Playlist, String> {
+    let playlist = read(&app, move |conn| playlists::playlist_create(conn, &name)).await?;
+    emit_playlists_changed(&app);
+    Ok(playlist)
+}
+
+#[tauri::command]
+pub async fn playlist_rename(app: AppHandle, id: i64, name: String) -> Result<(), String> {
+    read(&app, move |conn| {
+        playlists::playlist_rename(conn, id, &name)
+    })
+    .await?;
+    emit_playlists_changed(&app);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn playlist_delete(app: AppHandle, id: i64) -> Result<(), String> {
+    read(&app, move |conn| playlists::playlist_delete(conn, id)).await?;
+    emit_playlists_changed(&app);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn playlist_entries(app: AppHandle, id: i64) -> Result<Vec<PlaylistEntry>, String> {
+    read(&app, move |conn| playlists::playlist_entries(conn, id)).await
+}
+
+#[tauri::command]
+pub async fn playlist_add(app: AppHandle, id: i64, track_ids: Vec<String>) -> Result<(), String> {
+    read(&app, move |conn| {
+        playlists::playlist_add(conn, id, &track_ids)
+    })
+    .await?;
+    emit_playlists_changed(&app);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn playlist_remove(app: AppHandle, id: i64, positions: Vec<u32>) -> Result<(), String> {
+    read(&app, move |conn| {
+        playlists::playlist_remove(conn, id, &positions)
+    })
+    .await?;
+    emit_playlists_changed(&app);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn playlist_move(app: AppHandle, id: i64, from: u32, to: u32) -> Result<(), String> {
+    read(&app, move |conn| {
+        playlists::playlist_move(conn, id, from, to)
+    })
+    .await?;
+    emit_playlists_changed(&app);
+    Ok(())
 }
 
 // Settings
