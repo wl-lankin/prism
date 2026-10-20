@@ -1,5 +1,6 @@
 pub mod db;
 pub mod library;
+pub mod protocol;
 pub mod tools;
 
 use std::sync::Arc;
@@ -52,6 +53,7 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
 
 pub fn run() {
     tauri::Builder::default()
+        .register_asynchronous_uri_scheme_protocol("prism", protocol::register)
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| setup(app).map_err(|err| err.into()))
