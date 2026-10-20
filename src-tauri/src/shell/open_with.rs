@@ -4,7 +4,8 @@
 //! `windows/hooks.nsh` and `Info.plist`.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Manager};
 
@@ -112,32 +113,113 @@ fn main_is_away(app: &AppHandle) -> bool {
     }
 }
 
-/// Plays `paths` in this instance. Reading tags can be slow, so it runs on its own thread.
-/// When the main window is closed or hidden, the mini player appears (without focus) so
-/// the user sees that something plays.
+/// How long after the latest arrival the collected files play. Selecting several files in
+/// Explorer starts one process per file, each forwarding its own argv.
+const QUIET: Duration = Duration::from_millis(300);
+/// The longest the first arrival waits, however steadily more files keep coming.
+const CAP: Duration = Duration::from_secs(1);
+/// How often the worker looks at the queue.
+const TICK: Duration = Duration::from_millis(50);
+
+/// Files that arrived close together, in arrival order. Pure (the caller passes the
+/// clock), so the timing is testable.
+#[derive(Default)]
+struct Debounce {
+    paths: Vec<String>,
+    first: Option<Instant>,
+    last: Option<Instant>,
+    /// A worker thread is draining this queue.
+    running: bool,
+}
+
+impl Debounce {
+    /// Adds `paths`. Returns true when the caller must start a worker.
+    fn push(&mut self, now: Instant, paths: Vec<String>) -> bool {
+        if paths.is_empty() {
+            return false;
+        }
+        self.first.get_or_insert(now);
+        self.last = Some(now);
+        self.paths.extend(paths);
+        !std::mem::replace(&mut self.running, true)
+    }
+
+    fn is_due(&self, now: Instant) -> bool {
+        match (self.first, self.last) {
+            (Some(first), Some(last)) => {
+                now.duration_since(last) >= QUIET || now.duration_since(first) >= CAP
+            }
+            _ => false,
+        }
+    }
+
+    /// Everything collected so far, once the burst is over.
+    fn take_due(&mut self, now: Instant) -> Option<Vec<String>> {
+        if !self.is_due(now) {
+            return None;
+        }
+        self.first = None;
+        self.last = None;
+        Some(std::mem::take(&mut self.paths))
+    }
+}
+
+static PENDING: Mutex<Debounce> = Mutex::new(Debounce {
+    paths: Vec::new(),
+    first: None,
+    last: None,
+    running: false,
+});
+
+fn pending() -> MutexGuard<'static, Debounce> {
+    PENDING.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Queues `paths` to play in this instance. Files arriving within a short window play
+/// together as one queue; files that arrive before the app state exists wait for it. When
+/// the main window is closed or hidden, the mini player appears (without focus) so the
+/// user sees that something plays.
 pub fn play_paths(app: &AppHandle, paths: Vec<String>) {
-    if paths.is_empty() {
+    if !pending().push(Instant::now(), paths) {
         return;
     }
     let app = app.clone();
-    std::thread::spawn(move || {
-        let Some(state) = app.try_state::<AppState>() else {
-            return;
-        };
-        let handle = state.player.handle();
-        let dropped: Arc<DroppedFiles> = Arc::clone(&state.dropped);
-        match play_files(&dropped, &handle, &paths) {
-            Ok(0) => {}
-            Ok(_) => {
-                if main_is_away(&app) {
-                    if let Err(err) = mini::show(&app, &Anchor::WorkAreaBottomRight) {
-                        eprintln!("showing the mini player failed: {err}");
-                    }
-                }
+    std::thread::spawn(move || loop {
+        std::thread::sleep(TICK);
+        let batch = {
+            let mut queue = pending();
+            if queue.paths.is_empty() {
+                queue.running = false;
+                return;
             }
-            Err(err) => eprintln!("playing the opened files failed: {err}"),
+            if app.try_state::<AppState>().is_none() {
+                continue;
+            }
+            queue.take_due(Instant::now())
+        };
+        if let Some(batch) = batch {
+            play_batch(&app, &batch);
         }
     });
+}
+
+fn play_batch(app: &AppHandle, paths: &[String]) {
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
+    let handle = state.player.handle();
+    let dropped: Arc<DroppedFiles> = Arc::clone(&state.dropped);
+    match play_files(&dropped, &handle, paths) {
+        Ok(0) => {}
+        Ok(_) => {
+            if main_is_away(app) {
+                if let Err(err) = mini::show(app, &Anchor::WorkAreaBottomRight) {
+                    eprintln!("showing the mini player failed: {err}");
+                }
+            }
+        }
+        Err(err) => eprintln!("playing the opened files failed: {err}"),
+    }
 }
 
 /// A second `prism.exe` was started: its files play here, with none the main window comes
@@ -155,7 +237,9 @@ pub fn on_second_instance(app: &AppHandle, args: &[String], cwd: &str) {
 
 /// The files this instance was started with.
 pub fn play_launch_args(app: &AppHandle) {
-    let args: Vec<String> = std::env::args().collect();
+    let args: Vec<String> = std::env::args_os()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
     if let Ok(cwd) = std::env::current_dir() {
         play_paths(app, paths_from_args(&args, &cwd));
     }
@@ -218,6 +302,51 @@ mod tests {
     }
 
     #[test]
+    fn forwards_within_the_window_play_once_in_order() {
+        let t0 = Instant::now();
+        let ms = Duration::from_millis;
+        let mut queue = Debounce::default();
+        assert!(
+            queue.push(t0, strings(&["a.mp3"])),
+            "the first push starts a worker"
+        );
+        assert!(!queue.push(t0 + ms(100), strings(&["b.mp3"])));
+        assert!(!queue.push(t0 + ms(250), strings(&["c.mp3"])));
+        assert_eq!(
+            queue.take_due(t0 + ms(400)),
+            None,
+            "the window restarted at c"
+        );
+        assert_eq!(
+            queue.take_due(t0 + ms(560)),
+            Some(strings(&["a.mp3", "b.mp3", "c.mp3"]))
+        );
+        assert_eq!(
+            queue.take_due(t0 + ms(2000)),
+            None,
+            "nothing is played twice"
+        );
+        // A forward after the window starts a new batch.
+        queue.push(t0 + ms(3000), strings(&["d.mp3"]));
+        assert_eq!(queue.take_due(t0 + ms(3400)), Some(strings(&["d.mp3"])));
+    }
+
+    #[test]
+    fn a_steady_stream_is_cut_off_at_the_cap() {
+        let t0 = Instant::now();
+        let mut queue = Debounce::default();
+        for i in 0..11u64 {
+            queue.push(t0 + Duration::from_millis(i * 100), strings(&["x.mp3"]));
+        }
+        assert_eq!(
+            queue
+                .take_due(t0 + Duration::from_millis(1000))
+                .map(|b| b.len()),
+            Some(11)
+        );
+    }
+
+    #[test]
     fn percent_decoding_keeps_stray_percent_signs() {
         assert_eq!(percent_decode("100%").as_deref(), Some("100%"));
         assert_eq!(percent_decode("a%2").as_deref(), Some("a%2"));
@@ -235,6 +364,8 @@ mod tests {
                 "Info.plist lacks {ext}"
             );
         }
+        // Launch Services ignores the extensions once content types are listed.
+        assert!(plist.contains("<string>public.audio</string>"));
         assert!(hooks.contains("NSIS_HOOK_POSTINSTALL"));
         assert!(hooks.contains("NSIS_HOOK_PREUNINSTALL"));
     }
