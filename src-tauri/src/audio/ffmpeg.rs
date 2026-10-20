@@ -121,7 +121,7 @@ impl Process {
         }
         command
             .arg("-i")
-            .arg(path)
+            .arg(tools::file_input(path))
             .args(["-vn", "-f", "f32le", "-ac", "2", "-ar"])
             .arg(rate.to_string())
             .arg("pipe:1")
@@ -260,6 +260,17 @@ mod tests {
         .err()
         .expect("a missing file fails");
         assert!(err.to_string().contains("ffmpeg failed"), "{err:#}");
+    }
+
+    #[test]
+    fn opens_a_dash_named_file_in_a_folder_with_spaces() {
+        if tools::ffmpeg_path().is_none() {
+            println!("ffmpeg not found: skipping the dash-named ffmpeg test");
+            return;
+        }
+        let (_dir, path) = tools::tests::fixture_copy("opus.opus", "-x.opus");
+        let mut source = FfmpegSource::open(&Input::File(path), FFMPEG_TEST_SPEC).unwrap();
+        assert!(source.read(&mut Vec::new()).unwrap() > 0);
     }
 
     #[test]

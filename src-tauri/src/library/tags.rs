@@ -210,8 +210,9 @@ fn ffprobe(path: &Path) -> Option<Fields> {
             "format=duration:format_tags",
             "-of",
             "json",
+            "-i",
         ])
-        .arg(path)
+        .arg(crate::tools::file_input(path))
         .output()
         .ok()?;
     if !output.status.success() {
@@ -402,6 +403,22 @@ mod tests {
             (900..=1100).contains(&tta.duration_ms),
             "tta {}",
             tta.duration_ms
+        );
+    }
+
+    #[test]
+    fn ffprobe_tags_of_a_dash_named_file_in_a_folder_with_spaces() {
+        if crate::tools::ffprobe_path().is_none() {
+            println!("ffprobe not found: skipping the dash-named ffprobe test");
+            return;
+        }
+        let (_dir, path) = crate::tools::tests::fixture_copy("wma.wma", "-x.wma");
+        let track = read(&path).unwrap().track;
+        assert_eq!(track.title, "Wma");
+        assert!(
+            (900..=1100).contains(&track.duration_ms),
+            "{}",
+            track.duration_ms
         );
     }
 

@@ -5,6 +5,7 @@ pub mod scan;
 pub mod tags;
 pub mod watch;
 
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -189,13 +190,24 @@ impl Library {
     fn scan(&self, path: &Path, emit: &dyn Fn(LibraryEvent)) -> anyhow::Result<ScanReport> {
         let _scan = self.scan_lock.lock().map_err(|_| poisoned())?;
         let folder = folder_key(path);
-        scan_folder(&self.db, &self.covers, path, |progress| {
+        let total = Cell::new(0u32);
+        let result = scan_folder(&self.db, &self.covers, path, |progress| {
+            total.set(progress.total);
             emit(LibraryEvent::ScanProgress(FolderScanProgress {
                 folder: folder.clone(),
                 done: progress.done,
                 total: progress.total,
             }))
-        })
+        });
+        if result.is_err() {
+            // A scan that fails part-way still ends: the UI clears its busy state on done == total.
+            emit(LibraryEvent::ScanProgress(FolderScanProgress {
+                folder: folder.clone(),
+                done: total.get(),
+                total: total.get(),
+            }));
+        }
+        result
     }
 }
 
@@ -280,6 +292,35 @@ mod tests {
         assert_eq!(last_progress.done, last_progress.total);
         assert_eq!(last_progress.folder, folder_key(dir.path()));
         assert_eq!(library.folders().unwrap(), vec![dir.path().to_path_buf()]);
+    }
+
+    #[test]
+    fn a_scan_that_fails_part_way_still_ends_with_done_equal_total() {
+        let (library, _covers) = library();
+        let dir = copy_fixtures(&["corrupt.flac"]);
+        library
+            .db
+            .0
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER boom BEFORE INSERT ON tracks
+                 BEGIN SELECT RAISE(ABORT, 'boom'); END;",
+            )
+            .unwrap();
+        let events = RefCell::new(Vec::new());
+        let result = library.add_folder(dir.path(), &|event| events.borrow_mut().push(event));
+        assert!(result.is_err());
+        let events = events.into_inner();
+        assert!(!events.contains(&LibraryEvent::Changed));
+        let Some(LibraryEvent::ScanProgress(last)) = events.last() else {
+            panic!("the last event is a progress: {events:?}");
+        };
+        assert_eq!(last.done, last.total);
+        assert!(
+            last.total > 0,
+            "the failure came after the file count was known"
+        );
     }
 
     #[test]

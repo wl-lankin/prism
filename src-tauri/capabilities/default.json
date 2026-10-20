@@ -17,7 +17,6 @@
     {
       "identifier": "opener:allow-open-url",
       "allow": [{ "url": "https://wolfgang-linz.de/*" }, { "url": "https://github.com/wl-lankin/prism*" }]
-    },
-    "opener:allow-reveal-item-in-dir"
+    }
   ]
 }

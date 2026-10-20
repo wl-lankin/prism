@@ -1,6 +1,6 @@
 //! Native audio engine: sources (symphonia, FFmpeg), resampling and cpal output.
 //!
-//! [`Playback`] is the piece of engine logic the engine thread (Task 8) drives: it pulls from
+//! [`Playback`] is the piece of engine logic the engine thread drives: it pulls from
 //! the current source, resamples to the output spec, keeps the sink fed, moves on to a
 //! pre-opened next source without a gap and reopens the output when the device is lost.
 //!
@@ -331,7 +331,9 @@ impl Playback {
                 self.frames_read += frames as u64;
                 if self.gain != 1.0 {
                     let gain = self.gain;
-                    self.decoded.iter_mut().for_each(|sample| *sample *= gain);
+                    self.decoded
+                        .iter_mut()
+                        .for_each(|sample| *sample = (*sample * gain).clamp(-1.0, 1.0));
                 }
                 resampler.process(&self.decoded, &mut self.pending)?;
                 continue;
@@ -761,6 +763,22 @@ mod tests {
                 "the next source has its own gain"
             );
         }
+    }
+
+    #[test]
+    fn applied_samples_never_exceed_full_scale() {
+        let factory = FakeFactory::new(STEREO_44K, usize::MAX);
+        let mut playback = Playback::new(factory.clone(), None).unwrap();
+        playback.set_source(wav("gap_a.wav")).unwrap();
+        playback.set_gain(100.0);
+        assert_eq!(playback.pump().unwrap(), PumpStatus::Finished);
+        let played = factory.last_queue().lock().unwrap().clone();
+        assert!(!played.is_empty());
+        assert!(played.iter().all(|sample| sample.abs() <= 1.0));
+        assert!(
+            played.iter().any(|sample| sample.abs() == 1.0),
+            "the gain did clip"
+        );
     }
 
     #[test]

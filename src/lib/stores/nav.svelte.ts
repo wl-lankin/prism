@@ -18,7 +18,7 @@ export interface Nav {
 /** Where the main window is. M1 shows 'home' as the album grid. */
 export const nav: Nav = $state({ view: 'home' });
 
-/** Window-level overlays. `about` is opened from the sidebar logo; Task 12 renders it. */
+/** Window-level overlays. `about` is opened from the sidebar logo; the About overlay renders it. */
 export const overlays = $state({ about: false });
 
 /** Where `back()` returns to; a short trail is enough. */

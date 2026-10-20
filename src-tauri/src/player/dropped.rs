@@ -32,7 +32,7 @@ impl DroppedFiles {
     }
 
     /// Reads the playable files among `paths`, in the given order, without touching the map.
-    /// Folders (M1), network paths, non-audio files and unreadable files are skipped.
+    /// Folders (M1), relative and network paths, non-audio files and unreadable files are skipped.
     pub fn read(&self, paths: &[String]) -> Vec<Track> {
         let mut tracks = Vec::new();
         for raw in paths {
@@ -41,7 +41,7 @@ impl DroppedFiles {
                 continue;
             }
             let path = Path::new(raw);
-            if !path.is_file() || !is_audio_file(path) {
+            if !path.is_absolute() || !path.is_file() || !is_audio_file(path) {
                 continue;
             }
             let meta = match tags::read(path) {
@@ -199,6 +199,24 @@ pub(crate) mod tests {
         assert!(
             dropped.get(&ids[0]).is_some(),
             "a drop without playable files keeps the previous tracks"
+        );
+    }
+
+    #[test]
+    fn relative_paths_are_refused() {
+        let dropped = DroppedFiles::new(None);
+        let absolute = fixtures().join("tagged.mp3");
+        let relative = absolute
+            .strip_prefix(env!("CARGO_MANIFEST_DIR"))
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert!(dropped.read(&[relative, "-x.flac".to_string()]).is_empty());
+        assert_eq!(
+            dropped
+                .read(&[absolute.to_string_lossy().into_owned()])
+                .len(),
+            1
         );
     }
 
