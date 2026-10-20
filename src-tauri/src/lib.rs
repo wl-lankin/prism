@@ -210,6 +210,7 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
     media.start(handle.clone(), main_window_handle(app), cover_cache);
 
     watch::start(handle.clone(), folders);
+    shell::open_with::play_launch_args(&handle);
 
     // Catch up on changes made while Prism was closed; unchanged files are skipped quickly.
     std::thread::spawn(move || {
@@ -235,6 +236,10 @@ pub fn run() {
         );
     }
     tauri::Builder::default()
+        // First, so a second start hands its files over before anything else initializes.
+        .plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
+            shell::open_with::on_second_instance(app, &args, &cwd);
+        }))
         .register_asynchronous_uri_scheme_protocol("prism", protocol::register)
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -299,12 +304,17 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .unwrap_or_else(|err| fail_with(&anyhow::Error::new(err)))
-        .run(|app, event| {
-            if let tauri::RunEvent::Exit = event {
+        .run(|app, event| match event {
+            tauri::RunEvent::Exit => {
                 if let Some(state) = app.try_state::<AppState>() {
                     state.settings.flush();
                 }
             }
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Opened { urls } => {
+                shell::open_with::play_paths(app, shell::open_with::paths_from_urls(&urls));
+            }
+            _ => {}
         });
 }
 

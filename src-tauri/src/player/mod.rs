@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use tauri::{AppHandle, Emitter};
 
-pub use dropped::{with_dropped, DroppedFiles, DROPPED_PREFIX};
+pub use dropped::{with_dropped, DroppedFiles, ReadOptions, DROPPED_PREFIX};
 pub use engine::{
     crossfade_for, default_opener, track_gain, EventSink, Opener, Player, PlayerError, PlayerEvent,
     PlayerHandle, PlayerOptions, PlayerState, PlayerStatus, QueueItem, Resolver, DEFAULT_VOLUME,

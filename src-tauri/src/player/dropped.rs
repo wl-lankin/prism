@@ -34,10 +34,16 @@ impl DroppedFiles {
     /// Reads the playable files among `paths`, in the given order, without touching the map.
     /// Folders (M1), relative and network paths, non-audio files and unreadable files are skipped.
     pub fn read(&self, paths: &[String]) -> Vec<Track> {
+        self.read_with(paths, ReadOptions::default())
+    }
+
+    /// Like [`DroppedFiles::read`]; `options` says what to allow. "Open with" allows network
+    /// paths (the user picked that file in Explorer), drag and drop does not.
+    pub fn read_with(&self, paths: &[String], options: ReadOptions) -> Vec<Track> {
         let mut tracks = Vec::new();
         for raw in paths {
             // Checked before any file system access: a share can hang on a slow network.
-            if is_network_path(raw) {
+            if !options.allow_network && is_network_path(raw) {
                 continue;
             }
             let path = Path::new(raw);
@@ -104,8 +110,15 @@ impl DroppedFiles {
     }
 }
 
-/// UNC shares (`\\server\share`), their verbatim form (`\\?\UNC\server\share`) and device
-/// paths (`\\.\...`). Dropped files are played from local disks only.
+/// What [`DroppedFiles::read_with`] lets through beyond local audio files.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ReadOptions {
+    pub allow_network: bool,
+}
+
+/// UNC shares (`\\server\share`), their verbatim form (`\\?\UNC\server\share`), device
+/// paths (`\\.\...`) and mapped network drives (`Z:\...` on Windows). Dropped files are
+/// played from local disks only.
 pub fn is_network_path(raw: &str) -> bool {
     let path = raw.replace('/', r"\");
     let lower = path.to_ascii_lowercase();
@@ -116,7 +129,39 @@ pub fn is_network_path(raw: &str) -> bool {
         // A verbatim local path such as `\\?\C:\Music`.
         return false;
     }
-    path.starts_with(r"\\")
+    if path.starts_with(r"\\") {
+        return true;
+    }
+    drive_root(&path).is_some_and(|root| is_remote_drive(&root))
+}
+
+/// `C:\` for a path that starts with a drive letter.
+fn drive_root(path: &str) -> Option<String> {
+    let mut chars = path.chars();
+    let letter = chars.next().filter(char::is_ascii_alphabetic)?;
+    (chars.next() == Some(':')).then(|| format!("{}:\\", letter.to_ascii_uppercase()))
+}
+
+/// Whether the drive at `root` (`Z:\`) is a mapped network drive. Asks only the drive
+/// letter's type, which does not touch the share.
+#[cfg(target_os = "windows")]
+fn is_remote_drive(root: &str) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+
+    use windows_sys::Win32::Storage::FileSystem::GetDriveTypeW;
+
+    const DRIVE_REMOTE: u32 = 4;
+    let wide: Vec<u16> = std::ffi::OsStr::new(root)
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    // SAFETY: `wide` is a NUL-terminated UTF-16 string that outlives the call.
+    unsafe { GetDriveTypeW(wide.as_ptr()) == DRIVE_REMOTE }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn is_remote_drive(_root: &str) -> bool {
+    false
 }
 
 /// A resolver that answers `file:` ids from `dropped` and everything else from `fallback`.
@@ -242,6 +287,35 @@ pub(crate) mod tests {
         assert!(dropped
             .read(&[r"\\server\share\song.flac".to_string()])
             .is_empty());
+    }
+
+    #[test]
+    fn drive_letters_are_found_without_touching_the_disk() {
+        assert_eq!(drive_root(r"z:\music\a.flac").as_deref(), Some(r"Z:\"));
+        assert_eq!(drive_root(r"C:rel.flac").as_deref(), Some(r"C:\"));
+        assert_eq!(drive_root("/Users/me/a.flac"), None);
+        assert_eq!(drive_root("rel.flac"), None);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn local_drives_are_not_network_drives() {
+        let system = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".to_string());
+        assert!(!is_network_path(&format!(r"{system}\Windows\notepad.exe")));
+    }
+
+    #[test]
+    fn local_files_read_the_same_with_network_allowed() {
+        let dropped = DroppedFiles::new(None);
+        let local = vec![path_of("tagged.mp3")];
+        let allowed = dropped.read_with(
+            &local,
+            ReadOptions {
+                allow_network: true,
+            },
+        );
+        assert_eq!(allowed.len(), dropped.read(&local).len());
+        assert_eq!(allowed.len(), 1);
     }
 
     #[test]

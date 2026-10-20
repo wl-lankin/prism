@@ -1,6 +1,7 @@
 //! The shell around the player: tray, mini player, shortcuts and autostart.
 
 pub mod mini;
+pub mod open_with;
 pub mod shape;
 
 use tauri::{AppHandle, Manager};
