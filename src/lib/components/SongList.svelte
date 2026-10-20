@@ -6,6 +6,7 @@
   import { saveScroll, savedScroll } from '../scroll';
   import { library } from '../stores/library.svelte';
   import { go } from '../stores/nav.svelte';
+  import { FAVORITE_KEY, isFavoriteKey, toggleFavorite } from '../stores/favorites.svelte';
   import { player } from '../stores/player.svelte';
   import type { Track } from '../types';
   import { evictPages, pagesFor } from '../pages';
@@ -135,6 +136,12 @@
     } else if (event.key === 'Enter' && selected >= 0) {
       event.preventDefault();
       void playSongsFrom(selected);
+    } else if (isFavoriteKey(event) && selected >= 0) {
+      const page = pages.get(Math.floor(selected / PAGE));
+      const track = page?.version === library.version ? page.tracks[selected % PAGE] : undefined;
+      if (!track) return;
+      event.preventDefault();
+      void toggleFavorite('track', track.id);
     }
   }
 </script>
@@ -156,6 +163,7 @@
     class="list"
     role="listbox"
     tabindex="0"
+    aria-keyshortcuts={FAVORITE_KEY}
     aria-label={t('nav.songs')}
     aria-activedescendant={activeId}
     style="height:{total * ROW}px"
@@ -201,7 +209,7 @@
             <button type="button" class="cell dim link" tabindex="-1" onclick={() => go('album', track.albumId)}>
               {track.album}
             </button>
-            <Heart kind="track" id={track.id} size={16} tabindex={-1} label={t('favorites.toggleItem', { name: track.title })} />
+            <Heart kind="track" id={track.id} size={16} tabindex={-1} ghost revealed={selected === row.index} label={t('favorites.toggleItem', { name: track.title })} />
             <span class="time">{formatDuration(track.durationMs)}</span>
           {:else}
             <span class="ghost-cover"></span>
@@ -291,14 +299,10 @@
     background: rgba(255, 255, 255, 0.075);
   }
 
-  /* A song's heart shows on hover or selection, and always once it is set. */
-  .row :global(.heart:not(.on)) {
-    opacity: 0;
-  }
-
-  .row:hover :global(.heart),
-  .row.selected :global(.heart) {
+  /* A song's heart shows on hover or selection (Heart's revealed), and always once it is set. */
+  .row:hover :global(.heart.hidden) {
     opacity: 1;
+    pointer-events: auto;
   }
 
   .list:focus-visible .row.selected {

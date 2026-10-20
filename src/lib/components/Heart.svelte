@@ -13,6 +13,8 @@
     label,
     round = false,
     tabindex,
+    ghost = false,
+    revealed = false,
   }: {
     kind: FavKind;
     id: string;
@@ -23,13 +25,22 @@
     round?: boolean;
     /** -1 inside list rows that move with the arrow keys. */
     tabindex?: number;
+    /** In a list row: while not set, hidden (no pointer, no screen reader) until the row is
+     *  hovered or `revealed` (selected). Rows toggle it with the "f" key instead. */
+    ghost?: boolean;
+    revealed?: boolean;
   } = $props();
+
+  let focused = $state(false);
 
   const on = $derived.by(() => {
     // Read the set itself so a reload of the whole set is followed too.
     void favorites.version;
     return isFavorite(kind, id);
   });
+
+  /** A focused heart never hides, so a click that un-sets it does not leave focus on nothing. */
+  const hidden = $derived(ghost && !on && !revealed && !focused);
 
   /** Counts the times it was switched on here; each one replays the ring. */
   let bursts = $state(0);
@@ -47,11 +58,15 @@
   class="heart"
   class:on
   class:round
+  class:hidden
+  aria-hidden={hidden ? 'true' : undefined}
   aria-pressed={on}
   aria-label={label ?? t('favorites.toggle')}
   title={on ? t('favorites.remove') : t('favorites.add')}
   {tabindex}
   onclick={toggle}
+  onfocus={() => (focused = true)}
+  onblur={() => (focused = false)}
   ondblclick={(event) => event.stopPropagation()}
   style="--size:{size}px"
 >
@@ -84,6 +99,12 @@
       background-color var(--dur) ease-out,
       color var(--dur) ease-out,
       opacity var(--dur) ease-out;
+  }
+
+  /* Rows reveal it on hover with `.row:hover :global(.heart.hidden)`. */
+  .hidden {
+    opacity: 0;
+    pointer-events: none;
   }
 
   .heart:hover {

@@ -92,7 +92,8 @@
   </div>
 
   <div class="right">
-    {#if !idle && track}
+    <!-- Dropped files ("file:" ids) are not in the library; a favorite of one would be an orphan. -->
+    {#if !idle && track && !track.id.startsWith('file:')}
       <Heart kind="track" id={track.id} label={t('favorites.toggleItem', { name: track.title })} />
     {/if}
     <button type="button" class="btn small" aria-label={muted ? t('transport.unmute') : t('transport.mute')} title={muted ? t('transport.unmute') : t('transport.mute')} onclick={toggleMute}>

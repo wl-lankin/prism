@@ -76,6 +76,20 @@ export async function setFavorite(kind: FavKind, id: string, on: boolean): Promi
   }
 }
 
+/** Flips one favorite. */
+export function toggleFavorite(kind: FavKind, id: string): Promise<void> {
+  return setFavorite(kind, id, !isFavorite(kind, id));
+}
+
+/** The song lists' shortcut for the selected row's heart: "f" without modifiers. */
+export const FAVORITE_KEY = 'F';
+
+export function isFavoriteKey(event: KeyboardEvent): boolean {
+  return (
+    event.key.toLowerCase() === 'f' && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey
+  );
+}
+
 /** Loads the favorite ids, then follows `favorites://changed`. Resolves with the cleanup.
  *  The listener is attached before the first load, so no change between the two is missed. */
 export async function initFavorites(): Promise<() => void> {

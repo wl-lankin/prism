@@ -11,7 +11,7 @@
   import { t, tc, type Key } from '../i18n';
   import { favoritesAlbums, favoritesArtists, favoritesTracks, libraryAlbumTracks, libraryArtistAlbums } from '../ipc';
   import { playIds } from '../play';
-  import { favorites, isFavorite } from '../stores/favorites.svelte';
+  import { FAVORITE_KEY, favorites, isFavorite, isFavoriteKey, toggleFavorite } from '../stores/favorites.svelte';
   import { library } from '../stores/library.svelte';
   import { go } from '../stores/nav.svelte';
   import { notify } from '../stores/notice.svelte';
@@ -141,6 +141,11 @@
     return row ? Number(row.dataset.index) : null;
   }
 
+  // A row un-hearted at the end of the list leaves the selection past it.
+  $effect(() => {
+    if (selected >= shownTracks.length) selected = shownTracks.length - 1;
+  });
+
   function onListKey(event: KeyboardEvent) {
     const n = shownTracks.length;
     if (!n) return;
@@ -152,6 +157,10 @@
     } else if (event.key === 'Enter' && selected >= 0) {
       event.preventDefault();
       play(selected);
+    } else if (isFavoriteKey(event) && shownTracks[selected]) {
+      // Un-hearting drops the row; the selection stays on the row that moves up into its place.
+      event.preventDefault();
+      void toggleFavorite('track', shownTracks[selected].id);
     }
   }
 
@@ -250,6 +259,7 @@
           class="songs"
           role="listbox"
           tabindex="0"
+          aria-keyshortcuts={FAVORITE_KEY}
           aria-label={t('nav.favorites')}
           aria-activedescendant={selected >= 0 ? `fav-song-${selected}` : undefined}
           onkeydown={onListKey}

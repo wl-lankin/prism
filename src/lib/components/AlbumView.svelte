@@ -6,6 +6,7 @@
   import { shuffle } from '../flow';
   import { library } from '../stores/library.svelte';
   import { back, go } from '../stores/nav.svelte';
+  import { FAVORITE_KEY, isFavoriteKey, toggleFavorite } from '../stores/favorites.svelte';
   import { player } from '../stores/player.svelte';
   import type { Track } from '../types';
   import Cover from './Cover.svelte';
@@ -89,6 +90,9 @@
     } else if (event.key === 'Enter' && selected >= 0) {
       event.preventDefault();
       play(selected);
+    } else if (isFavoriteKey(event) && tracks[selected]) {
+      event.preventDefault();
+      void toggleFavorite('track', tracks[selected].id);
     }
   }
 </script>
@@ -146,6 +150,7 @@
           class="tracks"
           role="listbox"
           tabindex="0"
+          aria-keyshortcuts={FAVORITE_KEY}
           aria-label={title}
           aria-activedescendant={selected >= 0 ? `track-${selected}` : undefined}
           {onkeydown}
@@ -185,7 +190,7 @@
                   <span class="feat">{track.artist}</span>
                 {/if}
               </span>
-              <Heart kind="track" id={track.id} size={16} tabindex={-1} label={t('favorites.toggleItem', { name: track.title })} />
+              <Heart kind="track" id={track.id} size={16} tabindex={-1} ghost revealed={selected === i} label={t('favorites.toggleItem', { name: track.title })} />
               <span class="time">{formatDuration(track.durationMs)}</span>
             </div>
           {/each}
@@ -376,14 +381,10 @@
     background: rgba(255, 255, 255, 0.075);
   }
 
-  /* A song's heart shows on hover or selection, and always once it is set. */
-  .row :global(.heart:not(.on)) {
-    opacity: 0;
-  }
-
-  .row:hover :global(.heart),
-  .row.selected :global(.heart) {
+  /* A song's heart shows on hover or selection (Heart's revealed), and always once it is set. */
+  .row:hover :global(.heart.hidden) {
     opacity: 1;
+    pointer-events: auto;
   }
 
   .tracks:focus-visible .row.selected {
