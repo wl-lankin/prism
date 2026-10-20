@@ -932,11 +932,17 @@ mod tests {
 
     /// An output that plays `speed` times faster than real time and records what it played.
     /// Samples are played the moment they are taken, so nothing is ever queued.
+    ///
+    /// Like the real output (a ring the device drains, silence on under-run) it does not bank
+    /// idle time: room grows with time passed (sped up) but never beyond one ring of
+    /// [`RING_MS`], so a late first track cannot be swallowed whole in one push.
     struct InstantSink {
         spec: StreamSpec,
         speed: f64,
-        opened: Instant,
-        taken: usize,
+        /// When `room` was last brought up to date.
+        last: Instant,
+        /// Frames the device could take right now.
+        room: f64,
         played: Arc<Mutex<Vec<f32>>>,
         events: Receiver<OutputEvent>,
         _keep: Sender<OutputEvent>,
@@ -948,13 +954,14 @@ mod tests {
         }
         fn push(&mut self, samples: &[f32]) -> usize {
             let channels = self.spec.channels as usize;
-            let budget = (self.opened.elapsed().as_secs_f64()
-                * self.speed
-                * self.spec.sample_rate as f64) as usize
-                * channels;
-            let room = budget.saturating_sub(self.taken);
-            let taken = room.min(samples.len()) / channels * channels;
-            self.taken += taken;
+            let rate = self.spec.sample_rate as f64;
+            let now = Instant::now();
+            let grown = now.duration_since(self.last).as_secs_f64() * self.speed * rate;
+            self.last = now;
+            self.room = (self.room + grown).min(rate * RING_MS as f64 / 1000.0);
+            let frames = (self.room as usize).min(samples.len() / channels);
+            self.room -= frames as f64;
+            let taken = frames * channels;
             self.played
                 .lock()
                 .unwrap()
@@ -983,8 +990,8 @@ mod tests {
             Ok(Box::new(InstantSink {
                 spec: STEREO_44K,
                 speed: self.speed,
-                opened: Instant::now(),
-                taken: 0,
+                last: Instant::now(),
+                room: 0.0,
                 played: Arc::clone(&self.played),
                 events: rx,
                 _keep: tx,
@@ -1035,6 +1042,9 @@ mod tests {
         events: Receiver<PlayerEvent>,
         played: Arc<Mutex<Vec<f32>>>,
     }
+
+    /// The real output's ring (see `audio::output`): the most it holds ahead of the device.
+    const RING_MS: u64 = 200;
 
     /// Plays 20 times faster than real time: a 1 s fixture takes 50 ms.
     const FAST: f64 = 20.0;
@@ -1513,6 +1523,40 @@ mod tests {
             },
         );
         assert_eq!(h.player.state().volume, 0.3);
+    }
+
+    /// A slow first open (cold cache, a busy machine) must not cost the gapless hand-over:
+    /// a real output does not bank the time it sat idle, so it cannot swallow the whole
+    /// first track the moment it arrives.
+    #[test]
+    fn gapless_survives_a_slow_first_open() {
+        let tracks = [
+            fixture_track("a", "gap_a.wav"),
+            fixture_track("b", "gap_b.wav"),
+        ];
+        let resolver: Resolver = Arc::new(move |id: &str| {
+            if id == "a" {
+                std::thread::sleep(Duration::from_millis(150));
+            }
+            tracks.iter().find(|track| track.id == id).cloned()
+        });
+        let h = harness_with(resolver, FAST, None);
+        h.player.play(ids(&["a", "b"]), 0).unwrap();
+        let events = collect_until(&h.events, Duration::from_secs(10), back_to_idle);
+        assert_eq!(changes(&events), ids(&["a", "b"]));
+        let first = events
+            .iter()
+            .position(|e| matches!(e, PlayerEvent::TrackChanged(_)))
+            .unwrap();
+        assert!(
+            !events[first..]
+                .iter()
+                .any(|e| is_state(e, PlayerStatus::Loading)),
+            "b was pre-opened and handed over, not loaded after a ended"
+        );
+        let played = h.played.lock().unwrap().clone();
+        let expected: Vec<f32> = [decode_all("gap_a.wav"), decode_all("gap_b.wav")].concat();
+        assert!(played == expected, "one continuous run across the boundary");
     }
 
     #[test]
