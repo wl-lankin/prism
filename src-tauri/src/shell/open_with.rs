@@ -184,23 +184,46 @@ pub fn play_paths(app: &AppHandle, paths: Vec<String>) {
         return;
     }
     let app = app.clone();
-    std::thread::spawn(move || loop {
-        std::thread::sleep(TICK);
-        let batch = {
-            let mut queue = pending();
-            if queue.paths.is_empty() {
-                queue.running = false;
-                return;
+    std::thread::spawn(move || {
+        let _guard = WorkerGuard;
+        let started = Instant::now();
+        loop {
+            std::thread::sleep(TICK);
+            let batch = {
+                let mut queue = pending();
+                if queue.paths.is_empty() {
+                    queue.running = false;
+                    return;
+                }
+                if app.try_state::<AppState>().is_none() {
+                    if started.elapsed() >= STATE_WAIT {
+                        eprintln!("the app never became ready: dropping the files to open");
+                        *queue = Debounce::default();
+                        return;
+                    }
+                    continue;
+                }
+                queue.take_due(Instant::now())
+            };
+            if let Some(batch) = batch {
+                play_batch(&app, &batch);
             }
-            if app.try_state::<AppState>().is_none() {
-                continue;
-            }
-            queue.take_due(Instant::now())
-        };
-        if let Some(batch) = batch {
-            play_batch(&app, &batch);
         }
     });
+}
+
+/// How long files wait for the app state before they are dropped.
+const STATE_WAIT: Duration = Duration::from_secs(15);
+
+/// Frees the worker slot when the worker panics, so later files start a new worker.
+struct WorkerGuard;
+
+impl Drop for WorkerGuard {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            *pending() = Debounce::default();
+        }
+    }
 }
 
 fn play_batch(app: &AppHandle, paths: &[String]) {
@@ -385,6 +408,13 @@ mod tests {
                     "writes outside the allowed keys: {line}"
                 );
             }
+        }
+        // An extension's own key belongs to the user and other apps: only values go.
+        for line in hooks.lines().filter(|line| line.contains("DeleteRegKey")) {
+            assert!(
+                !line.contains(r"Software\Classes\.") && !line.contains("OpenWithProgids"),
+                "deletes a key of an extension: {line}"
+            );
         }
         let plist = include_str!("../../Info.plist");
         assert!(plist.contains("<string>Alternate</string>"));
