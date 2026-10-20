@@ -1,7 +1,8 @@
-// A synthetic demo library: fictional artists and albums, generated covers, silent FLAC.
+// A synthetic demo library: fictional artists and albums, generated covers, FLAC that is
+// silent apart from a short chime at the start of each track.
 // Used by `node scripts/make-fixtures.mjs --demo <n>`. Deterministic for a given <n>.
 //
-// ffmpeg encodes a handful of silent base files once (one per duration and format); every
+// ffmpeg encodes a handful of base files once (one per duration and format); every
 // track is then assembled in-process from a base file's audio frames plus its own Vorbis
 // comment block, so thousands of tracks take seconds. Covers are SVG rendered with resvg and
 // stored as `cover.png` next to the tracks.
@@ -13,6 +14,8 @@ import { Resvg } from '@resvg/resvg-js';
 
 /** Seconds: a spread of ordinary song lengths. */
 const DURATIONS = [148, 171, 189, 203, 217, 232, 246, 263, 281, 304, 337, 372];
+/** Chime notes (Hz), C major pentatonic. */
+const CHIME_HZ = [523.25, 587.33, 659.25, 783.99, 880, 1046.5];
 /** [bits, sample rate]: most albums are CD quality, some hi-res. */
 const FORMATS = [
   [16, 44100],
@@ -148,11 +151,16 @@ export async function makeDemo(dir, total) {
     // Silent base files: one per duration and format.
     const bases = new Map();
     for (const [bits, rate] of FORMATS) {
-      for (const seconds of DURATIONS) {
+      for (const [i, seconds] of DURATIONS.entries()) {
         const file = join(work, `${bits}-${rate}-${seconds}.flac`);
+        // A soft 1.5 s chime at the start (so playback is audible), then silence, which FLAC
+        // stores in almost no space. Each length gets its own note of a pentatonic scale.
+        const note = CHIME_HZ[i % CHIME_HZ.length];
         execFileSync('ffmpeg', [
           '-hide_banner', '-loglevel', 'error', '-y',
-          '-f', 'lavfi', '-i', `anullsrc=r=${rate}:cl=stereo`, '-t', String(seconds),
+          '-f', 'lavfi', '-i', `sine=frequency=${note}:sample_rate=${rate}:duration=1.5`,
+          '-af', `volume=2,afade=t=in:d=0.02,afade=t=out:st=0.15:d=1.35,apad=whole_dur=${seconds}`,
+          '-ac', '2', '-t', String(seconds),
           '-c:a', 'flac', '-sample_fmt', bits === 16 ? 's16' : 's32', '-bits_per_raw_sample', String(bits),
           '-frame_size', '65535', file,
         ]);
