@@ -1,8 +1,8 @@
 <script lang="ts" module>
-  export type RingMode = 'flow' | 'play' | 'pause';
-  export type RingColors = [string, string, string, string];
+  import { SPECTRUM, type RingColors } from '../palette';
 
-  const SPECTRUM: RingColors = ['#ff4d6d', '#ffc94d', '#4dffb2', '#4da6ff'];
+  export type RingMode = 'flow' | 'play' | 'pause';
+  export type { RingColors };
 
   function rgb(hex: string): [number, number, number] {
     const n = parseInt(hex.replace('#', '').slice(0, 6), 16);
@@ -28,6 +28,7 @@
     progress = 0,
     colors = SPECTRUM,
     size = 84,
+    level,
     onactivate,
     oncontextmenu,
   }: {
@@ -35,14 +36,20 @@
     mode: RingMode;
     /** 0..1, drawn as the spectral arc in play and pause mode. */
     progress?: number;
+    /** A color change fades over 600 ms. */
     colors?: RingColors;
     size?: number;
+    /** 0..1, the loudness of what plays. While playing it drives the glow (in place of the
+     *  slow breathing); left out, the ring breathes on its own. */
+    level?: number;
     onactivate?: () => void;
     oncontextmenu?: (event: MouseEvent) => void;
   } = $props();
 
   const p = $derived(mode === 'flow' ? 1 : Math.min(Math.max(progress || 0, 0), 1));
   const thickness = $derived(Math.max(3, Math.round(size / 17)));
+  const metered = $derived(level !== undefined && mode === 'pause');
+  const loud = $derived(metered ? Math.min(Math.max(level || 0, 0), 1) : 0);
   const label = $derived(mode === 'flow' ? t('ring.flowHint') : mode === 'pause' ? t('ring.pause') : t('ring.play'));
   const style = $derived(
     [
@@ -54,6 +61,7 @@
       `--c3:${colors[2]}`,
       `--c4:${colors[3]}`,
       `--head:${colorAt(colors, p)}`,
+      ...(metered ? [`--glow-o:${(0.35 + 0.4 * loud).toFixed(3)}`, `--glow-s:${(1 + 0.12 * loud).toFixed(3)}`] : []),
     ].join(';'),
   );
 </script>
@@ -63,6 +71,7 @@
   class="ring"
   class:flow={mode === 'flow'}
   class:playing={mode === 'pause'}
+  class:metered
   {style}
   aria-label={label}
   title={label}
@@ -106,8 +115,40 @@
     initial-value: 0deg;
   }
 
+  /* Registered so they interpolate: a new cover's colors fade in instead of jumping. */
+  @property --c1 {
+    syntax: '<color>';
+    inherits: true;
+    initial-value: #ff4d6d;
+  }
+
+  @property --c2 {
+    syntax: '<color>';
+    inherits: true;
+    initial-value: #ffc94d;
+  }
+
+  @property --c3 {
+    syntax: '<color>';
+    inherits: true;
+    initial-value: #4dffb2;
+  }
+
+  @property --c4 {
+    syntax: '<color>';
+    inherits: true;
+    initial-value: #4da6ff;
+  }
+
+  @property --head {
+    syntax: '<color>';
+    inherits: true;
+    initial-value: #ff4d6d;
+  }
+
   .ring {
     --spin: 0deg;
+    --fade: 600ms;
     position: relative;
     width: var(--size);
     height: var(--size);
@@ -118,7 +159,14 @@
     color: var(--text);
     cursor: pointer;
     -webkit-tap-highlight-color: transparent;
-    transition: transform var(--dur) ease-out;
+    /* A color fade is not large motion: it keeps running under reduced motion. */
+    transition:
+      transform var(--dur) ease-out,
+      --c1 var(--fade) ease,
+      --c2 var(--fade) ease,
+      --c3 var(--fade) ease,
+      --c4 var(--fade) ease,
+      --head var(--fade) ease;
   }
 
   .ring:active {
@@ -143,13 +191,15 @@
     inset: 10%;
     background: conic-gradient(from var(--spin), var(--c1), var(--c2), var(--c3), var(--c4), var(--c1));
     filter: blur(calc(var(--size) * 0.2));
-    opacity: 0.5;
-    transform: translateY(12%);
-    transition: opacity var(--dur) ease-out;
+    opacity: var(--glow-o, 0.5);
+    transform: translateY(12%) scale(var(--glow-s, 1));
+    transition:
+      opacity var(--dur) ease-out,
+      transform var(--dur) ease-out;
   }
 
   .ring:hover .glow {
-    opacity: 0.7;
+    opacity: calc(var(--glow-o, 0.5) + 0.2);
   }
 
   .track {
@@ -238,14 +288,15 @@
     opacity: 0.92;
   }
 
-  /* Large motion: the idle spectrum turns slowly, the glow breathes while playing. Both stop
-     under reduced motion; the hover transitions above keep running. */
+  /* Large motion: the idle spectrum turns slowly, and without a level the glow breathes on
+     its own while playing. Both stop under reduced motion. The hover transitions, the color
+     fades and the level-driven glow (small, 120 ms steps that follow the music) keep running. */
   @media (prefers-reduced-motion: no-preference) {
     .flow {
       animation: spin 14s linear infinite;
     }
 
-    .playing .glow {
+    .playing:not(.metered) .glow {
       animation: breathe 3.6s ease-in-out infinite;
     }
   }

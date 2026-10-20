@@ -18,6 +18,8 @@ pub use queue::Queue;
 
 /// Payload: [`PlayerState`]. Sent on every change and every 250 ms while playing.
 pub const EVENT_STATE: &str = "player://state";
+/// Payload: a number, 0..=1. The loudness of what plays, every 50 ms while playing.
+pub const EVENT_LEVEL: &str = "player://level";
 /// Payload: [`PlayerError`]. Sent when a track cannot be opened or decoded.
 pub const EVENT_ERROR: &str = "player://error";
 
@@ -37,6 +39,7 @@ pub fn tauri_sink(app: AppHandle) -> EventSink {
         let result = match &event {
             PlayerEvent::State(state) => app.emit(EVENT_STATE, state),
             PlayerEvent::Error(error) => app.emit(EVENT_ERROR, error),
+            PlayerEvent::Level(level) => app.emit(EVENT_LEVEL, level),
             PlayerEvent::TrackChanged(_) => Ok(()),
         };
         if let Err(err) = result {

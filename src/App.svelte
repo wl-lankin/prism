@@ -24,6 +24,7 @@
   import { go, nav, overlays, type View } from './lib/stores/nav.svelte';
   import { notice, notify } from './lib/stores/notice.svelte';
   import { initPlayer, player } from './lib/stores/player.svelte';
+  import { initRing, ring } from './lib/stores/ring.svelte';
   import { initSettings } from './lib/stores/settings.svelte';
 
   /** The Flow ring hangs half out below the app's bottom edge, into the transparent strip
@@ -55,6 +56,8 @@
   });
 
   $effect(() => initLibrary());
+
+  $effect(() => initRing());
 
   $effect(() => {
     let stop: (() => void) | undefined;
@@ -171,7 +174,7 @@
   <!-- First in the DOM so the main control comes early in the tab order; placed by CSS. -->
   <div class="ring-dock" style="--ring:{RING}px">
     <div class="notice" class:shown={notice.text} role="status" aria-live="polite">{notice.text ?? ''}</div>
-    <FlowRing {mode} {progress} size={RING} onactivate={activate} />
+    <FlowRing {mode} {progress} colors={ring.colors} level={ring.level} size={RING} onactivate={activate} />
   </div>
 
   <div class="card">

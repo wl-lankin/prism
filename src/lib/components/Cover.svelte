@@ -25,32 +25,29 @@
   const px: CoverSize = $derived(cache ?? (size * 2 <= 96 ? 96 : size * 2 <= 300 ? 300 : 600));
   const src = $derived(coverUrl(coverId, px));
 
-  let loaded = $state(false);
-  let failed = $state(false);
-
-  $effect.pre(() => {
-    // A new image starts hidden until it has loaded.
-    void src;
-    loaded = false;
-    failed = false;
-  });
+  // Which image loaded or failed: a new `src` starts hidden until it has loaded.
+  let loadedSrc: string | null = $state(null);
+  let failedSrc: string | null = $state(null);
 </script>
 
 <div class="cover" class:fluid style="--s:{size}px; --r:{radius}">
   <div class="empty" aria-hidden="true">
     <Icon name="songs" size={Math.round(size * 0.38)} />
   </div>
-  {#if src && !failed}
-    <img
-      {src}
-      {alt}
-      class:loaded
-      draggable="false"
-      decoding="async"
-      onload={() => (loaded = true)}
-      onerror={() => (failed = true)}
-    />
-  {/if}
+  <!-- A fresh element per image, so the old picture never shows under the new id. -->
+  {#key src}
+    {#if src && failedSrc !== src}
+      <img
+        {src}
+        {alt}
+        class:loaded={loadedSrc === src}
+        draggable="false"
+        decoding="async"
+        onload={() => (loadedSrc = src)}
+        onerror={() => (failedSrc = src)}
+      />
+    {/if}
+  {/key}
 </div>
 
 <style>
