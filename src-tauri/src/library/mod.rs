@@ -1,4 +1,5 @@
 pub mod covers;
+pub mod favorites;
 pub mod model;
 pub mod query;
 pub mod scan;

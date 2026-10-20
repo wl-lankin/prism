@@ -18,10 +18,19 @@ pub struct TrackIdRef {
     pub table: &'static str,
     pub column: &'static str,
     pub filter: Option<&'static str>,
+    /// The column (within `filter`) is unique. Rows whose ids merge into one keep only the
+    /// oldest row, and the rewrite goes through temporary values so chains and swaps of ids
+    /// cannot trip the constraint.
+    pub unique: bool,
 }
 
 /// Every column outside `tracks` that stores a track id.
-pub const TRACK_ID_REFS: &[TrackIdRef] = &[];
+pub const TRACK_ID_REFS: &[TrackIdRef] = &[TrackIdRef {
+    table: "favorites",
+    column: "item_id",
+    filter: Some("kind = 'track'"),
+    unique: true,
+}];
 
 /// How many rows that keep their id `migrate_0003` names individually in the log.
 const LOGGED_KEPT_ROWS: usize = 20;
@@ -202,6 +211,10 @@ fn rewrite_refs(
             .filter
             .map(|condition| format!(" AND ({condition})"))
             .unwrap_or_default();
+        if reference.unique {
+            rewrite_unique_ref(tx, table, column, &filter)?;
+            continue;
+        }
         tx.execute(
             &format!(
                 "UPDATE \"{table}\" SET \"{column}\" =
@@ -212,6 +225,62 @@ fn rewrite_refs(
         )?;
     }
     tx.execute_batch("DROP TABLE temp.prism_rekey_map;")?;
+    Ok(())
+}
+
+/// `rewrite_refs` for a column with a unique constraint: of the rows that end up with one
+/// value (merged ids, or a row already holding the new id) the oldest stays and the rest are
+/// deleted. The survivors then move to temporary values first, so a chain or swap of ids
+/// cannot collide halfway.
+fn rewrite_unique_ref(
+    tx: &Transaction,
+    table: &str,
+    column: &str,
+    filter: &str,
+) -> anyhow::Result<()> {
+    let relevant = format!(
+        "(\"{column}\" IN (SELECT old FROM temp.prism_rekey_map)
+          OR \"{column}\" IN (SELECT new FROM temp.prism_rekey_map)){filter}"
+    );
+    tx.execute(
+        &format!(
+            "DELETE FROM \"{table}\" WHERE {relevant} AND rowid NOT IN (
+                SELECT MIN(rowid) FROM \"{table}\" WHERE {relevant}
+                GROUP BY COALESCE(
+                    (SELECT new FROM temp.prism_rekey_map WHERE old = \"{table}\".\"{column}\"),
+                    \"{column}\"))"
+        ),
+        [],
+    )?;
+    tx.execute_batch(
+        "DROP TABLE IF EXISTS temp.prism_rekey_moves;
+         CREATE TEMP TABLE prism_rekey_moves (row_id INTEGER PRIMARY KEY, new TEXT NOT NULL);",
+    )?;
+    tx.execute(
+        &format!(
+            "INSERT INTO temp.prism_rekey_moves (row_id, new)
+             SELECT rowid, (SELECT new FROM temp.prism_rekey_map WHERE old = \"{column}\")
+             FROM \"{table}\"
+             WHERE \"{column}\" IN (SELECT old FROM temp.prism_rekey_map){filter}"
+        ),
+        [],
+    )?;
+    tx.execute(
+        &format!(
+            "UPDATE \"{table}\" SET \"{column}\" = char(31) || 'rekey:' || rowid
+             WHERE rowid IN (SELECT row_id FROM temp.prism_rekey_moves)"
+        ),
+        [],
+    )?;
+    tx.execute(
+        &format!(
+            "UPDATE \"{table}\" SET \"{column}\" =
+                (SELECT new FROM temp.prism_rekey_moves WHERE row_id = \"{table}\".rowid)
+             WHERE rowid IN (SELECT row_id FROM temp.prism_rekey_moves)"
+        ),
+        [],
+    )?;
+    tx.execute_batch("DROP TABLE temp.prism_rekey_moves;")?;
     Ok(())
 }
 
@@ -474,11 +543,13 @@ mod tests {
                 table: "test_refs",
                 column: "item",
                 filter: Some("kind = 'track'"),
+                unique: false,
             },
             TrackIdRef {
                 table: "test_missing_table",
                 column: "item",
                 filter: None,
+                unique: false,
             },
         ];
         let tx = conn.transaction().unwrap();
@@ -534,6 +605,7 @@ mod tests {
             table: "test_refs",
             column: "item",
             filter: None,
+            unique: false,
         }];
         let tx = conn.transaction().unwrap();
         let map = vec![
@@ -546,6 +618,94 @@ mod tests {
         assert_eq!(
             count(conn, "SELECT COUNT(*) FROM test_refs WHERE item = 'new'"),
             2
+        );
+    }
+
+    #[test]
+    fn rekey_merges_duplicate_track_favorites() {
+        let db = Db::open_in_memory().unwrap();
+        let conn = &mut *db.0.lock().unwrap();
+        let folder = music();
+        for (id, name) in [
+            ("old-1", "a"),
+            ("old-2", "b"),
+            ("old-3", "c"),
+            ("old-4", "d"),
+            ("new-4", "e"),
+        ] {
+            insert(
+                conn,
+                id,
+                &folder,
+                &key(&folder.join(format!("{name}.flac"))),
+                name,
+            );
+        }
+        // old-1 and old-2 merge into "merged" and both are favorites; old-3 only moves;
+        // old-4 moves onto new-4, which is already a favorite; album favorites share values
+        // with track ids and are left alone.
+        conn.execute_batch(
+            "INSERT INTO favorites (kind, item_id, added_at) VALUES
+                ('track', 'old-1', 1), ('track', 'old-2', 2), ('track', 'old-3', 3),
+                ('track', 'old-4', 4), ('track', 'new-4', 5),
+                ('album', 'old-1', 6), ('album', 'merged', 7);",
+        )
+        .unwrap();
+        let tx = conn.transaction().unwrap();
+        let map = vec![
+            ("old-1".to_string(), "merged".to_string()),
+            ("old-2".to_string(), "merged".to_string()),
+            ("old-3".to_string(), "moved".to_string()),
+            ("old-4".to_string(), "new-4".to_string()),
+        ];
+        rekey_tracks(&tx, &map).unwrap();
+        tx.commit().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT kind, item_id FROM favorites ORDER BY kind, item_id")
+            .unwrap();
+        let rows: Vec<(String, String)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .map(|row| row.unwrap())
+            .collect();
+        let pair = |a: &str, b: &str| (a.to_string(), b.to_string());
+        assert_eq!(
+            rows,
+            vec![
+                pair("album", "merged"),
+                pair("album", "old-1"),
+                pair("track", "merged"),
+                pair("track", "moved"),
+                pair("track", "new-4"),
+            ]
+        );
+    }
+
+    #[test]
+    fn rekey_unique_refs_survive_chains_and_swaps() {
+        let db = Db::open_in_memory().unwrap();
+        let conn = &mut *db.0.lock().unwrap();
+        let folder = music();
+        insert(conn, "x", &folder, &key(&folder.join("x.flac")), "X");
+        insert(conn, "y", &folder, &key(&folder.join("y.flac")), "Y");
+        conn.execute_batch(
+            "INSERT INTO favorites (kind, item_id, added_at) VALUES ('track', 'x', 1), ('track', 'y', 2);",
+        )
+        .unwrap();
+        let tx = conn.transaction().unwrap();
+        let map = vec![
+            ("x".to_string(), "y".to_string()),
+            ("y".to_string(), "x".to_string()),
+        ];
+        rekey_tracks(&tx, &map).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(
+            count(conn, "SELECT COUNT(*) FROM favorites WHERE kind = 'track'"),
+            2
+        );
+        assert_eq!(
+            count(conn, "SELECT added_at FROM favorites WHERE item_id = 'y'"),
+            1
         );
     }
 

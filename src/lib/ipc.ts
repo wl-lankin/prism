@@ -3,6 +3,8 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type {
   Album,
   Artist,
+  FavKind,
+  FavoriteIds,
   Folder,
   PlayerError,
   PlayerState,
@@ -65,6 +67,17 @@ export const libraryTracksRange = (offset: number, limit: number) =>
   call<Track[]>('library_tracks_range', { offset, limit });
 export const librarySearch = (q: string, limit: number) => call<SearchResult>('library_search', { q, limit });
 
+// Favorites.
+
+/** Idempotent; resolves to the new state. */
+export const favoritesSet = (kind: FavKind, id: string, on: boolean) =>
+  call<boolean>('favorites_set', { kind, id, on });
+export const favoritesIds = () => call<FavoriteIds>('favorites_ids');
+/** Only items that are in the index; newest favorite first. */
+export const favoritesTracks = () => call<Track[]>('favorites_tracks');
+export const favoritesAlbums = () => call<Album[]>('favorites_albums');
+export const favoritesArtists = () => call<Artist[]>('favorites_artists');
+
 // Settings.
 
 export const settingsGet = () => call<Settings>('settings_get');
@@ -88,5 +101,7 @@ export const onPlayerState = (cb: (state: PlayerState) => void): Promise<Unliste
 export const onPlayerError = (cb: (error: PlayerError) => void): Promise<UnlistenFn> =>
   listen<PlayerError>('player://error', (event) => cb(event.payload));
 export const onLibraryChanged = (cb: () => void): Promise<UnlistenFn> => listen('library://changed', () => cb());
+export const onFavoritesChanged = (cb: () => void): Promise<UnlistenFn> =>
+  listen('favorites://changed', () => cb());
 export const onScanProgress = (cb: (progress: ScanProgress) => void): Promise<UnlistenFn> =>
   listen<ScanProgress>('library://scan-progress', (event) => cb(event.payload));

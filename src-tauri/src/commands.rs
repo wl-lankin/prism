@@ -5,9 +5,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rusqlite::Connection;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::audio::list_devices;
+use crate::library::favorites::{self, FavKind, FavoriteIds};
 use crate::library::model::{Album, Artist, Folder, Track};
 use crate::library::query::{self, SearchResult};
 use crate::library::scan::{lock, ScanReport};
@@ -204,6 +205,48 @@ pub async fn library_tracks_range(
 pub async fn library_search(app: AppHandle, q: String, limit: u32) -> Result<SearchResult, String> {
     let limit = limit.min(MAX_PAGE);
     read(&app, move |conn| query::search(conn, &q, limit)).await
+}
+
+// Favorites
+
+/// Sets a favorite and returns the new state; emits `favorites://changed` when it changed.
+#[tauri::command]
+pub async fn favorites_set(
+    app: AppHandle,
+    kind: FavKind,
+    id: String,
+    on: bool,
+) -> Result<bool, String> {
+    let changed = read(&app, move |conn| {
+        favorites::set_changed(conn, kind, &id, on)
+    })
+    .await?;
+    if changed {
+        if let Err(err) = app.emit(favorites::EVENT_CHANGED, ()) {
+            eprintln!("emitting {} failed: {err}", favorites::EVENT_CHANGED);
+        }
+    }
+    Ok(on)
+}
+
+#[tauri::command]
+pub async fn favorites_ids(app: AppHandle) -> Result<FavoriteIds, String> {
+    read(&app, favorites::ids).await
+}
+
+#[tauri::command]
+pub async fn favorites_tracks(app: AppHandle) -> Result<Vec<Track>, String> {
+    read(&app, favorites::tracks).await
+}
+
+#[tauri::command]
+pub async fn favorites_albums(app: AppHandle) -> Result<Vec<Album>, String> {
+    read(&app, favorites::albums).await
+}
+
+#[tauri::command]
+pub async fn favorites_artists(app: AppHandle) -> Result<Vec<Artist>, String> {
+    read(&app, favorites::artists).await
 }
 
 // Settings
