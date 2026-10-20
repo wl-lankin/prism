@@ -8,8 +8,9 @@
   import Slider from './Slider.svelte';
 
   /** The bottom strip of the content card. The centre keeps `ringGap` px free for the Flow
-   *  ring, which the window places over it. */
-  let { ringGap = 132 }: { ringGap?: number } = $props();
+   *  ring, which the window places over it. `ringInside` is set when the ring sits centred
+   *  in the strip (maximized window) instead of on the card's bottom edge. */
+  let { ringGap = 132, ringInside = false }: { ringGap?: number; ringInside?: boolean } = $props();
 
   const track = $derived(player.track);
   const idle = $derived(player.status === 'idle' || !track);
@@ -78,7 +79,7 @@
     {/if}
   </div>
 
-  <div class="center">
+  <div class="center" class:inside={ringInside}>
     <span class="time elapsed" class:dim={idle}>{formatDuration(position)}</span>
     <button type="button" class="btn" disabled={idle} aria-label={t('transport.previous')} title={t('transport.previous')} onclick={() => playerPrev().catch(report('previous'))}>
       <Icon name="prev" size={20} />
@@ -185,6 +186,10 @@
     gap: 6px;
     /* Sits a little low, toward the ring's centre on the card edge. */
     padding-top: 14px;
+  }
+
+  .center.inside {
+    padding-top: 0;
   }
 
   .ring-space {

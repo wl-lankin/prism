@@ -3371,7 +3371,6 @@ dependencies = [
  "tauri-plugin-opener",
  "tempfile",
  "walkdir",
- "window-vibrancy",
  "windows-sys 0.61.2",
 ]
 
