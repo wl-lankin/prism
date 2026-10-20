@@ -13,11 +13,30 @@ pub enum Migration {
 }
 
 /// Ordered migrations; index + 1 is the `PRAGMA user_version` they produce.
-const MIGRATIONS: &[Migration] = &[
+pub const MIGRATIONS: &[Migration] = &[
     Migration::Sql(include_str!("migrations/0001_init.sql")),
     Migration::Sql(include_str!("migrations/0002_indexes.sql")),
     Migration::Rust(rekey::migrate_0003),
 ];
+
+/// The database was written by a newer build than this one. Never quarantined: the file is fine.
+#[derive(Debug)]
+pub struct NewerSchema {
+    pub found: i64,
+    pub known: usize,
+}
+
+impl std::fmt::Display for NewerSchema {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "library database schema version {} is not supported (this build knows up to {})",
+            self.found, self.known
+        )
+    }
+}
+
+impl std::error::Error for NewerSchema {}
 
 /// Track upserts must use `INSERT ... ON CONFLICT(id) DO UPDATE`. `INSERT OR REPLACE`
 /// deletes the old row without firing the FTS delete trigger (recursive_triggers is off)
@@ -47,13 +66,17 @@ fn migrate(conn: &mut Connection) -> anyhow::Result<()> {
     run_migrations(conn, MIGRATIONS)
 }
 
-fn run_migrations(conn: &mut Connection, steps: &[Migration]) -> anyhow::Result<()> {
+pub(crate) fn run_migrations(conn: &mut Connection, steps: &[Migration]) -> anyhow::Result<()> {
     let current: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if current < 0 || current as usize > steps.len() {
-        anyhow::bail!(
-            "library database schema version {current} is not supported (this build knows up to {})",
-            steps.len()
-        );
+    if current > steps.len() as i64 {
+        return Err(NewerSchema {
+            found: current,
+            known: steps.len(),
+        }
+        .into());
+    }
+    if current < 0 {
+        anyhow::bail!("library database schema version {current} is not valid");
     }
     for (index, step) in steps.iter().enumerate().skip(current as usize) {
         let tx = conn.transaction()?;

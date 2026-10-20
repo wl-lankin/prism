@@ -32,6 +32,7 @@ it('maps every command onto its fixed name and argument keys', async () => {
     [ipc.settingsGet, 'settings_get', undefined],
     [() => ipc.settingsSet({ gapless: false }), 'settings_set', { patch: { gapless: false } }],
     [ipc.audioDevices, 'audio_devices', undefined],
+    [ipc.startupNotice, 'startup_notice', undefined],
   ];
   for (const [run, command, args] of calls) {
     invoke.mockClear();

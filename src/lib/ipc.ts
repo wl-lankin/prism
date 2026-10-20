@@ -78,6 +78,8 @@ export const audioDevices = () => call<string[]>('audio_devices');
 
 /** True when the window sits on a native glass material (Mica, macOS vibrancy). */
 export const windowVibrancy = () => call<boolean>('window_vibrancy');
+/** The one-time startup notice (a quarantined library file name), cleared once read. */
+export const startupNotice = () => call<string | null>('startup_notice');
 
 // Events.
 

@@ -6,16 +6,16 @@ pub mod media_controls;
 pub mod player;
 pub mod protocol;
 pub mod settings;
+pub mod startup;
 pub mod tools;
 pub mod window;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
 use tauri::Manager;
 
 use audio::CpalOutputFactory;
-use db::Db;
 use library::covers::CoverStore;
 use library::scan::lock;
 use library::{query, tauri_emitter, watch, Library, LibraryOptions};
@@ -25,6 +25,9 @@ use player::{
     Resolver,
 };
 use settings::SettingsStore;
+use startup::{
+    fail_with, open_or_quarantine, CannotCreateDataDir, DataDir, OpenOutcome, StartupNotice,
+};
 
 /// Shared backend state, managed by Tauri.
 pub struct AppState {
@@ -68,8 +71,10 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
         .path()
         .app_data_dir()
         .context("resolving the app data dir")?;
-    std::fs::create_dir_all(&data_dir)
-        .with_context(|| format!("creating {}", data_dir.display()))?;
+    std::fs::create_dir_all(&data_dir).map_err(|source| CannotCreateDataDir {
+        path: data_dir.clone(),
+        source,
+    })?;
     let cover_cache = app
         .path()
         .app_cache_dir()
@@ -84,7 +89,18 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
     let settings = Arc::new(SettingsStore::load(&config_dir.join("settings.json")));
     let initial = settings.get();
 
-    let db = Arc::new(Db::open(&data_dir.join("library.db"))?);
+    let (db, notice) = match open_or_quarantine(&data_dir.join("library.db"))
+        .map_err(|err| err.context(DataDir(data_dir.clone())))?
+    {
+        OpenOutcome::Opened(db) => (db, None),
+        OpenOutcome::Quarantined { db, bad } => (
+            db,
+            bad.file_name()
+                .map(|name| name.to_string_lossy().into_owned()),
+        ),
+    };
+    app.manage(StartupNotice(Mutex::new(notice)));
+    let db = Arc::new(db);
     let library = Arc::new(Library::new(
         db,
         Arc::new(CoverStore::new(cover_dir)),
@@ -133,7 +149,10 @@ pub fn run() {
         .register_asynchronous_uri_scheme_protocol("prism", protocol::register)
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .setup(|app| setup(app).map_err(|err| err.into()))
+        .setup(|app| match setup(app) {
+            Ok(()) => Ok(()),
+            Err(err) => fail_with(&err),
+        })
         .invoke_handler(tauri::generate_handler![
             commands::player_play,
             commands::player_toggle,
@@ -158,9 +177,10 @@ pub fn run() {
             commands::settings_set,
             commands::audio_devices,
             window::window_vibrancy,
+            startup::startup_notice,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running Prism");
+        .unwrap_or_else(|err| fail_with(&anyhow::Error::new(err)));
 }
 
 #[cfg(test)]

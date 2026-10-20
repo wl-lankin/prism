@@ -21,6 +21,7 @@ tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
+rfd = "0.16"
 anyhow = "1.0.104"
 sha1 = "0.11.0"
 hex = "0.4.3"
@@ -40,7 +41,7 @@ window-vibrancy = "0.8.1"
 
 [target.'cfg(windows)'.dependencies]
 # DWM attributes for the transparent main window (no border, no rounded system corners, no backdrop).
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Graphics_Dwm"] }
 
 [profile.release]
 opt-level = 3

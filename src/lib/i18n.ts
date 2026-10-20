@@ -102,6 +102,7 @@ const en = {
   'drop.lead': 'Files play right away without being added to your library.',
   'drop.none': 'None of the dropped files can be played.',
   'drop.failed': 'The dropped files could not be played: {message}',
+  'startup.quarantined': 'Your library file was damaged. It was set aside as {file} and Prism started with an empty library. Add your folders again to rebuild it.',
 
   'settings.library': 'Library',
   'settings.libraryLead': 'Folders Prism reads music from. When files change, the library follows on its own.',
@@ -248,6 +249,7 @@ const de: Record<Key, string> = {
   'drop.lead': 'Die Dateien laufen sofort, ohne in die Mediathek aufgenommen zu werden.',
   'drop.none': 'Keine der Dateien kann abgespielt werden.',
   'drop.failed': 'Die Dateien konnten nicht abgespielt werden: {message}',
+  'startup.quarantined': 'Deine Bibliotheksdatei war beschädigt. Sie wurde als {file} beiseitegelegt und Prism startet mit einer leeren Mediathek. Füge deine Ordner erneut hinzu, um sie neu aufzubauen.',
 
   'settings.library': 'Mediathek',
   'settings.libraryLead': 'Ordner, aus denen Prism Musik liest. Ändern sich Dateien, zieht die Mediathek von selbst nach.',

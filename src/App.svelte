@@ -17,7 +17,7 @@
   import ViewHead from './lib/components/ViewHead.svelte';
   import { playAllShuffled } from './lib/flow';
   import { t, tc, type Key } from './lib/i18n';
-  import { playerPlayFiles, playerToggle, windowVibrancy } from './lib/ipc';
+  import { playerPlayFiles, playerToggle, startupNotice, windowVibrancy } from './lib/ipc';
   import { initLibrary, library } from './lib/stores/library.svelte';
   import { go, nav, overlays, type View } from './lib/stores/nav.svelte';
   import { notice, notify } from './lib/stores/notice.svelte';
@@ -53,6 +53,14 @@
   });
 
   $effect(() => initLibrary());
+
+  $effect(() => {
+    startupNotice()
+      .then((file) => {
+        if (file) notify(t('startup.quarantined', { file }));
+      })
+      .catch(() => {});
+  });
 
   $effect(() => {
     initSettings().catch((err) => console.error('loading the settings failed', err));
