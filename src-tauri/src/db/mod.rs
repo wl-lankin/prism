@@ -18,6 +18,7 @@ pub const MIGRATIONS: &[Migration] = &[
     Migration::Sql(include_str!("migrations/0002_indexes.sql")),
     Migration::Rust(rekey::migrate_0003),
     Migration::Sql(include_str!("migrations/0004_favorites.sql")),
+    Migration::Sql(include_str!("migrations/0005_track_stats.sql")),
 ];
 
 /// The database was written by a newer build than this one. Never quarantined: the file is fine.

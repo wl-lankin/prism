@@ -3355,6 +3355,7 @@ dependencies = [
  "lofty",
  "notify",
  "notify-debouncer-mini",
+ "rand",
  "rayon",
  "rfd",
  "rtrb",

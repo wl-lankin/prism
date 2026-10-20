@@ -1,6 +1,7 @@
 pub mod audio;
 pub mod commands;
 pub mod db;
+pub mod flow;
 pub mod library;
 pub mod media_controls;
 pub mod player;
@@ -131,7 +132,11 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
     let player = Player::spawn_with_options(
         Arc::new(CpalOutputFactory),
         with_dropped(Arc::clone(&dropped), library_resolver(&library)),
-        fan_out(vec![tauri_sink(handle.clone()), media.sink()]),
+        fan_out(vec![
+            tauri_sink(handle.clone()),
+            media.sink(),
+            library::history::spawn_recorder(Arc::clone(&library.db)),
+        ]),
         default_opener(),
         PlayerOptions {
             volume: initial.volume,

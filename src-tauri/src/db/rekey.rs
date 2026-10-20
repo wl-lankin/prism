@@ -25,12 +25,20 @@ pub struct TrackIdRef {
 }
 
 /// Every column outside `tracks` that stores a track id.
-pub const TRACK_ID_REFS: &[TrackIdRef] = &[TrackIdRef {
-    table: "favorites",
-    column: "item_id",
-    filter: Some("kind = 'track'"),
-    unique: true,
-}];
+pub const TRACK_ID_REFS: &[TrackIdRef] = &[
+    TrackIdRef {
+        table: "favorites",
+        column: "item_id",
+        filter: Some("kind = 'track'"),
+        unique: true,
+    },
+    TrackIdRef {
+        table: "track_stats",
+        column: "track_id",
+        filter: None,
+        unique: true,
+    },
+];
 
 /// How many rows that keep their id `migrate_0003` names individually in the log.
 const LOGGED_KEPT_ROWS: usize = 20;
@@ -677,6 +685,44 @@ mod tests {
                 pair("track", "merged"),
                 pair("track", "moved"),
                 pair("track", "new-4"),
+            ]
+        );
+    }
+
+    #[test]
+    fn rekey_merges_track_stats_of_merged_ids() {
+        let db = Db::open_in_memory().unwrap();
+        let conn = &mut *db.0.lock().unwrap();
+        let folder = music();
+        insert(conn, "old-1", &folder, &key(&folder.join("a.flac")), "A");
+        insert(conn, "old-2", &folder, &key(&folder.join("b.flac")), "B");
+        insert(conn, "old-3", &folder, &key(&folder.join("c.flac")), "C");
+        conn.execute_batch(
+            "INSERT INTO track_stats (track_id, play_count, last_played) VALUES
+                ('old-1', 3, 100), ('old-2', 5, 200), ('old-3', 1, 300);",
+        )
+        .unwrap();
+        let tx = conn.transaction().unwrap();
+        let map = vec![
+            ("old-1".to_string(), "merged".to_string()),
+            ("old-2".to_string(), "merged".to_string()),
+            ("old-3".to_string(), "moved".to_string()),
+        ];
+        rekey_tracks(&tx, &map).unwrap();
+        tx.commit().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT track_id, play_count, last_played FROM track_stats ORDER BY track_id")
+            .unwrap();
+        let rows: Vec<(String, i64, i64)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .map(|row| row.unwrap())
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("merged".to_string(), 3, 100),
+                ("moved".to_string(), 1, 300),
             ]
         );
     }

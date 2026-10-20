@@ -38,6 +38,7 @@ rubato = "5.0.1"
 crossbeam-channel = "0.5.17"
 souvlaki = "0.8.3"
 window-vibrancy = "0.8.1"
+rand = "0.9"
 
 [target.'cfg(windows)'.dependencies]
 # DWM attributes for the transparent main window (no border, no rounded system corners, no backdrop).
