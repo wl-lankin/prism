@@ -32,27 +32,25 @@ fn is_corrupt(err: &rusqlite::Error) -> bool {
     )
 }
 
+/// Reads the schema version. A file SQLite cannot read at all fails here; subtler damage
+/// surfaces later, while opening, backing up or migrating (see `is_corrupt_chain`).
 fn probe(path: &Path) -> anyhow::Result<Probe> {
     if !path.exists() {
         return Ok(Probe::Healthy(0));
     }
-    let conn = match Connection::open(path) {
-        Ok(conn) => conn,
-        Err(err) if is_corrupt(&err) => return Ok(Probe::Corrupt),
-        Err(err) => return Err(err).context("opening the library database"),
-    };
-    let checked = conn
-        .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
-        .and_then(|version| {
-            let verdict: String = conn.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
-            Ok((version, verdict))
-        });
-    match checked {
-        Ok((version, verdict)) if verdict == "ok" => Ok(Probe::Healthy(version)),
-        Ok(_) => Ok(Probe::Corrupt),
+    let read = Connection::open(path)
+        .and_then(|conn| conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)));
+    match read {
+        Ok(version) => Ok(Probe::Healthy(version)),
         Err(err) if is_corrupt(&err) => Ok(Probe::Corrupt),
-        Err(err) => Err(err).context("checking the library database"),
+        Err(err) => Err(err).context("reading the library database"),
     }
+}
+
+fn is_corrupt_chain(err: &anyhow::Error) -> bool {
+    err.chain()
+        .filter_map(|cause| cause.downcast_ref::<rusqlite::Error>())
+        .any(is_corrupt)
 }
 
 /// `library.db` plus a suffix, e.g. `library.db-wal` or `library.db.bad.2`.
@@ -66,29 +64,35 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
 /// and replaced by a fresh one; a database from a newer build is an error and stays put.
 /// An existing database that still has migrations to run is backed up first.
 pub fn open_or_quarantine(path: &Path) -> anyhow::Result<OpenOutcome> {
-    match probe(path)? {
-        Probe::Healthy(version) => {
-            let latest = MIGRATIONS.len() as i64;
-            // Checked here, before `Db::open` switches the file to WAL and so rewrites its header.
-            if version > latest {
-                return Err(NewerSchema {
-                    found: version,
-                    known: MIGRATIONS.len(),
-                }
-                .into());
-            }
-            if version > 0 && version < latest {
-                backup_before_migration(path, version, latest)
-                    .context("backing up the library database before migrating it")?;
-            }
-            Ok(OpenOutcome::Opened(Db::open(path)?))
+    let damaged = match probe(path)? {
+        Probe::Corrupt => true,
+        Probe::Healthy(version) => match open_checked(path, version) {
+            Ok(db) => return Ok(OpenOutcome::Opened(db)),
+            Err(err) if is_corrupt_chain(&err) => true,
+            Err(err) => return Err(err),
+        },
+    };
+    debug_assert!(damaged);
+    let bad = quarantine(path)?;
+    let db = Db::open(path)?;
+    Ok(OpenOutcome::Quarantined { db, bad })
+}
+
+fn open_checked(path: &Path, version: i64) -> anyhow::Result<Db> {
+    let latest = MIGRATIONS.len() as i64;
+    // Checked here, before `Db::open` switches the file to WAL and so rewrites its header.
+    if version > latest {
+        return Err(NewerSchema {
+            found: version,
+            known: MIGRATIONS.len(),
         }
-        Probe::Corrupt => {
-            let bad = quarantine(path)?;
-            let db = Db::open(path)?;
-            Ok(OpenOutcome::Quarantined { db, bad })
-        }
+        .into());
     }
+    if version > 0 && version < latest {
+        backup_before_migration(path, version, latest)
+            .context("backing up the library database before migrating it")?;
+    }
+    Db::open(path)
 }
 
 fn quarantine(path: &Path) -> anyhow::Result<PathBuf> {
@@ -158,6 +162,24 @@ fn prune_backups(path: &Path) {
     for (_, _, old) in found.into_iter().skip(KEPT_BACKUPS) {
         let _ = std::fs::remove_file(old);
     }
+}
+
+/// Data, config and cache folders.
+pub struct AppDirs {
+    pub data: PathBuf,
+    pub config: PathBuf,
+    pub cache: PathBuf,
+}
+
+/// The folders under a `PRISM_DATA_DIR` override, or `None` when it is unset or empty.
+#[cfg_attr(not(debug_assertions), allow(dead_code))]
+pub fn dirs_under_override(value: Option<&std::ffi::OsStr>) -> Option<AppDirs> {
+    let base = PathBuf::from(value.filter(|v| !v.is_empty())?);
+    Some(AppDirs {
+        data: base.join("data"),
+        config: base.join("config"),
+        cache: base.join("cache"),
+    })
 }
 
 /// The data folder, attached as context to errors that happen while opening the database.
@@ -371,6 +393,17 @@ mod tests {
         assert!(startup_message(&cannot, false).1.contains("cannot create"));
         let other = anyhow::anyhow!("boom");
         assert!(startup_message(&other, false).1.contains("boom"));
+    }
+
+    #[test]
+    fn override_relocates_all_dirs() {
+        use std::ffi::OsStr;
+        let dirs = dirs_under_override(Some(OsStr::new("base"))).unwrap();
+        assert_eq!(dirs.data, PathBuf::from("base").join("data"));
+        assert_eq!(dirs.config, PathBuf::from("base").join("config"));
+        assert_eq!(dirs.cache, PathBuf::from("base").join("cache"));
+        assert!(dirs_under_override(Some(OsStr::new(""))).is_none());
+        assert!(dirs_under_override(None).is_none());
     }
 
     #[test]

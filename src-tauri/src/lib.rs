@@ -26,7 +26,8 @@ use player::{
 };
 use settings::SettingsStore;
 use startup::{
-    fail_with, open_or_quarantine, CannotCreateDataDir, DataDir, OpenOutcome, StartupNotice,
+    fail_with, open_or_quarantine, AppDirs, CannotCreateDataDir, DataDir, OpenOutcome,
+    StartupNotice,
 };
 
 /// Shared backend state, managed by Tauri.
@@ -64,28 +65,39 @@ fn main_window_handle(app: &tauri::App) -> Option<usize> {
     }
 }
 
+/// Where Prism keeps its data, config and cache. `PRISM_DATA_DIR` relocates all three, in
+/// debug builds only, so a dev run never touches the real profile.
+fn app_dirs(app: &tauri::App) -> anyhow::Result<AppDirs> {
+    #[cfg(debug_assertions)]
+    if let Some(dirs) = startup::dirs_under_override(std::env::var_os("PRISM_DATA_DIR").as_deref())
+    {
+        return Ok(dirs);
+    }
+    let path = app.path();
+    Ok(AppDirs {
+        data: path.app_data_dir().context("resolving the app data dir")?,
+        config: path
+            .app_config_dir()
+            .context("resolving the app config dir")?,
+        cache: path
+            .app_cache_dir()
+            .context("resolving the app cache dir")?,
+    })
+}
+
 fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
     // First, so the glass is in place before the page paints.
     window::setup(app);
-    let data_dir = app
-        .path()
-        .app_data_dir()
-        .context("resolving the app data dir")?;
+    let dirs = app_dirs(app)?;
+    let data_dir = dirs.data;
     std::fs::create_dir_all(&data_dir).map_err(|source| CannotCreateDataDir {
         path: data_dir.clone(),
         source,
     })?;
-    let cover_cache = app
-        .path()
-        .app_cache_dir()
-        .context("resolving the app cache dir")?
-        .join("covers");
+    let cover_cache = dirs.cache.join("covers");
     let cover_dir = cover_cache.join("original");
 
-    let config_dir = app
-        .path()
-        .app_config_dir()
-        .context("resolving the app config dir")?;
+    let config_dir = dirs.config;
     let settings = Arc::new(SettingsStore::load(&config_dir.join("settings.json")));
     let initial = settings.get();
 
@@ -145,6 +157,15 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
 }
 
 pub fn run() {
+    // The web view keeps its profile (cookies, cache) in its own folder; relocate it too.
+    #[cfg(all(debug_assertions, target_os = "windows"))]
+    if let Some(dirs) = startup::dirs_under_override(std::env::var_os("PRISM_DATA_DIR").as_deref())
+    {
+        std::env::set_var(
+            "WEBVIEW2_USER_DATA_FOLDER",
+            dirs.data.with_file_name("webview"),
+        );
+    }
     tauri::Builder::default()
         .register_asynchronous_uri_scheme_protocol("prism", protocol::register)
         .plugin(tauri_plugin_opener::init())
