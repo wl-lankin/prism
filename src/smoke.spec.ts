@@ -9,24 +9,29 @@ const invoke = vi.fn(async (cmd: string) => {
   return undefined;
 });
 vi.mock('@tauri-apps/api/core', () => ({ invoke: (cmd: string) => invoke(cmd) }));
+vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn(async () => null) }));
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(async () => () => {}) }));
 vi.mock('@tauri-apps/api/window', () => ({
   getCurrentWindow: () => ({
     isMaximized: async () => false,
     onResized: async () => () => {},
+    onDragDropEvent: async () => () => {},
   }),
 }));
 
 const { default: App } = await import('./App.svelte');
 const { setLang } = await import('./lib/i18n');
 
-it('mounts the app shell with the idle Flow ring', () => {
+it('mounts the app shell with the idle Flow ring and the empty library', async () => {
   setLang('en');
   const target = document.createElement('div');
   const app = mount(App, { target });
   flushSync();
   expect(target.querySelector('.wordmark')?.textContent).toBe('Prism');
-  expect(target.querySelector('h1')?.textContent).toBe('Home');
+  await vi.waitFor(() => {
+    flushSync();
+    expect(target.querySelector('h1')?.textContent).toBe('Your library is empty');
+  });
   expect(target.querySelector('.ring')?.getAttribute('aria-label')).toBe('Play all albums shuffled');
   expect(target.querySelector('.ring .label')?.textContent).toBe('Flow');
   unmount(app);
@@ -46,14 +51,17 @@ it('puts the ring first in the tab order and names disabled entries', () => {
   unmount(app);
 });
 
-it('switches the strings with the language', () => {
+it('switches the strings with the language', async () => {
   setLang('de');
   const target = document.createElement('div');
   const app = mount(App, { target });
   flushSync();
-  expect(target.querySelector('h1')?.textContent).toBe('Start');
+  expect(target.querySelector('h1')?.textContent).toBe('Deine Mediathek ist leer');
   setLang('en');
   flushSync();
-  expect(target.querySelector('h1')?.textContent).toBe('Home');
+  await vi.waitFor(() => {
+    flushSync();
+    expect(target.querySelector('h1')?.textContent).toBe('Your library is empty');
+  });
   unmount(app);
 });

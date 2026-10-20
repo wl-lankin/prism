@@ -22,13 +22,22 @@
     restore:
       '<rect x="5.5" y="8.5" width="10" height="10" rx="1.8"/><path d="M8.5 5.5h8.2a1.8 1.8 0 0 1 1.8 1.8v8.2"/>',
     close: '<path d="m6.5 6.5 11 11M17.5 6.5l-11 11"/>',
+    play: '<path d="M7.5 5.6v12.8a.9.9 0 0 0 1.4.8l10-6.4a.9.9 0 0 0 0-1.6l-10-6.4a.9.9 0 0 0-1.4.8z"/>',
+    pause: '<rect x="6.5" y="5.5" width="3.5" height="13" rx="1"/><rect x="14" y="5.5" width="3.5" height="13" rx="1"/>',
+    shuffle:
+      '<path d="M4 7.5h3.2c4.6 0 5 9 9.6 9H20M4 16.5h3.2c1.6 0 2.6-1.1 3.4-2.6M13.4 10.1c.8-1.5 1.8-2.6 3.4-2.6H20"/><path d="m17.5 5 2.5 2.5-2.5 2.5M17.5 14l2.5 2.5-2.5 2.5"/>',
+    search: '<circle cx="10.5" cy="10.5" r="6"/><path d="m15 15 5 5"/>',
+    folderAdd:
+      '<path d="M3.5 7.5v10a1.5 1.5 0 0 0 1.5 1.5h14a1.5 1.5 0 0 0 1.5-1.5v-8A1.5 1.5 0 0 0 19 8h-7l-2-2.5H5A1.5 1.5 0 0 0 3.5 7z"/><path d="M12 11v5M9.5 13.5h5"/>',
+    back: '<path d="M14.5 6 8.5 12l6 6"/>',
+    drop: '<path d="M12 4v11M7.5 10.5 12 15l4.5-4.5"/><path d="M5 15.5V18a1.5 1.5 0 0 0 1.5 1.5h11A1.5 1.5 0 0 0 19 18v-2.5"/>',
   } as const;
 
   export type IconName = keyof typeof ICONS;
 </script>
 
 <script lang="ts">
-  let { name, size = 18 }: { name: IconName; size?: number } = $props();
+  let { name, size = 18, filled = false }: { name: IconName; size?: number; filled?: boolean } = $props();
 </script>
 
 <svg
@@ -36,7 +45,7 @@
   width={size}
   height={size}
   viewBox="0 0 24 24"
-  fill="none"
+  fill={filled ? 'currentColor' : 'none'}
   stroke="currentColor"
   stroke-width="1.5"
   stroke-linecap="round"

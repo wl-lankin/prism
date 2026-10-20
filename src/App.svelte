@@ -1,20 +1,33 @@
 <script lang="ts">
+  import { getCurrentWindow } from '@tauri-apps/api/window';
+  import AlbumGrid from './lib/components/AlbumGrid.svelte';
+  import AlbumView from './lib/components/AlbumView.svelte';
+  import ArtistList from './lib/components/ArtistList.svelte';
+  import ArtistView from './lib/components/ArtistView.svelte';
+  import EmptyLibrary from './lib/components/EmptyLibrary.svelte';
   import FlowRing, { type RingMode } from './lib/components/FlowRing.svelte';
+  import Icon from './lib/components/Icon.svelte';
+  import SearchPalette from './lib/components/SearchPalette.svelte';
   import Sidebar from './lib/components/Sidebar.svelte';
+  import SongList from './lib/components/SongList.svelte';
   import TitleBar from './lib/components/TitleBar.svelte';
   import TransportStrip from './lib/components/TransportStrip.svelte';
+  import ViewHead from './lib/components/ViewHead.svelte';
   import { playAllShuffled } from './lib/flow';
-  import { t, type Key } from './lib/i18n';
-  import { playerToggle, windowVibrancy } from './lib/ipc';
+  import { t, tc, type Key } from './lib/i18n';
+  import { playerPlayFiles, playerToggle, windowVibrancy } from './lib/ipc';
+  import { initLibrary, library } from './lib/stores/library.svelte';
   import { go, nav, type View } from './lib/stores/nav.svelte';
+  import { notice, notify } from './lib/stores/notice.svelte';
   import { initPlayer, player } from './lib/stores/player.svelte';
 
   const RING = 84;
+  const isMac = typeof navigator !== 'undefined' && /Mac/.test(navigator.platform || navigator.userAgent);
 
   let glass = $state(false);
   let starting = $state(false);
-  let notice = $state<string | null>(null);
-  let noticeTimer: ReturnType<typeof setTimeout> | undefined;
+  let searching = $state(false);
+  let dragging = $state(false);
 
   $effect(() => {
     let stop: (() => void) | undefined;
@@ -34,20 +47,57 @@
     };
   });
 
+  $effect(() => initLibrary());
+
+  // Files dropped onto the window play at once, without being indexed.
+  $effect(() => {
+    let stop: (() => void) | undefined;
+    let gone = false;
+    try {
+      getCurrentWindow()
+        .onDragDropEvent((event) => {
+          const payload = event.payload;
+          if (payload.type === 'enter') dragging = payload.paths.length > 0;
+          else if (payload.type === 'leave') dragging = false;
+          else if (payload.type === 'drop') {
+            dragging = false;
+            if (payload.paths.length) void playDropped(payload.paths);
+          }
+        })
+        .then((unlisten) => (gone ? unlisten() : (stop = unlisten)))
+        .catch(() => {});
+    } catch {
+      // Not inside Tauri (tests).
+    }
+    return () => {
+      gone = true;
+      stop?.();
+    };
+  });
+
+  async function playDropped(paths: string[]) {
+    try {
+      if ((await playerPlayFiles(paths)) === 0) notify(t('drop.none'));
+    } catch (err) {
+      notify(t('drop.failed', { message: String(err) }));
+    }
+  }
+
+  function onkeydown(event: KeyboardEvent) {
+    if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 'k') {
+      event.preventDefault();
+      searching = !searching;
+    }
+  }
+
   const mode: RingMode = $derived(
     player.status === 'idle' ? 'flow' : player.status === 'playing' ? 'pause' : 'play',
   );
   const progress = $derived(player.durationMs > 0 ? player.positionMs / player.durationMs : 0);
 
-  function show(message: string) {
-    notice = message;
-    clearTimeout(noticeTimer);
-    noticeTimer = setTimeout(() => (notice = null), 5000);
-  }
-
   async function activate() {
     if (player.status !== 'idle') {
-      playerToggle().catch((err) => show(t('flow.failed', { message: String(err) })));
+      playerToggle().catch((err) => notify(t('flow.failed', { message: String(err) })));
       return;
     }
     if (starting) return;
@@ -56,10 +106,15 @@
       // Flow proper arrives in M2; until then an idle click plays the whole library shuffled.
       if ((await playAllShuffled()) === 'empty') go('settings');
     } catch (err) {
-      show(t('flow.failed', { message: String(err) }));
+      notify(t('flow.failed', { message: String(err) }));
     } finally {
       starting = false;
     }
+  }
+
+  /** Views that show the library, and so the empty state when it has no tracks. */
+  function libraryView(view: View): boolean {
+    return view === 'home' || view === 'albums' || view === 'artists' || view === 'songs';
   }
 
   const titles: Record<View, Key> = {
@@ -75,10 +130,16 @@
   };
 </script>
 
+<svelte:window {onkeydown} />
+
+{#snippet albumsHead()}
+  <ViewHead title={t('nav.albums')} meta={tc('view.count.albums', library.albums?.length ?? 0)} />
+{/snippet}
+
 <div class="window" class:glass data-tauri-drag-region>
   <!-- First in the DOM so the main control comes early in the tab order; placed by CSS. -->
   <div class="ring-dock" style="--ring:{RING}px">
-    <div class="notice" class:shown={notice} role="status" aria-live="polite">{notice ?? ''}</div>
+    <div class="notice" class:shown={notice.text} role="status" aria-live="polite">{notice.text ?? ''}</div>
     <FlowRing {mode} {progress} size={RING} onactivate={activate} />
   </div>
 
@@ -86,13 +147,46 @@
     <Sidebar />
 
     <main class="main">
-      <TitleBar />
+      <TitleBar>
+        <button
+          type="button"
+          class="search"
+          onclick={() => (searching = true)}
+          aria-keyshortcuts={isMac ? 'Meta+K' : 'Control+K'}
+        >
+          <Icon name="search" size={16} />
+          <span>{t('search.open')}</span>
+          <kbd>{isMac ? 'Cmd K' : 'Ctrl K'}</kbd>
+        </button>
+      </TitleBar>
       <section class="content">
-        <!-- Task 11 fills the library views, Task 12 Settings; until then a quiet placeholder. -->
-        {#key nav.view}
-          <div class="placeholder">
-            <h1>{t(titles[nav.view])}</h1>
-            <p>{t(`view.${nav.view}.lead`)}</p>
+        {#key `${nav.view}:${nav.param ?? ''}`}
+          <div class="view">
+            {#if libraryView(nav.view) && library.trackCount === null && library.error}
+              <div class="placeholder">
+                <p>{t('library.loadFailed', { message: library.error })}</p>
+              </div>
+            {:else if libraryView(nav.view) && library.trackCount === null}
+              <!-- The first load takes a moment; nothing flashes meanwhile. -->
+            {:else if libraryView(nav.view) && library.trackCount === 0}
+              <EmptyLibrary />
+            {:else if nav.view === 'home' || nav.view === 'albums'}
+              <AlbumGrid albums={library.albums ?? []} scrollKey="albums" header={albumsHead} />
+            {:else if nav.view === 'album' && nav.param}
+              <AlbumView albumId={nav.param} />
+            {:else if nav.view === 'artists'}
+              <ArtistList artists={library.artists ?? []} />
+            {:else if nav.view === 'artist' && nav.param}
+              <ArtistView name={nav.param} />
+            {:else if nav.view === 'songs'}
+              <SongList />
+            {:else}
+              <!-- Settings arrive with Task 12; Favorites and Playlists in later versions. -->
+              <div class="placeholder">
+                <h1>{t(titles[nav.view])}</h1>
+                <p>{t(`view.${nav.view}.lead`)}</p>
+              </div>
+            {/if}
           </div>
         {/key}
       </section>
@@ -101,8 +195,20 @@
     <div class="transport">
       <TransportStrip ringGap={RING + 44} />
     </div>
+
+    {#if dragging}
+      <div class="drop" aria-hidden="true">
+        <div class="drop-card">
+          <Icon name="drop" size={30} />
+          <strong>{t('drop.hint')}</strong>
+          <span>{t('drop.lead')}</span>
+        </div>
+      </div>
+    {/if}
   </div>
 </div>
+
+<SearchPalette bind:open={searching} />
 
 <style>
   :global(html),
@@ -164,16 +270,21 @@
       rgba(255, 255, 255, 0.012);
   }
 
+  /* Each view scrolls itself: the long lists are virtualized against their own scroller. */
   .content {
     flex: 1;
     min-height: 0;
-    overflow: auto;
-    padding: 4px 32px 32px;
+    overflow: hidden;
+  }
+
+  .view {
+    height: 100%;
+    animation: fade var(--dur) ease-out;
   }
 
   .placeholder {
     max-width: 560px;
-    animation: fade var(--dur) ease-out;
+    padding: 4px 32px 32px;
   }
 
   h1 {
@@ -192,8 +303,89 @@
     color: var(--text-dim);
   }
 
+  .search {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    width: 300px;
+    max-width: 100%;
+    height: 34px;
+    padding: 0 7px 0 12px;
+    border: 0;
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.055);
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+    color: rgba(243, 243, 245, 0.5);
+    font: inherit;
+    font-size: 13px;
+    cursor: text;
+    transition:
+      background-color var(--dur) ease-out,
+      color var(--dur) ease-out;
+  }
+
+  .search:hover {
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--text-dim);
+  }
+
+  .search:focus-visible {
+    outline: 2px solid var(--spec-4);
+    outline-offset: 2px;
+  }
+
+  .search span {
+    flex: 1;
+    text-align: left;
+  }
+
+  .search kbd {
+    padding: 2px 6px;
+    border-radius: 5px;
+    font: inherit;
+    font-size: 11px;
+    color: rgba(243, 243, 245, 0.5);
+    background: rgba(255, 255, 255, 0.06);
+  }
+
   .transport {
     grid-column: 1 / -1;
+  }
+
+  .drop {
+    position: absolute;
+    inset: 0;
+    z-index: 5;
+    display: grid;
+    place-items: center;
+    background: rgba(13, 13, 16, 0.72);
+    backdrop-filter: blur(6px);
+    animation: fade var(--dur) ease-out;
+  }
+
+  .drop-card {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    padding: 34px 48px;
+    border-radius: 20px;
+    border: 1.5px dashed rgba(243, 243, 245, 0.28);
+    text-align: center;
+  }
+
+  .drop-card strong {
+    margin-top: 6px;
+    font-family: var(--font-display);
+    font-size: 20px;
+    font-weight: 600;
+  }
+
+  .drop-card span {
+    max-width: 280px;
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--text-dim);
   }
 
   .ring-dock {

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { lang, setLang, strings, systemLang, t } from './i18n';
+import { lang, setLang, strings, systemLang, t, tc } from './i18n';
 
 const placeholders = (s: string) => [...s.matchAll(/\{(\w+)\}/g)].map((m) => m[1]).sort();
 
@@ -44,6 +44,14 @@ describe('t', () => {
 
   it('fills placeholders', () => {
     expect(t('flow.failed', { message: 'no output device' })).toContain('no output device');
+  });
+
+  it('counts with a singular form and grouped digits', () => {
+    expect(tc('view.count.albums', 1)).toBe('1 album');
+    expect(tc('view.count.albums', 3000)).toBe('3,000 albums');
+    setLang('de');
+    expect(tc('view.count.albums', 1)).toBe('1 Album');
+    expect(tc('view.count.albums', 3000)).toBe('3.000 Alben');
   });
 
   it('returns the key for an unknown key', () => {

@@ -17,6 +17,7 @@ it('maps every command onto its fixed name and argument keys', async () => {
     [() => ipc.playerSeek(1500.4), 'player_seek', { ms: 1500 }],
     [() => ipc.playerSetVolume(0.3), 'player_set_volume', { v: 0.3 }],
     [ipc.playerState, 'player_state', undefined],
+    [() => ipc.playerPlayFiles(['C:/x.flac']), 'player_play_files', { paths: ['C:/x.flac'] }],
     [() => ipc.libraryAddFolder('C:\\Music'), 'library_add_folder', { path: 'C:\\Music' }],
     [() => ipc.libraryRemoveFolder('C:\\Music'), 'library_remove_folder', { path: 'C:\\Music' }],
     [ipc.libraryFolders, 'library_folders', undefined],

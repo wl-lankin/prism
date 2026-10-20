@@ -42,6 +42,9 @@ export const playerSeek = (ms: number) => call<void>('player_seek', { ms: Math.m
 /** 0..1 */
 export const playerSetVolume = (v: number) => call<void>('player_set_volume', { v });
 export const playerState = () => call<PlayerState>('player_state');
+/** Plays files (dropped onto the window) without indexing them. Folders and non-audio files
+ *  are skipped. Resolves with how many files were queued; 0 leaves the player untouched. */
+export const playerPlayFiles = (paths: string[]) => call<number>('player_play_files', { paths });
 
 // Library commands.
 
