@@ -322,12 +322,14 @@
 <style>
   .settings {
     height: 100%;
+    overflow-x: hidden;
     overflow-y: auto;
     scrollbar-color: auto;
   }
 
   .settings::-webkit-scrollbar {
     width: 6px;
+    height: 0;
   }
 
   .settings::-webkit-scrollbar-thumb {
