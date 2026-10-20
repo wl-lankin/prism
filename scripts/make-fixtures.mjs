@@ -85,6 +85,14 @@ try {
   ffmpeg([...sine, ...mono, ...bitexact, '-c:a', 'tta', join(out, 'tta.tta')]);
   ffmpeg([...sine, ...mono, ...bitexact, '-c:a', 'aac', '-b:a', '32k', ...meta({ title: 'Aac' }), join(out, 'aac.m4a')]);
 
+  // Two PCM files with the same spec (44.1 kHz stereo 16-bit) for decoding and gapless tests.
+  for (const [name, frequency] of [['gap_a.wav', 440], ['gap_b.wav', 660]]) {
+    ffmpeg([
+      '-f', 'lavfi', '-i', `sine=frequency=${frequency}:sample_rate=44100:duration=1`,
+      '-ac', '2', ...bitexact, '-c:a', 'pcm_s16le', join(out, name),
+    ]);
+  }
+
   // A valid FLAC header followed by zeros: readable magic, unusable stream.
   const validFlac = join(work, 'valid.flac');
   ffmpeg([...sine, ...mono, ...bitexact, '-c:a', 'flac', validFlac]);
