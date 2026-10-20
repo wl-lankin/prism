@@ -1,4 +1,4 @@
-import type { Track } from './types';
+import type { Source, Track } from './types';
 
 /** "3:07", or "1:02:03" from one hour on. Invalid and negative values show "0:00". */
 export function formatDuration(ms: number): string {
@@ -32,4 +32,12 @@ export function qualityLabel(track: QualityInput): string {
     return bitDepth && sampleRate ? `${name} ${bitDepth}/${khz(sampleRate)}` : name;
   }
   return bitrateKbps ? `${name} ${Math.round(bitrateKbps)}` : name;
+}
+
+/** "Local files · FLAC 24/96": where a track comes from and how it is encoded. A track whose
+ *  format is unknown shows the source name alone. */
+export function sourceQualityLabel(track: Track, sourceName: (s: Source) => string): string {
+  const source = sourceName(track.source);
+  const quality = track.format ? qualityLabel(track) : '';
+  return quality ? `${source} · ${quality}` : source;
 }

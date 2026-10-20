@@ -30,9 +30,6 @@
 
   --font-ui: 'Inter Variable', system-ui, -apple-system, 'Segoe UI', sans-serif;
   --font-display: 'Space Grotesk Variable', 'Inter Variable', system-ui, sans-serif;
-
-  scrollbar-width: thin;
-  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -50,6 +47,9 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* Scrollbars are styled only with the ::-webkit-scrollbar rules (WebView2 and WKWebView both
+   read them). The standard scrollbar-width / scrollbar-color must not be set as well: where
+   either is set, Chromium ignores these rules, the thumb hover style included. */
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;

@@ -1,5 +1,5 @@
 import { flushSync, mount, tick, unmount } from 'svelte';
-import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Album, Artist, Track } from '../types';
 
 const track = (n: number, album = 'a1'): Track => ({
@@ -39,6 +39,9 @@ const album: Album = {
 };
 const artist: Artist = { name: 'Lumen Field', albumCount: 1, trackCount: 3, coverId: null };
 
+/** How long the queue is that `player_queue_range` serves. */
+let queueLength = 0;
+
 const invoke = vi.fn(async (cmd: string, args?: Record<string, unknown>): Promise<unknown> => {
   switch (cmd) {
     case 'library_search':
@@ -51,6 +54,14 @@ const invoke = vi.fn(async (cmd: string, args?: Record<string, unknown>): Promis
     case 'favorites_albums':
     case 'favorites_artists':
       return [];
+    case 'player_queue_range': {
+      const { offset, limit } = args as { offset: number; limit: number };
+      const end = Math.min(offset + limit, queueLength);
+      return Array.from({ length: Math.max(0, end - offset) }, (_, i) => ({
+        index: offset + i,
+        track: track(offset + i),
+      }));
+    }
     case 'library_tracks_range': {
       const { offset, limit } = args as { offset: number; limit: number };
       return Array.from({ length: limit }, (_, i) => track(offset + i));
@@ -370,4 +381,66 @@ it('renders a heart that is not a favorite as not pressed', async () => {
   expect(button.getAttribute('aria-pressed')).toBe('false');
   expect(button.getAttribute('aria-label')).toBe('Favorite');
   unmount(app);
+});
+
+describe('Now Playing', () => {
+  async function nowPlaying(index: number, length: number) {
+    const { default: NowPlaying } = await import('./NowPlaying.svelte');
+    const { player } = await import('../stores/player.svelte');
+    queueLength = length;
+    Object.assign(player, { status: 'playing', track: track(index), queueIndex: index, queueLength: length });
+    player.queueVersion++;
+    const app = mount(NowPlaying, { target });
+    await frame();
+    await settle();
+    return { app, player };
+  }
+
+  const queueCalls = () => invoke.mock.calls.filter(([cmd]) => cmd === 'player_queue_range');
+
+  afterEach(async () => {
+    const { player } = await import('../stores/player.svelte');
+    Object.assign(player, { status: 'idle', track: null, queueIndex: 0, queueLength: 0, flow: undefined });
+  });
+
+  it('requests the page that holds the current entry and highlights it', async () => {
+    const { app } = await nowPlaying(450, 1000);
+    expect(queueCalls()).toContainEqual(['player_queue_range', { offset: 400, limit: 200 }]);
+    const current = target.querySelector('[aria-current="true"]');
+    expect(current?.getAttribute('data-index')).toBe('450');
+    expect(current?.textContent).toContain('Song 450');
+    expect(target.querySelectorAll('.qrow').length).toBeLessThan(60);
+    unmount(app);
+  });
+
+  it('jumps to an entry when its row is clicked', async () => {
+    const { app } = await nowPlaying(0, 20);
+    const row = target.querySelector<HTMLElement>('[data-index="5"]')!;
+    row.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    await settle();
+    expect(invoke).toHaveBeenCalledWith('player_jump', { index: 5 });
+    unmount(app);
+  });
+
+  it('refetches the queue when its version changes', async () => {
+    const { app, player } = await nowPlaying(0, 20);
+    expect(queueCalls()).toHaveLength(1);
+    player.queueVersion++;
+    await frame();
+    await settle();
+    expect(queueCalls()).toHaveLength(2);
+    unmount(app);
+  });
+
+  it('shows the Flow variant in the header only in Flow', async () => {
+    const { app, player } = await nowPlaying(0, 20);
+    expect(target.textContent).not.toContain('Flow ·');
+    (player as { flow?: unknown }).flow = { kind: 'genre', genre: 'Ambient' };
+    flushSync();
+    expect(target.textContent).toContain('Flow · Ambient');
+    (player as { flow?: unknown }).flow = { kind: 'favorites' };
+    flushSync();
+    expect(target.textContent).toContain('Flow · Favorites');
+    unmount(app);
+  });
 });
