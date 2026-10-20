@@ -26,7 +26,7 @@
 
   /** The Flow ring hangs half out below the app's bottom edge, into the transparent strip
    *  at the bottom of the window. */
-  const RING = 84;
+  const RING = 96;
   const isMac = typeof navigator !== 'undefined' && /Mac/.test(navigator.platform || navigator.userAgent);
 
   let glass = $state(false);
