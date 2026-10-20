@@ -11,10 +11,12 @@ use crossbeam_channel::{select, Receiver, Sender};
 use serde::Serialize;
 
 use super::queue::Queue;
+use crate::audio::gain::replaygain_factor;
 use crate::audio::{
     open_source_with, AudioSource, Input, OutputFactory, Playback, PumpStatus, StreamSpec,
 };
 use crate::library::model::Track;
+use crate::settings::ReplayGain;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -64,8 +66,29 @@ pub type EventSink = Arc<dyn Fn(PlayerEvent) + Send + Sync>;
 pub type Opener =
     Arc<dyn Fn(&Track, StreamSpec) -> anyhow::Result<Box<dyn AudioSource>> + Send + Sync>;
 
-/// Volume until settings persist it (Task 12).
+/// Volume before the settings say otherwise.
 pub const DEFAULT_VOLUME: f32 = 0.8;
+
+/// How the engine starts; each value can be changed later through [`Player`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlayerOptions {
+    pub volume: f32,
+    /// `None` is the system default output.
+    pub device: Option<String>,
+    pub gapless: bool,
+    pub replay_gain: ReplayGain,
+}
+
+impl Default for PlayerOptions {
+    fn default() -> Self {
+        PlayerOptions {
+            volume: DEFAULT_VOLUME,
+            device: None,
+            gapless: true,
+            replay_gain: ReplayGain::Off,
+        }
+    }
+}
 /// The next track is opened this long before the current one ends, for gapless playback.
 pub const PRELOAD_MS: u64 = 5_000;
 /// `prev` restarts the current track once it has played longer than this.
@@ -109,7 +132,36 @@ enum Command {
     Prev,
     Seek(u64),
     SetVolume(f32),
+    SetDevice(Option<String>),
+    SetGapless(bool),
+    SetReplayGain(ReplayGain),
     Shutdown,
+}
+
+/// 0..=1; anything that is not a number becomes the default.
+fn clamp_volume(volume: f32) -> f32 {
+    if volume.is_finite() {
+        volume.clamp(0.0, 1.0)
+    } else {
+        DEFAULT_VOLUME
+    }
+}
+
+/// The linear ReplayGain factor for `track` under `mode`. Album mode uses the track values
+/// when the album has none; a track without tags plays at 1.0.
+pub fn track_gain(track: &Track, mode: ReplayGain) -> f32 {
+    match mode {
+        ReplayGain::Off => 1.0,
+        ReplayGain::Album if track.replay_gain_album_db.is_some() => replaygain_factor(
+            track.replay_gain_album_db,
+            track
+                .replay_gain_album_peak
+                .or(track.replay_gain_track_peak),
+        ),
+        ReplayGain::Track | ReplayGain::Album => {
+            replaygain_factor(track.replay_gain_track_db, track.replay_gain_track_peak)
+        }
+    }
 }
 
 /// Handle to the engine thread. Every method only sends a command; none of them blocks on
@@ -131,14 +183,28 @@ impl Player {
         sink: EventSink,
         opener: Opener,
     ) -> Player {
+        Player::spawn_with_options(factory, resolver, sink, opener, PlayerOptions::default())
+    }
+
+    pub fn spawn_with_options(
+        factory: Arc<dyn OutputFactory>,
+        resolver: Resolver,
+        sink: EventSink,
+        opener: Opener,
+        options: PlayerOptions,
+    ) -> Player {
+        let options = PlayerOptions {
+            volume: clamp_volume(options.volume),
+            ..options
+        };
         let (commands, command_rx) = crossbeam_channel::unbounded();
-        let state = Arc::new(Mutex::new(PlayerState::idle(DEFAULT_VOLUME)));
+        let state = Arc::new(Mutex::new(PlayerState::idle(options.volume)));
         let shared = Arc::clone(&state);
         let thread = std::thread::Builder::new()
             .name("prism-player".into())
             .spawn(move || {
                 let run = catch_unwind(AssertUnwindSafe(|| {
-                    match Engine::new(factory, resolver, sink, opener, shared) {
+                    match Engine::new(factory, resolver, sink, opener, shared, options) {
                         Ok(mut engine) => engine.run(command_rx),
                         Err(err) => eprintln!("the audio engine could not start: {err:#}"),
                     }
@@ -191,6 +257,22 @@ impl Player {
             return Err("The volume must be a number between 0 and 1.".to_string());
         }
         self.send(Command::SetVolume(volume))
+    }
+
+    /// Moves playback to another output (`None` = the system default), keeping the
+    /// position. A device that is gone falls back to the default.
+    pub fn set_device(&self, device: Option<String>) -> Result<(), String> {
+        self.send(Command::SetDevice(device))
+    }
+
+    /// Off: the next track is opened only once the current one has ended.
+    pub fn set_gapless(&self, gapless: bool) -> Result<(), String> {
+        self.send(Command::SetGapless(gapless))
+    }
+
+    /// Applies at once to the playing track and the pre-opened next one.
+    pub fn set_replay_gain(&self, mode: ReplayGain) -> Result<(), String> {
+        self.send(Command::SetReplayGain(mode))
     }
 
     /// The latest state, as the engine published it.
@@ -308,6 +390,8 @@ struct Engine {
     generation: Arc<AtomicU64>,
     status: PlayerStatus,
     volume: f32,
+    gapless: bool,
+    replay_gain: ReplayGain,
     /// The user paused while the track was loading: start it paused.
     start_paused: bool,
     /// The track being decoded. Between a gapless hand-over and the moment it is heard it
@@ -335,9 +419,10 @@ impl Engine {
         sink: EventSink,
         opener: Opener,
         shared: Arc<Mutex<PlayerState>>,
+        options: PlayerOptions,
     ) -> anyhow::Result<Engine> {
-        let mut playback = Playback::new(factory, None)?;
-        playback.set_volume(DEFAULT_VOLUME);
+        let mut playback = Playback::new(factory, options.device.clone())?;
+        playback.set_volume(options.volume);
         if let Some(err) = playback.output_error() {
             eprintln!("no audio output yet: {err}");
         }
@@ -353,7 +438,9 @@ impl Engine {
             opened,
             generation,
             status: PlayerStatus::Idle,
-            volume: DEFAULT_VOLUME,
+            volume: options.volume,
+            gapless: options.gapless,
+            replay_gain: options.replay_gain,
             start_paused: false,
             current: None,
             decoding: false,
@@ -424,6 +511,28 @@ impl Engine {
             Command::SetVolume(volume) => {
                 self.volume = volume.clamp(0.0, 1.0);
                 self.playback.set_volume(self.volume);
+            }
+            Command::SetDevice(device) => {
+                if let Err(err) = self.playback.set_device(device) {
+                    self.fail_current(err);
+                }
+            }
+            Command::SetGapless(gapless) => {
+                self.gapless = gapless;
+                if !gapless {
+                    // A track opened early is dropped; it opens again once this one ends.
+                    self.preload = Preload::None;
+                    self.playback.queue_next(None);
+                }
+            }
+            Command::SetReplayGain(mode) => {
+                self.replay_gain = mode;
+                if let Some(track) = &self.current {
+                    self.playback.set_gain(track_gain(track, mode));
+                }
+                if let Preload::Ready(track) = &self.preload {
+                    self.playback.set_next_gain(track_gain(track, mode));
+                }
             }
             Command::Shutdown => {}
         }
@@ -580,6 +689,8 @@ impl Engine {
                 self.preload = match opened.result {
                     Ok((track, source)) => {
                         self.playback.queue_next(Some(source));
+                        self.playback
+                            .set_next_gain(track_gain(&track, self.replay_gain));
                         Preload::Ready(Box::new(track))
                     }
                     Err(message) => Preload::Failed(opened.index, opened.id, message),
@@ -625,6 +736,9 @@ impl Engine {
         };
         match self.playback.set_source(source) {
             Ok(()) => {
+                if let Some(track) = &self.current {
+                    self.playback.set_gain(track_gain(track, self.replay_gain));
+                }
                 self.decoding = true;
                 let paused = std::mem::take(&mut self.start_paused);
                 self.playback.set_paused(paused);
@@ -647,7 +761,7 @@ impl Engine {
 
     /// Opens the next track once the current one is within [`PRELOAD_MS`] of its end.
     fn maybe_preload(&mut self) {
-        if !matches!(self.preload, Preload::None) || !self.seekable() {
+        if !self.gapless || !matches!(self.preload, Preload::None) || !self.seekable() {
             return;
         }
         let Some(track) = &self.current else {
@@ -932,6 +1046,21 @@ mod tests {
     }
 
     fn harness_with(resolver: Resolver, speed: f64, opener: Option<Opener>) -> Harness {
+        harness_full(resolver, speed, opener, PlayerOptions::default())
+    }
+
+    fn harness_options(tracks: Vec<Track>, options: PlayerOptions) -> Harness {
+        let resolver: Resolver =
+            Arc::new(move |id: &str| tracks.iter().find(|track| track.id == id).cloned());
+        harness_full(resolver, FAST, None, options)
+    }
+
+    fn harness_full(
+        resolver: Resolver,
+        speed: f64,
+        opener: Option<Opener>,
+        options: PlayerOptions,
+    ) -> Harness {
         let played = Arc::new(Mutex::new(Vec::new()));
         let factory = Arc::new(InstantFactory {
             speed,
@@ -941,10 +1070,8 @@ mod tests {
         let sink: EventSink = Arc::new(move |event| {
             let _ = tx.send(event);
         });
-        let player = match opener {
-            Some(opener) => Player::spawn_with(factory, resolver, sink, opener),
-            None => Player::spawn(factory, resolver, sink),
-        };
+        let opener = opener.unwrap_or_else(default_opener);
+        let player = Player::spawn_with_options(factory, resolver, sink, opener, options);
         Harness {
             player,
             events,
@@ -1299,6 +1426,93 @@ mod tests {
         let played = h.played.lock().unwrap().clone();
         assert_eq!(played.len(), expected.len(), "no padding, nothing lost");
         assert!(played == expected, "one continuous run across the boundary");
+    }
+
+    fn decode_all(name: &str) -> Vec<f32> {
+        let mut samples = Vec::new();
+        let mut source = open_source(&Input::File(fixtures().join(name))).unwrap();
+        while source.read(&mut samples).unwrap() > 0 {}
+        samples
+    }
+
+    #[test]
+    fn replay_gain_scales_each_track_with_album_falling_back_to_track() {
+        let mut a = fixture_track("a", "gap_a.wav");
+        a.replay_gain_track_db = Some(-6.0);
+        a.replay_gain_album_db = None; // album mode falls back to the track value
+        let mut b = fixture_track("b", "gap_b.wav");
+        b.replay_gain_track_db = Some(-1.0);
+        b.replay_gain_album_db = Some(-12.0);
+        let h = harness_options(
+            vec![a, b],
+            PlayerOptions {
+                replay_gain: ReplayGain::Album,
+                ..PlayerOptions::default()
+            },
+        );
+        h.player.play(ids(&["a", "b"]), 0).unwrap();
+        collect_until(&h.events, Duration::from_secs(10), back_to_idle);
+
+        let first = decode_all("gap_a.wav");
+        let second = decode_all("gap_b.wav");
+        let played = h.played.lock().unwrap().clone();
+        assert_eq!(played.len(), first.len() + second.len());
+        let (gain_a, gain_b) = (10f32.powf(-6.0 / 20.0), 10f32.powf(-12.0 / 20.0));
+        for (heard, decoded) in played.iter().zip(&first) {
+            assert!((heard - decoded * gain_a).abs() < 1e-5);
+        }
+        for (heard, decoded) in played[first.len()..].iter().zip(&second) {
+            assert!((heard - decoded * gain_b).abs() < 1e-5);
+        }
+    }
+
+    #[test]
+    fn replay_gain_off_and_untagged_tracks_play_unchanged() {
+        let mut a = fixture_track("a", "gap_a.wav");
+        a.replay_gain_track_db = Some(-6.0);
+        let h = harness_options(vec![a], PlayerOptions::default());
+        h.player.play(ids(&["a"]), 0).unwrap();
+        collect_until(&h.events, Duration::from_secs(10), back_to_idle);
+        assert!(*h.played.lock().unwrap() == decode_all("gap_a.wav"));
+    }
+
+    #[test]
+    fn gapless_off_opens_the_next_track_after_the_end() {
+        let h = harness_options(
+            vec![
+                fixture_track("a", "gap_a.wav"),
+                fixture_track("b", "gap_b.wav"),
+            ],
+            PlayerOptions {
+                gapless: false,
+                ..PlayerOptions::default()
+            },
+        );
+        h.player.play(ids(&["a", "b"]), 0).unwrap();
+        let events = collect_until(&h.events, Duration::from_secs(10), back_to_idle);
+        assert_eq!(changes(&events), ids(&["a", "b"]));
+        let first = events
+            .iter()
+            .position(|e| matches!(e, PlayerEvent::TrackChanged(_)))
+            .unwrap();
+        assert!(
+            events[first..]
+                .iter()
+                .any(|e| is_state(e, PlayerStatus::Loading)),
+            "b was loaded after a ended, not pre-opened"
+        );
+    }
+
+    #[test]
+    fn starts_with_the_configured_volume() {
+        let h = harness_options(
+            Vec::new(),
+            PlayerOptions {
+                volume: 0.3,
+                ..PlayerOptions::default()
+            },
+        );
+        assert_eq!(h.player.state().volume, 0.3);
     }
 
     #[test]

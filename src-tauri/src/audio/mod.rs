@@ -9,6 +9,7 @@
 //! engine thread and hand them over with [`Playback::set_source`] / [`Playback::queue_next`].
 
 pub mod ffmpeg;
+pub mod gain;
 pub mod output;
 pub mod resample;
 pub mod ring;
@@ -75,6 +76,18 @@ pub struct Playback {
     frames_read: u64,
     /// A source error hit right after a hand-over, reported on the next pump.
     deferred_error: Option<anyhow::Error>,
+    /// Linear factor for the current source's samples (ReplayGain) and for `next`.
+    gain: f32,
+    next_gain: f32,
+}
+
+/// A finite, non-negative gain; anything else plays unchanged.
+fn sane_gain(gain: f32) -> f32 {
+    if gain.is_finite() && gain >= 0.0 {
+        gain
+    } else {
+        1.0
+    }
 }
 
 impl Playback {
@@ -111,6 +124,8 @@ impl Playback {
             base_ms: 0,
             frames_read: 0,
             deferred_error: None,
+            gain: 1.0,
+            next_gain: 1.0,
         })
     }
 
@@ -130,6 +145,8 @@ impl Playback {
         self.resampler = Some(Resampler::new(source.spec(), self.sink.spec())?);
         self.current = Some(source);
         self.next = None;
+        self.gain = 1.0;
+        self.next_gain = 1.0;
         self.deferred_error = None;
         self.clear_buffers();
         self.base_ms = 0;
@@ -138,8 +155,10 @@ impl Playback {
 
     /// Pre-opened source to continue with when the current one ends. With the same spec the
     /// sample boundary is continuous.
+    /// The next source starts at gain 1.0; see [`Playback::set_next_gain`].
     pub fn queue_next(&mut self, source: Option<Box<dyn AudioSource>>) {
         self.next = source;
+        self.next_gain = 1.0;
     }
 
     /// Stops playback and drops the current and next source.
@@ -170,6 +189,47 @@ impl Playback {
     pub fn set_paused(&mut self, paused: bool) {
         self.paused = paused;
         self.sink.set_paused(paused);
+    }
+
+    /// A linear factor applied to the current source's samples (ReplayGain), before the
+    /// output volume. Every new source starts at 1.0.
+    pub fn set_gain(&mut self, gain: f32) {
+        self.gain = sane_gain(gain);
+    }
+
+    /// The gain for the source queued with [`Playback::queue_next`]; it takes over with it.
+    pub fn set_next_gain(&mut self, gain: f32) {
+        self.next_gain = sane_gain(gain);
+    }
+
+    /// Moves playback to `device` (`None` = the system default) and continues at the same
+    /// position. A device that cannot be opened falls back to the default; without any
+    /// output it continues like a lost device (`pump` reports `NoDevice` and retries). `Err`
+    /// is a source error from seeking back to the position.
+    pub fn set_device(&mut self, device: Option<String>) -> anyhow::Result<()> {
+        let position = self.current.as_ref().map(|_| self.position_ms());
+        // Release the old device before opening the next one.
+        self.sink = Box::new(NullSink::new());
+        self.events = self.sink.errors();
+        let mut opened = self.factory.open(device.clone());
+        if opened.is_err() && device.is_some() {
+            opened = self.factory.open(None);
+        }
+        self.resume_ms = position;
+        match opened {
+            Ok(sink) => {
+                self.install(sink);
+                self.resume()
+            }
+            Err(err) => {
+                self.output_error = Some(format!("{err:#}"));
+                self.needs_reopen = true;
+                self.next_reopen = Instant::now() + self.reopen_backoff;
+                self.pending.clear();
+                self.pending_offset = 0;
+                Ok(())
+            }
+        }
     }
 
     /// Approximate position in the current source of the sample being heard.
@@ -269,6 +329,10 @@ impl Playback {
             let frames = guarded("decoding", || current.read(decoded))?;
             if frames > 0 {
                 self.frames_read += frames as u64;
+                if self.gain != 1.0 {
+                    let gain = self.gain;
+                    self.decoded.iter_mut().for_each(|sample| *sample *= gain);
+                }
                 resampler.process(&self.decoded, &mut self.pending)?;
                 continue;
             }
@@ -283,6 +347,7 @@ impl Playback {
                         self.resampler = Some(Resampler::new(next.spec(), self.sink.spec())?);
                     }
                     self.current = Some(next);
+                    self.gain = std::mem::replace(&mut self.next_gain, 1.0);
                     self.base_ms = 0;
                     self.frames_read = 0;
                     *status = PumpStatus::Advanced;
@@ -298,13 +363,18 @@ impl Playback {
     /// Opens the default output in place of the [`NullSink`].
     fn reopen(&mut self) -> anyhow::Result<()> {
         let sink = self.factory.open(None)?;
+        self.install(sink);
+        Ok(())
+    }
+
+    /// Makes `sink` the output, with the current volume and pause state.
+    fn install(&mut self, sink: Box<dyn OutputSink>) {
         self.needs_reopen = false;
         self.output_error = None;
         self.sink = sink;
         self.events = self.sink.errors();
         self.sink.set_volume(self.volume);
         self.sink.set_paused(self.paused);
-        Ok(())
     }
 
     /// Continues the current source at the remembered position on the new output.
@@ -389,6 +459,8 @@ mod tests {
         queues: Mutex<Vec<Arc<Mutex<Vec<f32>>>>>,
         /// While set, every open fails as if no device existed.
         fail: AtomicBool,
+        /// A device name that does not exist (opening it fails).
+        missing: Mutex<Option<String>>,
     }
 
     impl FakeFactory {
@@ -400,6 +472,7 @@ mod tests {
                 senders: Mutex::default(),
                 queues: Mutex::default(),
                 fail: AtomicBool::new(false),
+                missing: Mutex::default(),
             })
         }
 
@@ -410,9 +483,12 @@ mod tests {
 
     impl OutputFactory for FakeFactory {
         fn open(&self, device: Option<String>) -> anyhow::Result<Box<dyn OutputSink>> {
-            self.opened.lock().unwrap().push(device);
+            self.opened.lock().unwrap().push(device.clone());
             if self.fail.load(Ordering::SeqCst) {
                 anyhow::bail!("no default output device");
+            }
+            if device.is_some() && device == *self.missing.lock().unwrap() {
+                anyhow::bail!("no output device with that name");
             }
             let (tx, rx) = crossbeam_channel::unbounded();
             self.senders.lock().unwrap().push(tx);
@@ -654,12 +730,108 @@ mod tests {
         assert_eq!(playback.pump().unwrap(), PumpStatus::Finished);
     }
 
+    fn decode_all(name: &str) -> Vec<f32> {
+        let mut samples = Vec::new();
+        let mut source = wav(name);
+        while source.read(&mut samples).unwrap() > 0 {}
+        samples
+    }
+
+    #[test]
+    fn gain_scales_each_source_before_the_output() {
+        let factory = FakeFactory::new(STEREO_44K, usize::MAX);
+        let mut playback = Playback::new(factory.clone(), None).unwrap();
+        playback.set_source(wav("gap_a.wav")).unwrap();
+        playback.set_gain(0.5);
+        playback.queue_next(Some(wav("gap_b.wav")));
+        playback.set_next_gain(0.25);
+        assert_eq!(playback.pump().unwrap(), PumpStatus::Advanced);
+        assert_eq!(playback.pump().unwrap(), PumpStatus::Finished);
+
+        let a = decode_all("gap_a.wav");
+        let b = decode_all("gap_b.wav");
+        let played = factory.last_queue().lock().unwrap().clone();
+        assert_eq!(played.len(), a.len() + b.len());
+        for (heard, decoded) in played.iter().zip(&a) {
+            assert!((heard - decoded * 0.5).abs() < 1e-6);
+        }
+        for (heard, decoded) in played[a.len()..].iter().zip(&b) {
+            assert!(
+                (heard - decoded * 0.25).abs() < 1e-6,
+                "the next source has its own gain"
+            );
+        }
+    }
+
+    #[test]
+    fn a_new_source_starts_at_unity_gain() {
+        let factory = FakeFactory::new(STEREO_44K, usize::MAX);
+        let mut playback = Playback::new(factory.clone(), None).unwrap();
+        playback.set_source(wav("gap_a.wav")).unwrap();
+        playback.set_gain(0.5);
+        playback.set_source(wav("gap_a.wav")).unwrap();
+        playback.pump().unwrap();
+        let played = factory.last_queue().lock().unwrap().clone();
+        assert!(played == decode_all("gap_a.wav"));
+    }
+
+    #[test]
+    fn set_device_reopens_and_keeps_the_position() {
+        let factory = FakeFactory::new(STEREO_44K, 8_820);
+        let mut playback = Playback::new(factory.clone(), None).unwrap();
+        playback.set_source(wav("gap_a.wav")).unwrap();
+        for _ in 0..3 {
+            playback.pump().unwrap();
+            play_queue(&factory);
+        }
+        playback.pump().unwrap();
+        let position = playback.position_ms();
+        assert!(position >= 290, "{position} ms played");
+
+        playback.set_device(Some("USB DAC".into())).unwrap();
+        assert_eq!(
+            factory.opened.lock().unwrap().last().cloned(),
+            Some(Some("USB DAC".to_string()))
+        );
+        assert!(playback.position_ms().abs_diff(position) <= 1);
+        assert_eq!(playback.pump().unwrap(), PumpStatus::Playing);
+        let played = factory.last_queue().lock().unwrap().clone();
+        let expected = decode_all("gap_a.wav");
+        let offset = (position as usize * 44_100 / 1000) * 2;
+        assert_eq!(
+            played[..1000],
+            expected[offset..offset + 1000],
+            "the new device continues where the old one was"
+        );
+    }
+
+    #[test]
+    fn a_missing_device_falls_back_to_the_default() {
+        let factory = FakeFactory::new(STEREO_44K, 8_820);
+        *factory.missing.lock().unwrap() = Some("Gone".into());
+        let mut playback = Playback::new(factory.clone(), None).unwrap();
+        playback.set_source(wav("gap_a.wav")).unwrap();
+        playback.set_device(Some("Gone".into())).unwrap();
+        assert_eq!(
+            *factory.opened.lock().unwrap(),
+            vec![None, Some("Gone".to_string()), None],
+            "the named device, then the default"
+        );
+        assert!(playback.output_error().is_none());
+        assert_eq!(playback.pump().unwrap(), PumpStatus::Playing);
+        assert!(!factory.last_queue().lock().unwrap().is_empty());
+    }
+
     /// Manual check on real hardware: `cargo test -- --ignored smoke_plays`.
     #[test]
     #[ignore = "needs an audio output device"]
     fn smoke_plays_tone_on_default_device() {
         let mut playback = Playback::new(Arc::new(CpalOutputFactory), None).unwrap();
-        assert_eq!(playback.output_error(), None, "no output device could be opened");
+        assert_eq!(
+            playback.output_error(),
+            None,
+            "no output device could be opened"
+        );
         println!("output spec: {:?}", playback.output_spec());
         playback.set_source(wav("tagged.flac")).unwrap();
         let started = std::time::Instant::now();

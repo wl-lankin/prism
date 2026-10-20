@@ -5,6 +5,7 @@ pub mod library;
 pub mod media_controls;
 pub mod player;
 pub mod protocol;
+pub mod settings;
 pub mod tools;
 pub mod window;
 
@@ -19,7 +20,11 @@ use library::covers::CoverStore;
 use library::scan::lock;
 use library::{query, tauri_emitter, watch, Library};
 use media_controls::MediaBridge;
-use player::{fan_out, tauri_sink, with_dropped, DroppedFiles, Player, Resolver};
+use player::{
+    default_opener, fan_out, tauri_sink, with_dropped, DroppedFiles, Player, PlayerOptions,
+    Resolver,
+};
+use settings::SettingsStore;
 
 /// Shared backend state, managed by Tauri.
 pub struct AppState {
@@ -27,6 +32,7 @@ pub struct AppState {
     pub player: Player,
     /// Files dropped onto the window, playable without indexing.
     pub dropped: Arc<DroppedFiles>,
+    pub settings: Arc<SettingsStore>,
 }
 
 /// Resolves queue entries against the library database.
@@ -71,21 +77,36 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
         .join("covers");
     let cover_dir = cover_cache.join("original");
 
+    let config_dir = app
+        .path()
+        .app_config_dir()
+        .context("resolving the app config dir")?;
+    let settings = Arc::new(SettingsStore::load(&config_dir.join("settings.json")));
+    let initial = settings.get();
+
     let db = Arc::new(Db::open(&data_dir.join("library.db"))?);
     let library = Arc::new(Library::new(db, Arc::new(CoverStore::new(cover_dir))));
     let folders = library.folders()?;
     let handle = app.handle().clone();
     let media = MediaBridge::new();
     let dropped = Arc::new(DroppedFiles::new(Some(Arc::clone(&library.covers))));
-    let player = Player::spawn(
+    let player = Player::spawn_with_options(
         Arc::new(CpalOutputFactory),
         with_dropped(Arc::clone(&dropped), library_resolver(&library)),
         fan_out(vec![tauri_sink(handle.clone()), media.sink()]),
+        default_opener(),
+        PlayerOptions {
+            volume: initial.volume,
+            device: initial.output_device,
+            gapless: initial.gapless,
+            replay_gain: initial.replay_gain,
+        },
     );
     app.manage(AppState {
         library: Arc::clone(&library),
         player,
         dropped,
+        settings,
     });
     media.start(handle.clone(), main_window_handle(app), cover_cache);
 
@@ -127,6 +148,9 @@ pub fn run() {
             commands::library_track_count,
             commands::library_tracks_range,
             commands::library_search,
+            commands::settings_get,
+            commands::settings_set,
+            commands::audio_devices,
             window::window_vibrancy,
         ])
         .run(tauri::generate_context!())

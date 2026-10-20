@@ -7,12 +7,14 @@ use std::sync::Arc;
 use rusqlite::Connection;
 use tauri::{AppHandle, Manager, State};
 
+use crate::audio::list_devices;
 use crate::library::model::{Album, Artist, Folder, Track};
 use crate::library::query::{self, SearchResult};
 use crate::library::scan::{lock, ScanReport};
 use crate::library::watch::{FolderWatcher, WatchState};
 use crate::library::{normalize, tauri_emitter, Library};
 use crate::player::PlayerState;
+use crate::settings::Settings;
 use crate::AppState;
 
 /// Upper bound for `library_search` and `library_tracks_range` page sizes.
@@ -202,4 +204,39 @@ pub async fn library_tracks_range(
 pub async fn library_search(app: AppHandle, q: String, limit: u32) -> Result<SearchResult, String> {
     let limit = limit.min(MAX_PAGE);
     read(&app, move |conn| query::search(conn, &q, limit)).await
+}
+
+// Settings
+
+#[tauri::command]
+pub fn settings_get(state: State<'_, AppState>) -> Result<Settings, String> {
+    Ok(state.settings.get())
+}
+
+/// Merges `patch` into the settings, saves them and applies what changed to the player.
+#[tauri::command]
+pub async fn settings_set(app: AppHandle, patch: serde_json::Value) -> Result<Settings, String> {
+    let store = Arc::clone(&app.state::<AppState>().settings);
+    let before = store.get();
+    let after = blocking(move || store.set(patch)).await?;
+    let player = &app.state::<AppState>().player;
+    if after.volume != before.volume {
+        player.set_volume(after.volume)?;
+    }
+    if after.output_device != before.output_device {
+        player.set_device(after.output_device.clone())?;
+    }
+    if after.gapless != before.gapless {
+        player.set_gapless(after.gapless)?;
+    }
+    if after.replay_gain != before.replay_gain {
+        player.set_replay_gain(after.replay_gain)?;
+    }
+    Ok(after)
+}
+
+/// Names of the output devices, as `outputDevice` takes them.
+#[tauri::command]
+pub async fn audio_devices() -> Result<Vec<String>, String> {
+    blocking(|| Ok(list_devices())).await
 }

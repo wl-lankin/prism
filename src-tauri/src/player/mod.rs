@@ -10,8 +10,8 @@ use tauri::{AppHandle, Emitter};
 
 pub use dropped::{with_dropped, DroppedFiles, DROPPED_PREFIX};
 pub use engine::{
-    default_opener, EventSink, Opener, Player, PlayerError, PlayerEvent, PlayerState, PlayerStatus,
-    Resolver, DEFAULT_VOLUME, PRELOAD_MS, RESTART_AFTER_MS,
+    default_opener, track_gain, EventSink, Opener, Player, PlayerError, PlayerEvent, PlayerOptions,
+    PlayerState, PlayerStatus, Resolver, DEFAULT_VOLUME, PRELOAD_MS, RESTART_AFTER_MS,
 };
 pub use queue::Queue;
 
