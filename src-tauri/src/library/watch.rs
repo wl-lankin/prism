@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -8,7 +9,7 @@ use notify_debouncer_mini::{new_debouncer, DebounceEventResult, Debouncer};
 use tauri::{AppHandle, Manager};
 
 use super::covers::folder_cover_rank;
-use super::scan::is_audio_file;
+use super::scan::{self, is_audio_file};
 use super::{tauri_emitter, Library, LibraryEvent};
 use crate::AppState;
 
@@ -73,11 +74,33 @@ pub fn is_relevant(path: &Path, is_dir: bool) -> bool {
     is_dir || is_audio_file(path) || folder_cover_rank(path).is_some()
 }
 
+/// Extensions of files that are never audio or covers and are common as temp or side files.
+const IGNORED_EXTENSIONS: &[&str] = &[
+    "tmp",
+    "part",
+    "crdownload",
+    "partial",
+    "txt",
+    "log",
+    "nfo",
+    "db",
+    "ini",
+    "m3u",
+    "cue",
+];
+
 /// `is_relevant` for a path from a watcher event. A deleted path cannot be asked whether it
-/// was a directory; one without an extension is assumed to have been one.
+/// was a directory (and a folder name may contain a dot: "Vol. 2"), so a path that no longer
+/// exists is relevant unless it has a known side-file extension: a spurious rescan is cheap.
 fn event_is_relevant(path: &Path) -> bool {
-    let is_dir = path.is_dir() || (!path.exists() && path.extension().is_none());
-    is_relevant(path, is_dir)
+    if path.exists() {
+        return is_relevant(path, path.is_dir());
+    }
+    let ignored = path
+        .extension()
+        .map(|ext| ext.to_string_lossy().to_lowercase())
+        .is_some_and(|ext| IGNORED_EXTENSIONS.contains(&ext.as_str()));
+    !ignored
 }
 
 /// Watches library folders recursively and reports, per debounce window, each library
@@ -170,31 +193,69 @@ pub struct WatchState(pub Mutex<Option<FolderWatcher>>);
 /// How often offline folders are checked for coming back.
 pub const OFFLINE_RECHECK: Duration = Duration::from_secs(60);
 
-/// Brings back every offline folder that is readable again: it is watched (via `watch`) and
-/// rescanned, which marks it online and emits `Changed`.
+/// The names and modification times of a folder's direct entries, sorted: a cheap
+/// fingerprint of its root listing.
+pub type Listing = Vec<(String, Option<i64>)>;
+
+/// What `recheck_offline` remembers per folder that is readable but still failed its scan.
+pub type OfflineMemo = HashMap<PathBuf, Listing>;
+
+fn root_listing(folder: &Path) -> std::io::Result<Listing> {
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(folder)? {
+        let entry = entry?;
+        let mtime = entry.metadata().ok().map(|meta| scan::file_stamp(&meta).0);
+        entries.push((entry.file_name().to_string_lossy().into_owned(), mtime));
+    }
+    entries.sort();
+    Ok(entries)
+}
+
+/// Brings back offline folders that are readable again: such a folder is rescanned, and once
+/// that brings it online it is watched (via `watch`) and `Changed` is emitted. A folder that
+/// is readable but fails the scan again (an empty mount point) is remembered by its root
+/// listing in `memo` and not rescanned until that listing changes. Returns the number of
+/// scans run.
 pub fn recheck_offline(
     library: &Library,
+    memo: &mut OfflineMemo,
     watch: &mut dyn FnMut(&Path) -> anyhow::Result<()>,
     emit: &dyn Fn(LibraryEvent),
-) {
+) -> usize {
     let offline = match library.offline_folders() {
         Ok(folders) => folders,
         Err(err) => {
             eprintln!("listing offline folders failed: {err:#}");
-            return;
+            return 0;
         }
     };
+    memo.retain(|folder, _| offline.contains(folder));
+    let mut scans = 0;
     for folder in offline {
-        if !folder.is_dir() || std::fs::read_dir(&folder).is_err() {
+        let listing = match root_listing(&folder) {
+            Ok(listing) if folder.is_dir() => listing,
+            _ => {
+                memo.remove(&folder);
+                continue;
+            }
+        };
+        if memo.get(&folder) == Some(&listing) {
             continue;
         }
-        if let Err(err) = watch(&folder) {
-            eprintln!("{err:#}");
-        }
+        scans += 1;
         if let Err(err) = library.rescan_folder(&folder, emit) {
             eprintln!("rescanning {} failed: {err:#}", folder.display());
         }
+        if matches!(library.online(&scan::folder_key(&folder)), Ok(Some(true))) {
+            memo.remove(&folder);
+            if let Err(err) = watch(&folder) {
+                eprintln!("{err:#}");
+            }
+        } else {
+            memo.insert(folder, listing);
+        }
     }
+    scans
 }
 
 /// Starts watching `folders`; each change rescans only the affected folder after the
@@ -230,18 +291,32 @@ pub fn start(app: AppHandle, folders: Vec<PathBuf>) {
     app.manage(WatchState(Mutex::new(watcher)));
 
     let handle = app.clone();
-    std::thread::spawn(move || loop {
-        std::thread::sleep(OFFLINE_RECHECK);
-        let state = handle.state::<AppState>();
-        let watch_state = handle.state::<WatchState>();
-        let mut watch = |folder: &Path| match watch_state.0.lock() {
-            Ok(mut guard) => match guard.as_mut() {
-                Some(watcher) => watcher.rewatch(folder),
-                None => Ok(()),
-            },
-            Err(_) => Err(poisoned()),
-        };
-        recheck_offline(&state.library, &mut watch, &tauri_emitter(handle.clone()));
+    std::thread::spawn(move || {
+        let mut memo = OfflineMemo::new();
+        loop {
+            std::thread::sleep(OFFLINE_RECHECK);
+            // A panic in one cycle is logged; the next cycle still runs.
+            let cycle = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let state = handle.state::<AppState>();
+                let watch_state = handle.state::<WatchState>();
+                let mut watch = |folder: &Path| match watch_state.0.lock() {
+                    Ok(mut guard) => match guard.as_mut() {
+                        Some(watcher) => watcher.rewatch(folder),
+                        None => Ok(()),
+                    },
+                    Err(_) => Err(poisoned()),
+                };
+                recheck_offline(
+                    &state.library,
+                    &mut memo,
+                    &mut watch,
+                    &tauri_emitter(handle.clone()),
+                );
+            }));
+            if cycle.is_err() {
+                eprintln!("the offline folder check panicked; continuing");
+            }
+        }
     });
 }
 
@@ -267,34 +342,79 @@ mod tests {
     }
 
     #[test]
-    fn offline_folders_come_back_when_readable() {
+    fn deleted_folder_with_a_dot_is_relevant() {
+        let dir = tempfile::tempdir().unwrap();
+        let gone = dir.path().join("Album 2.0");
+        assert!(!gone.exists());
+        assert!(event_is_relevant(&gone));
+        assert!(event_is_relevant(&dir.path().join("Vol. 2")));
+        assert!(!event_is_relevant(&dir.path().join("a.flac.tmp")));
+        assert!(!event_is_relevant(&dir.path().join("movie.part")));
+        assert!(!event_is_relevant(&dir.path().join("notes.txt")));
+    }
+
+    #[test]
+    fn empty_mount_is_scanned_once_and_a_new_file_brings_it_back() {
         let (library, _covers) = library();
         let dir = copy_fixtures(&["corrupt.flac"]);
         library.add_folder(dir.path(), &|_| {}).unwrap();
+        let mount = dir.path().to_path_buf();
+        for entry in std::fs::read_dir(&mount).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                std::fs::remove_dir_all(path).unwrap();
+            } else {
+                std::fs::remove_file(path).unwrap();
+            }
+        }
+        // The empty-mount guard marks it offline.
+        library.rescan_folder(&mount, &|_| {}).unwrap();
+        assert_eq!(library.offline_folders().unwrap(), vec![mount.clone()]);
+
         let gone = tempfile::tempdir().unwrap().path().join("unplugged");
-        {
-            let conn = library.db.0.lock().unwrap();
-            conn.execute("UPDATE folders SET online = 0", []).unwrap();
-            conn.execute(
+        library
+            .db
+            .0
+            .lock()
+            .unwrap()
+            .execute(
                 "INSERT INTO folders (path, online) VALUES (?1, 0)",
                 [gone.to_string_lossy()],
             )
             .unwrap();
-        }
 
         let watched = std::cell::RefCell::new(Vec::new());
         let events = std::cell::RefCell::new(Vec::new());
-        recheck_offline(
-            &library,
-            &mut |folder| {
-                watched.borrow_mut().push(folder.to_path_buf());
-                Ok(())
-            },
-            &|event| events.borrow_mut().push(event),
+        let mut memo = OfflineMemo::new();
+        let cycle = |memo: &mut OfflineMemo| {
+            recheck_offline(
+                &library,
+                memo,
+                &mut |folder| {
+                    watched.borrow_mut().push(folder.to_path_buf());
+                    Ok(())
+                },
+                &|event| events.borrow_mut().push(event),
+            )
+        };
+        let scans: usize = (0..3).map(|_| cycle(&mut memo)).sum();
+        assert_eq!(scans, 1);
+        assert!(watched.borrow().is_empty());
+        assert!(
+            events.borrow().is_empty(),
+            "a re-failed guard emits nothing"
         );
-        assert_eq!(watched.into_inner(), vec![dir.path().to_path_buf()]);
-        assert!(events.into_inner().contains(&LibraryEvent::Changed));
+
+        std::fs::copy(
+            crate::library::tags::fixtures().join("tagged.mp3"),
+            mount.join("tagged.mp3"),
+        )
+        .unwrap();
+        assert_eq!(cycle(&mut memo), 1);
+        assert_eq!(*watched.borrow(), vec![mount.clone()]);
+        assert!(events.borrow().contains(&LibraryEvent::Changed));
         assert_eq!(library.offline_folders().unwrap(), vec![gone]);
+        assert_eq!(cycle(&mut memo), 0);
     }
 
     #[test]

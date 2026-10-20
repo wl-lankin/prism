@@ -130,6 +130,9 @@ impl Library {
         tx.execute("DELETE FROM folders WHERE path = ?1", [&key])?;
         tx.commit()?;
         drop(conn);
+        if let Ok(mut stamps) = self.failed_stamps.lock() {
+            stamps.retain(|path, _| !Path::new(path).starts_with(&key));
+        }
         emit(LibraryEvent::Changed);
         Ok(())
     }
@@ -420,6 +423,25 @@ pub(crate) mod tests {
             ),
             0
         );
+    }
+
+    #[test]
+    fn remove_folder_forgets_its_failed_stamps() {
+        let (library, _covers) = library();
+        let dir = copy_fixtures(&[]);
+        let other = copy_fixtures(&["corrupt.flac"]);
+        library.add_folder(dir.path(), &|_| {}).unwrap();
+        library.add_folder(other.path(), &|_| {}).unwrap();
+        let stamp_of = |folder: &Path| folder.join("corrupt.flac").to_string_lossy().into_owned();
+        {
+            let mut stamps = library.failed_stamps.lock().unwrap();
+            assert!(stamps.contains_key(&stamp_of(dir.path())));
+            stamps.insert(stamp_of(other.path()), (1, 1));
+        }
+        library.remove_folder(dir.path(), &|_| {}).unwrap();
+        let stamps = library.failed_stamps.lock().unwrap();
+        assert!(!stamps.contains_key(&stamp_of(dir.path())));
+        assert!(stamps.contains_key(&stamp_of(other.path())));
     }
 
     #[test]
