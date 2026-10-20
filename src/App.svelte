@@ -24,7 +24,8 @@
   import { initPlayer, player } from './lib/stores/player.svelte';
   import { initSettings } from './lib/stores/settings.svelte';
 
-  /** The Flow ring sits half out of the transport strip: centred on its top edge. */
+  /** The Flow ring hangs half out below the app's bottom edge, into the transparent strip
+   *  at the bottom of the window. */
   const RING = 84;
   const isMac = typeof navigator !== 'undefined' && /Mac/.test(navigator.platform || navigator.userAgent);
 
@@ -144,7 +145,7 @@
   <ViewHead title={t('nav.albums')} meta={tc('view.count.albums', library.albums?.length ?? 0)} />
 {/snippet}
 
-<div class="window" class:glass data-tauri-drag-region>
+<div class="window" class:glass data-tauri-drag-region style="--ring-size:{RING}px">
   <!-- First in the DOM so the main control comes early in the tab order; placed by CSS. -->
   <div class="ring-dock" style="--ring:{RING}px">
     <div class="notice" class:shown={notice.text} role="status" aria-live="polite">{notice.text ?? ''}</div>
@@ -231,24 +232,23 @@
     overflow: hidden;
   }
 
-  /* On a glass material the page itself turns see-through; without one it stays opaque. */
-  :global(html[data-vibrancy='on']),
-  :global(html[data-vibrancy='on'] body) {
+  /* The window is transparent: only the app card and the Flow ring are painted. */
+  :global(html),
+  :global(body) {
     background: transparent;
   }
 
-  /* The app fills the whole window: no frame around it, so it never reads as a window
-     inside a window. The OS draws the window edge, corners and shadow. */
+  /* The app card fills the window's width and top; there is no frame around it, so it never
+     reads as a window inside a window. Below the card a transparent strip half a ring high
+     lets the Flow ring hang out of the card's bottom edge. */
   .window {
+    --frame-bottom: calc(var(--ring-size) / 2);
     position: fixed;
     inset: 0;
-    background: var(--bg);
+    padding-bottom: var(--frame-bottom);
+    background: transparent;
     user-select: none;
     -webkit-user-select: none;
-  }
-
-  .window.glass {
-    background: rgba(13, 13, 16, 0.38);
   }
 
   .card {
@@ -257,7 +257,9 @@
     display: grid;
     grid-template-columns: 220px minmax(0, 1fr);
     grid-template-rows: minmax(0, 1fr) auto;
+    border-radius: 8px 8px var(--radius-l) var(--radius-l);
     background: var(--surface);
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.07);
     overflow: hidden;
   }
 
@@ -399,23 +401,24 @@
   .ring-dock {
     position: absolute;
     left: 50%;
-    /* Centred on the top edge of the 84 px transport strip: the lower half sits in the strip,
-       the upper half rises into the content above it. */
-    bottom: calc(84px - var(--ring) / 2);
+    /* Centred on the card's bottom edge: the upper half sits in the transport strip, the
+       lower half hangs out of the app into the transparent strip below. */
+    bottom: 0;
     width: var(--ring);
     height: var(--ring);
     transform: translateX(-50%);
     z-index: 3;
     border-radius: 50%;
-    /* A notch around the ring, so it reads as set into the strip's edge. */
+    /* A dark bezel, so the ring reads as set into the card's edge. */
     box-shadow: 0 0 0 6px var(--bg);
     background: var(--bg);
   }
 
-  /* Always in the DOM as a live region; only its text changes. It floats above the ring. */
+  /* Always in the DOM as a live region; only its text changes. It floats above the seek
+     rail (the strip is 84 px, the ring's upper half 42 px of it). */
   .notice {
     position: absolute;
-    bottom: calc(100% + 14px);
+    bottom: calc(100% + 42px + 14px);
     left: 50%;
     transform: translate(-50%, 4px);
     pointer-events: none;
