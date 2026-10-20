@@ -399,6 +399,11 @@ impl Engine {
     }
 
     fn handle(&mut self, command: Command) {
+        // Nothing to skip while idle (play/toggle start the queue); an ignored command
+        // changes nothing and emits nothing.
+        if matches!(command, Command::Next | Command::Prev) && self.status == PlayerStatus::Idle {
+            return;
+        }
         self.dirty = true;
         match command {
             Command::Play(ids, start) => {
@@ -406,8 +411,6 @@ impl Engine {
                 self.start_current(true);
             }
             Command::Toggle => self.toggle(),
-            // Nothing to skip while idle: play/toggle start the queue.
-            Command::Next | Command::Prev if self.status == PlayerStatus::Idle => {}
             Command::Next => {
                 self.settle_handover();
                 if self.queue.advance() {
@@ -492,10 +495,10 @@ impl Engine {
             return;
         };
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
-        // The track is known once the opener has resolved it.
+        // The track is known once the opener has resolved it. Until then the previous
+        // track stays shown (its tail may still be playing); only a start from idle shows
+        // nothing.
         self.current = None;
-        self.shown = None;
-        self.shown_index = self.queue.index();
         self.status = PlayerStatus::Loading;
         let job = OpenJob {
             generation,
@@ -560,6 +563,7 @@ impl Engine {
                     Ok((track, source)) => {
                         self.current = Some(track.clone());
                         self.shown = Some(track);
+                        self.shown_index = self.queue.index();
                         self.dirty = true;
                         self.ready = Some(source);
                     }
@@ -1121,6 +1125,56 @@ mod tests {
     }
 
     #[test]
+    fn manual_next_keeps_a_track_shown() {
+        let tracks: Vec<Track> = ["long1", "long2"]
+            .iter()
+            .map(|id| {
+                let mut track = fixture_track(id, "tagged.flac");
+                track.duration_ms = SILENCE_MS;
+                track
+            })
+            .collect();
+        let opener: Opener = Arc::new(|_track: &Track, _spec: StreamSpec| {
+            Ok(Box::new(Silence {
+                frames_left: SILENCE_MS * 44_100 / 1000,
+            }) as Box<dyn AudioSource>)
+        });
+        let h = harness(tracks, FAST, Some(opener));
+        h.player.play(ids(&["long1", "long2"]), 0).unwrap();
+        collect_until(&h.events, Duration::from_secs(5), |seen| {
+            changes(seen) == ids(&["long1"])
+        });
+        h.player.next().unwrap();
+        let events = collect_until(&h.events, Duration::from_secs(5), |seen| {
+            seen.iter().any(|e| {
+                matches!(e, PlayerEvent::State(s)
+                    if s.status == PlayerStatus::Playing
+                        && s.track.as_ref().is_some_and(|t| t.id == "long2"))
+            })
+        });
+        let states: Vec<&PlayerState> = events
+            .iter()
+            .filter_map(|e| match e {
+                PlayerEvent::State(state) => Some(state),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            states.iter().any(|s| s.status == PlayerStatus::Loading),
+            "the skip went through loading"
+        );
+        for state in &states {
+            let track = state
+                .track
+                .as_ref()
+                .expect("a track is shown while skipping");
+            // The index always belongs to the track that is shown.
+            let expected = if track.id == "long1" { 0 } else { 1 };
+            assert_eq!(state.queue_index, expected, "{state:#?}");
+        }
+    }
+
+    #[test]
     fn next_and_prev_do_nothing_while_idle() {
         let h = harness(
             vec![
@@ -1137,8 +1191,8 @@ mod tests {
         std::thread::sleep(Duration::from_millis(300));
         let later: Vec<PlayerEvent> = h.events.try_iter().collect();
         assert!(
-            later.iter().all(|e| is_state(e, PlayerStatus::Idle)),
-            "{later:#?}"
+            later.is_empty(),
+            "ignored commands emit nothing: {later:#?}"
         );
         assert_eq!(h.player.state().status, PlayerStatus::Idle);
     }
