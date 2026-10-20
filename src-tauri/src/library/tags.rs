@@ -12,7 +12,7 @@ use symphonia::core::formats::{FormatOptions, TrackType};
 use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
 use symphonia::core::meta::MetadataOptions;
 
-use super::model::{album_id, track_id, Source, Track};
+use super::model::{album_id, Source, Track};
 
 pub const UNKNOWN_ARTIST: &str = "Unknown artist";
 pub const UNKNOWN_ALBUM: &str = "Unknown album";
@@ -96,7 +96,8 @@ fn build(path: &Path, extension: &str, f: Fields, embedded_cover: Option<Vec<u8>
     let album_artist = f.album_artist.unwrap_or_else(|| artist.clone());
     let album = f.album.unwrap_or_else(|| UNKNOWN_ALBUM.to_string());
     let track = Track {
-        id: track_id(path),
+        // The caller sets the id: library scans and dropped files use different schemes.
+        id: String::new(),
         source: Source::Local,
         album_id: album_id(&album_artist, &album),
         title,

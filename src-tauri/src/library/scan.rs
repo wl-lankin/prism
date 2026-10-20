@@ -94,11 +94,32 @@ struct Pending {
 /// marked offline and its tracks are kept. A folder that is not registered in `folders`
 /// (for example one just removed) is left alone and yields an empty report. Callers
 /// serialize scans (see `Library`), so the registration check cannot race a removal.
+///
+/// A folder whose walk finds no audio file while it has indexed tracks is treated the same
+/// way (an empty mount point of a NAS share looks exactly like that): it goes offline and
+/// nothing is removed.
 pub fn scan_folder(
     db: &Db,
     covers: &CoverStore,
     folder: &Path,
     progress: impl Fn(ScanProgress),
+) -> anyhow::Result<ScanReport> {
+    scan_folder_with(db, covers, folder, progress, &|dir| {
+        std::fs::read_dir(dir).map(|_| ())
+    })
+}
+
+/// The message of the `failed` entry a scan reports when the empty mount guard fires.
+pub const EMPTY_FOLDER_OFFLINE: &str = "no audio files found; treated as offline";
+
+/// `scan_folder` with the root listing check injectable (tests simulate a folder that
+/// exists but cannot be listed).
+fn scan_folder_with(
+    db: &Db,
+    covers: &CoverStore,
+    folder: &Path,
+    progress: impl Fn(ScanProgress),
+    can_list: &dyn Fn(&Path) -> std::io::Result<()>,
 ) -> anyhow::Result<ScanReport> {
     let key = folder_key(folder);
     let mut report = ScanReport::default();
@@ -108,7 +129,7 @@ pub fn scan_folder(
     }
     reconcile_albums(db)?;
 
-    if !folder.is_dir() || std::fs::read_dir(folder).is_err() {
+    if !folder.is_dir() || can_list(folder).is_err() {
         let conn = lock(db)?;
         set_online(&conn, &key, false)?;
         return Ok(report);
@@ -152,12 +173,22 @@ pub fn scan_folder(
     }
 
     let indexed = load_indexed(db, &key)?;
+    if found.is_empty() && !indexed.is_empty() {
+        // Mass-deletion guard: an empty walk over a folder with indexed tracks is far more
+        // likely an unmounted share or a failed listing than a deliberately emptied library.
+        let conn = lock(db)?;
+        set_online(&conn, &key, false)?;
+        report.failed.push((key, EMPTY_FOLDER_OFFLINE.to_string()));
+        return Ok(report);
+    }
     let total = found.len() as u32;
     let mut done = 0u32;
     let mut seen: HashSet<String> = HashSet::with_capacity(found.len());
     let mut pending: Vec<Pending> = Vec::new();
     for (path, mtime, size) in found {
-        let id = track_id(&path);
+        // The walk yields paths below `folder`, so the prefix always strips.
+        let relative = path.strip_prefix(folder).unwrap_or(&path);
+        let id = track_id(&key, relative);
         if !seen.insert(id.clone()) {
             continue;
         }
@@ -184,6 +215,7 @@ pub fn scan_folder(
             .par_iter()
             .map(|item| {
                 let mut meta = tags::read(&item.path)?;
+                meta.track.id = item.id.clone();
                 // Cover order: embedded art first, then a cover file in the folder.
                 let embedded = meta
                     .embedded_cover
@@ -611,7 +643,7 @@ pub(crate) mod tests {
         let h = harness();
         let report = h.scan(&fixtures());
         let corrupt = fixtures().join("corrupt.flac");
-        let corrupt_id = track_id(&corrupt);
+        let corrupt_id = id_in(&fixtures(), &corrupt);
         let failed = report
             .failed
             .iter()
@@ -646,6 +678,98 @@ pub(crate) mod tests {
         assert_eq!(report.removed, 0);
         assert_eq!(h.count("SELECT COUNT(*) FROM tracks"), before);
         assert_eq!(h.count("SELECT online FROM folders"), 0);
+    }
+
+    /// The id `scan_folder` gives `path` inside the library folder `folder`.
+    pub(crate) fn id_in(folder: &Path, path: &Path) -> String {
+        track_id(&folder_key(folder), path.strip_prefix(folder).unwrap())
+    }
+
+    const EMPTY_MOUNT: &str = "no audio files found; treated as offline";
+
+    #[test]
+    fn empty_mount_point_keeps_tracks() {
+        let h = harness();
+        let dir = copy_fixtures(&["corrupt.flac"]);
+        let folder = dir.path().to_path_buf();
+        h.scan(&folder);
+        let before = h.count("SELECT COUNT(*) FROM tracks");
+        assert!(before >= 10);
+        // A NAS mount point that is present but empty: the directory exists, the files do not.
+        for entry in std::fs::read_dir(&folder).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                std::fs::remove_dir_all(&path).unwrap();
+            } else {
+                std::fs::remove_file(&path).unwrap();
+            }
+        }
+        assert!(folder.is_dir());
+        let report = h.scan(&folder);
+        assert_eq!(report.removed, 0, "{report:?}");
+        assert_eq!(h.count("SELECT COUNT(*) FROM tracks"), before);
+        assert_eq!(h.count("SELECT online FROM folders"), 0);
+        assert_eq!(
+            report.failed,
+            vec![(folder_key(&folder), EMPTY_MOUNT.to_string())]
+        );
+    }
+
+    #[test]
+    fn empty_folder_without_tracks_stays_online() {
+        let h = harness();
+        let dir = tempfile::tempdir().unwrap();
+        let report = h.scan(dir.path());
+        assert_eq!(report, ScanReport::default());
+        assert_eq!(h.count("SELECT online FROM folders"), 1);
+    }
+
+    #[test]
+    fn unreadable_existing_folder_keeps_tracks() {
+        let h = harness();
+        let dir = copy_fixtures(&["corrupt.flac"]);
+        let folder = dir.path().to_path_buf();
+        h.scan(&folder);
+        let before = h.count("SELECT COUNT(*) FROM tracks");
+        assert!(before >= 10);
+        assert!(folder.is_dir());
+        let denied = |_: &Path| -> std::io::Result<()> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "access denied",
+            ))
+        };
+        let report = scan_folder_with(&h.db, &h.covers, &folder, |_| {}, &denied).unwrap();
+        assert_eq!(report.removed, 0);
+        assert_eq!(h.count("SELECT COUNT(*) FROM tracks"), before);
+        assert_eq!(h.count("SELECT online FROM folders"), 0);
+    }
+
+    #[test]
+    fn rescan_after_rekey_is_unchanged() {
+        let h = harness();
+        let dir = copy_fixtures(&["corrupt.flac"]);
+        let first = h.scan(dir.path());
+        assert!(first.added >= 10, "{first:?}");
+        let total = h.count("SELECT COUNT(*) FROM tracks");
+        {
+            let mut conn = h.db.0.lock().unwrap();
+            let tx = conn.transaction().unwrap();
+            // Back to M1-style ids, then through the migration step.
+            tx.execute("UPDATE tracks SET id = 'local:m1-' || row_id", [])
+                .unwrap();
+            crate::db::rekey::migrate_0003(&tx).unwrap();
+            tx.commit().unwrap();
+        }
+        assert_eq!(
+            h.count("SELECT COUNT(*) FROM tracks WHERE id LIKE 'local:m1-%'"),
+            0
+        );
+        let second = h.scan(dir.path());
+        assert_eq!(second.added, 0, "{second:?}");
+        assert_eq!(second.updated, 0, "{second:?}");
+        assert_eq!(second.removed, 0, "{second:?}");
+        assert_eq!(second.unchanged as i64, total);
     }
 
     #[test]
@@ -742,7 +866,7 @@ pub(crate) mod tests {
             .unwrap()
             .execute(
                 "UPDATE tracks SET duration_ms = 0 WHERE id = ?1",
-                [track_id(&wma)],
+                [id_in(dir.path(), &wma)],
             )
             .unwrap();
         let report = h.scan(dir.path());
@@ -775,7 +899,7 @@ pub(crate) mod tests {
                         duration_ms, format, path, folder, mtime, size)
                      VALUES (?1, 'local', ?2, 'A', 'A', 'B', 'local:b', 1000, 'mp3', ?3, ?4, ?5, ?6)",
                     params![
-                        track_id(path),
+                        id_in(&folder, path),
                         format!("Track {i}"),
                         path.to_string_lossy(),
                         key,

@@ -1,3 +1,5 @@
+pub mod rekey;
+
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -14,6 +16,7 @@ pub enum Migration {
 const MIGRATIONS: &[Migration] = &[
     Migration::Sql(include_str!("migrations/0001_init.sql")),
     Migration::Sql(include_str!("migrations/0002_indexes.sql")),
+    Migration::Rust(rekey::migrate_0003),
 ];
 
 /// Track upserts must use `INSERT ... ON CONFLICT(id) DO UPDATE`. `INSERT OR REPLACE`
@@ -222,6 +225,115 @@ mod tests {
         conn.execute("DELETE FROM tracks WHERE id = 't1'", [])
             .unwrap();
         assert_eq!(hits("angel*"), 0);
+    }
+
+    #[test]
+    fn upgrades_m1_db_with_data() {
+        use sha1::{Digest, Sha1};
+
+        use crate::library::model::{album_id, track_id};
+
+        let mut conn = Connection::open_in_memory().unwrap();
+        run_migrations(&mut conn, &MIGRATIONS[..1]).unwrap();
+        let folder = std::env::temp_dir().join("prism-m1-music");
+        let folder_key = folder.to_string_lossy().into_owned();
+        let songs = [
+            ("Massive Attack", "Mezzanine", "Teardrop"),
+            ("Massive Attack", "Mezzanine", "Angel"),
+            ("Portishead", "Dummy", "Roads"),
+        ];
+        let mut expected = Vec::new();
+        for (artist, album, title) in songs {
+            let rel = Path::new(artist).join(album).join(format!("{title}.flac"));
+            let path = folder.join(&rel).to_string_lossy().into_owned();
+            // M1 ids: "local:" + sha1 of the canonical path.
+            let old_id = format!("local:{}", hex::encode(Sha1::digest(path.as_bytes())));
+            let album_key = album_id(artist, album);
+            conn.execute(
+                "INSERT INTO tracks (id, source, title, artist, album_artist, album, album_id,
+                    duration_ms, format, path, folder, mtime, size)
+                 VALUES (?1, 'local', ?2, ?3, ?3, ?4, ?5, 1000, 'flac', ?6, ?7, 1, 1)",
+                rusqlite::params![old_id, title, artist, album, album_key, path, folder_key],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO albums (id, source, title, artist, track_count, duration_ms)
+                 VALUES (?1, 'local', ?2, ?3, 1, 1000)
+                 ON CONFLICT(id) DO UPDATE SET track_count = track_count + 1",
+                rusqlite::params![album_key, album, artist],
+            )
+            .unwrap();
+            expected.push((
+                title.to_string(),
+                track_id(&folder_key, &rel),
+                album_key,
+                old_id,
+            ));
+        }
+        conn.execute(
+            "INSERT INTO folders (path, online) VALUES (?1, 1)",
+            [&folder_key],
+        )
+        .unwrap();
+        let albums_before: Vec<(String, i64)> = {
+            let mut stmt = conn
+                .prepare("SELECT id, track_count FROM albums ORDER BY id")
+                .unwrap();
+            let rows = stmt
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap();
+            rows.map(|row| row.unwrap()).collect()
+        };
+
+        run_migrations(&mut conn, MIGRATIONS).unwrap();
+
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, MIGRATIONS.len() as i64);
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tracks", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, songs.len() as i64);
+        for (title, new_id, album_key, old_id) in &expected {
+            let (id, album): (String, String) = conn
+                .query_row(
+                    "SELECT id, album_id FROM tracks WHERE title = ?1",
+                    [title],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(&id, new_id, "{title}");
+            assert_ne!(&id, old_id, "{title}");
+            assert_eq!(&album, album_key, "{title}");
+        }
+        let albums_after: Vec<(String, i64)> = {
+            let mut stmt = conn
+                .prepare("SELECT id, track_count FROM albums ORDER BY id")
+                .unwrap();
+            let rows = stmt
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap();
+            rows.map(|row| row.unwrap()).collect()
+        };
+        assert_eq!(albums_after, albums_before);
+        let found: String = conn
+            .query_row(
+                "SELECT t.id FROM tracks_fts f JOIN tracks t ON t.row_id = f.rowid
+                 WHERE tracks_fts MATCH 'roads'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(found, expected[2].1);
+        let massive: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM tracks_fts WHERE tracks_fts MATCH 'massive'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(massive, 2);
     }
 
     #[test]

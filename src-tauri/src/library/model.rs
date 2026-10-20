@@ -90,14 +90,33 @@ fn sha1_hex(input: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
-/// Normalizes a path for id purposes: canonical when possible, otherwise the
-/// given path made absolute. On Windows the verbatim prefix is dropped, the
-/// drive letter is lowercased and separators are backslashes.
+/// Case folding for id keys: lowercase where the file system usually ignores case
+/// (Windows, macOS, as `library::comparable` does), the identity elsewhere.
+fn fold(text: &str) -> String {
+    if cfg!(any(windows, target_os = "macos")) {
+        text.to_lowercase()
+    } else {
+        text.to_string()
+    }
+}
+
+/// The hashed key of a library track: the folded folder key, a unit separator, and the
+/// folded relative path with its components joined by `/`. Pure string work: no file
+/// system call, so an offline share or a slow NAS never changes or delays an id.
+pub(crate) fn id_key(folder_key: &str, relative: &Path) -> String {
+    let rel = relative
+        .components()
+        .map(|part| part.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/");
+    format!("{}\u{1f}{}", fold(folder_key), fold(&rel))
+}
+
+/// Normalizes a path for `file:` ids: the given path made absolute (no `canonicalize`, so
+/// no file system call). On Windows the verbatim prefix is dropped, the drive letter is
+/// lowercased and separators are backslashes.
 fn normalize_path(path: &Path) -> String {
-    let resolved: PathBuf = match path.canonicalize() {
-        Ok(canonical) => canonical,
-        Err(_) => std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()),
-    };
+    let resolved: PathBuf = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
     let text = resolved.to_string_lossy().into_owned();
     if cfg!(windows) {
         let text = text
@@ -116,8 +135,10 @@ fn normalize_path(path: &Path) -> String {
     }
 }
 
-pub fn track_id(path: &Path) -> String {
-    format!("local:{}", sha1_hex(&normalize_path(path)))
+/// Id of an indexed track: `local:<sha1 of id_key(folder_key, relative)>`, where `relative`
+/// is the file's path below its library folder. Case-insensitive on Windows and macOS.
+pub fn track_id(folder_key: &str, relative: &Path) -> String {
+    format!("local:{}", sha1_hex(&id_key(folder_key, relative)))
 }
 
 /// Id of a file played without indexing (dropped onto the window): `file:<sha1 of the path>`.
@@ -139,24 +160,87 @@ mod tests {
     use super::*;
 
     #[test]
-    fn track_id_is_stable_and_prefixed() {
-        let path = Path::new("C:\\Music\\does-not-exist\\a.flac");
-        let first = track_id(path);
-        assert_eq!(first, track_id(path));
-        assert!(first.starts_with("local:"));
-        assert_eq!(first.len(), "local:".len() + 40);
+    fn track_id_uses_folder_and_relative_path() {
+        let rel = Path::new("Artist").join("Album").join("01.flac");
+        let id = track_id("C:\\Music", &rel);
+        assert_eq!(id, track_id("C:\\Music", &rel));
+        assert!(id.starts_with("local:"));
+        assert_eq!(id.len(), "local:".len() + 40);
+        if cfg!(any(windows, target_os = "macos")) {
+            assert_eq!(id, track_id("c:\\MUSIC", &rel));
+            assert_eq!(
+                id,
+                track_id(
+                    "C:\\Music",
+                    &Path::new("artist").join("ALBUM").join("01.flac")
+                )
+            );
+        } else {
+            assert_ne!(id, track_id("c:\\MUSIC", &rel));
+        }
         assert_ne!(
-            first,
-            track_id(Path::new("C:\\Music\\does-not-exist\\b.flac"))
+            id,
+            track_id(
+                "C:\\Music",
+                &Path::new("Artist").join("Album").join("02.flac")
+            )
+        );
+        assert_ne!(id, track_id("D:\\Music", &rel));
+        // The separator keeps folder and relative path apart.
+        assert_ne!(
+            track_id("ab", Path::new("c")),
+            track_id("a", Path::new("bc"))
         );
     }
 
     #[cfg(windows)]
     #[test]
-    fn track_id_ignores_drive_letter_case_on_windows() {
+    fn track_id_joins_components_with_slashes() {
         assert_eq!(
-            track_id(Path::new("C:\\Music\\none\\a.flac")),
-            track_id(Path::new("c:\\Music\\none\\a.flac"))
+            track_id("C:\\Music", Path::new("Artist\\a.flac")),
+            track_id("C:\\Music", Path::new("Artist/a.flac"))
+        );
+        assert!(id_key("C:\\Music", Path::new("Artist\\a.flac")).ends_with("artist/a.flac"));
+    }
+
+    #[test]
+    fn track_id_does_not_touch_the_file_system() {
+        let folder = r"\\nas\music";
+        let rel = Path::new("Some Artist").join("a.flac");
+        let key = id_key(folder, &rel);
+        assert!(!key.to_lowercase().contains("unc"), "{key}");
+        assert_eq!(
+            key,
+            format!("{}\u{1f}{}", fold(folder), fold("Some Artist/a.flac"))
+        );
+        let id = track_id(folder, &rel);
+        assert_eq!(id, track_id(folder, &rel));
+        assert_eq!(id, format!("local:{}", sha1_hex(&key)));
+    }
+
+    #[test]
+    fn file_track_id_is_stable_and_prefixed() {
+        let path = Path::new("C:\\Music\\does-not-exist\\a.flac");
+        let first = file_track_id(path);
+        assert_eq!(first, file_track_id(path));
+        assert!(first.starts_with("file:"));
+        assert_eq!(first.len(), "file:".len() + 40);
+        assert_ne!(
+            first,
+            file_track_id(Path::new("C:\\Music\\does-not-exist\\b.flac"))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn file_track_id_ignores_drive_letter_case_and_skips_canonicalize() {
+        assert_eq!(
+            file_track_id(Path::new("C:\\Music\\none\\a.flac")),
+            file_track_id(Path::new("c:\\Music\\none\\a.flac"))
+        );
+        assert_eq!(
+            normalize_path(Path::new(r"\\nas\music\a.flac")),
+            r"\\nas\music\a.flac"
         );
     }
 
