@@ -114,6 +114,48 @@ it('closes with Esc without choosing and jumps by typed letter', async () => {
   expect(onchange).not.toHaveBeenCalled();
 });
 
+it('marks the chosen option and opens on Home and End', async () => {
+  const { button } = mountSelect('Speakers');
+  key(button, 'End');
+  await tick();
+  flushSync();
+  expect(button.getAttribute('aria-expanded')).toBe('true');
+  const all = [...target.querySelectorAll('[role="option"]')];
+  expect(all.map((o) => o.getAttribute('aria-selected'))).toEqual(['false', 'true', 'false']);
+  expect(button.getAttribute('aria-activedescendant')).toBe(all[2].id);
+  key(button, 'Escape');
+  key(button, 'Home');
+  await tick();
+  flushSync();
+  expect(button.getAttribute('aria-expanded')).toBe('true');
+  expect(button.getAttribute('aria-activedescendant')).toBe(target.querySelectorAll('[role="option"]')[0].id);
+});
+
+it('matches a prefix typed within half a second', async () => {
+  const now = vi.spyOn(Date, 'now').mockReturnValue(10_000);
+  const genres = ['System default', 'Rap', 'Rock', 'Roots', 'Pop'].map((label) => ({ value: label, label }));
+  mounted.push(mount(Select, { target, props: { value: 'System default', options: genres, label: 'Genre' } }));
+  flushSync();
+  const button = target.querySelector<HTMLButtonElement>('[role="combobox"]')!;
+  key(button, 'Enter');
+  await tick();
+  flushSync();
+  const ids = [...target.querySelectorAll('[role="option"]')].map((o) => o.id);
+  key(button, 'r');
+  expect(button.getAttribute('aria-activedescendant')).toBe(ids[1]);
+  now.mockReturnValue(10_200);
+  key(button, 'o');
+  expect(button.getAttribute('aria-activedescendant')).toBe(ids[2]);
+  now.mockReturnValue(10_400);
+  key(button, 'o');
+  expect(button.getAttribute('aria-activedescendant')).toBe(ids[3]);
+  // A pause starts over: "r" again moves on to the next match.
+  now.mockReturnValue(11_000);
+  key(button, 'r');
+  expect(button.getAttribute('aria-activedescendant')).toBe(ids[1]);
+  now.mockRestore();
+});
+
 it('does not report the value that is already selected', async () => {
   const { button, onchange } = mountSelect('Speakers');
   key(button, ' ');
@@ -228,6 +270,49 @@ it('offers the system default and every device, and moves to the chosen one', as
   await vi.waitFor(() =>
     expect(invoke).toHaveBeenCalledWith('settings_set', { patch: { outputDevice: 'USB DAC' } }),
   );
+});
+
+it('saves the crossfade, mini player, cover and system settings', async () => {
+  mounted.push(mount(Settings, { target }));
+  flushSync();
+  const always = target.querySelector<HTMLButtonElement>('[role="radio"][data-crossfade="always"]')!;
+  always.click();
+  await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('settings_set', { patch: { crossfade: 'always' } }));
+
+  const length = target.querySelector<HTMLElement>('[role="slider"][aria-label="Crossfade length"]')!;
+  expect(length.getAttribute('aria-valuetext')).toBe('4 s');
+  key(length, 'ArrowRight');
+  await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('settings_set', { patch: { crossfadeMs: 5000 } }));
+
+  const toggle = (label: string) => target.querySelector<HTMLButtonElement>(`[role="switch"][aria-labelledby="${label}"]`)!;
+  toggle('label-on-top').click();
+  await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('settings_set', { patch: { miniOnTop: true } }));
+  toggle('label-covers').click();
+  await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('settings_set', { patch: { coverLookup: false } }));
+  expect(target.textContent).toContain('MusicBrainz and the Cover Art Archive');
+  toggle('label-autostart').click();
+  await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('settings_set', { patch: { startWithSystem: true } }));
+});
+
+it('shows why a shortcut was refused and keeps the old one', async () => {
+  await updateSettings({ miniShortcut: 'CommandOrControl+Alt+P' });
+  mounted.push(mount(Settings, { target }));
+  flushSync();
+  invoke.mockImplementationOnce(async () => {
+    throw 'shortcut taken: CommandOrControl+Alt+T (HotKey already registered)';
+  });
+  const recorder = target.querySelector<HTMLButtonElement>('.shortcut')!;
+  recorder.click();
+  flushSync();
+  key(recorder, 't', { code: 'KeyT', ctrlKey: true, altKey: true });
+  await vi.waitFor(() => {
+    flushSync();
+    expect(target.querySelector('[role="alert"]')?.textContent).toBe(
+      'Ctrl+Alt+T is already used by another app. Pick another combination.',
+    );
+  });
+  expect(settings.miniShortcut).toBe('CommandOrControl+Alt+P');
+  expect(recorder.textContent).toContain('Ctrl+Alt+P');
 });
 
 it('places the list inside the clipping scroller, flipping up when below is short', () => {

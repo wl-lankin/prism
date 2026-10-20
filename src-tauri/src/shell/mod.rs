@@ -3,6 +3,7 @@
 pub mod mini;
 pub mod open_with;
 pub mod shape;
+pub mod shortcut;
 #[cfg(target_os = "windows")]
 pub mod taskbar_win;
 pub mod tray;
@@ -91,15 +92,51 @@ pub fn on_taskbar_restore(main_closed: bool) -> RestoreAction {
 /// `WindowEvent::CloseRequested` on the main window (already prevented): Prism keeps running
 /// with the mini player, the tray and (Windows) the taskbar button.
 pub fn close_main(window: &tauri::Window) {
-    let state = window.app_handle().state::<ShellState>();
     // Marked first, so a taskbar click right after the minimize already toggles.
-    state.set_main_closed(true);
+    if let Some(state) = window.app_handle().try_state::<ShellState>() {
+        state.set_main_closed(true);
+    }
     let done = match on_main_close(cfg!(target_os = "windows")) {
         CloseAction::MinimizeAndMarkClosed => window.minimize(),
         CloseAction::Hide => window.hide(),
     };
     if let Err(err) = done {
         eprintln!("closing the main window failed: {err}");
+    }
+}
+
+/// What the main window (created hidden) does at the end of setup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MainAtStart {
+    Show,
+    /// Started at sign-in: only the tray icon appears, the window counts as closed.
+    StayClosed,
+}
+
+pub fn main_at_start(autostart: bool) -> MainAtStart {
+    if autostart {
+        MainAtStart::StayClosed
+    } else {
+        MainAtStart::Show
+    }
+}
+
+/// Shows the main window at the end of setup (its first frame is the page's own `--bg`), or,
+/// started at sign-in, leaves it hidden and marks it closed.
+pub fn start_main(app: &AppHandle, autostart: bool) {
+    match main_at_start(autostart) {
+        MainAtStart::StayClosed => {
+            if let Some(state) = app.try_state::<ShellState>() {
+                state.set_main_closed(true);
+            }
+        }
+        MainAtStart::Show => {
+            if let Some(window) = app.get_webview_window(MAIN_LABEL) {
+                if let Err(err) = window.show() {
+                    eprintln!("showing the main window failed: {err}");
+                }
+            }
+        }
     }
 }
 
@@ -148,8 +185,8 @@ pub fn player_sink(app: AppHandle) -> EventSink {
     })
 }
 
-/// Applies a setting that is not the player's: the cover lookup and the mini player's
-/// always-on-top. The shortcut and the autostart fill in the rest, until then they only log.
+/// Applies a setting that is not the player's: the cover lookup, the mini player's
+/// always-on-top, its global shortcut and the start with the system.
 pub fn apply_setting(app: &AppHandle, change: &Change) -> Result<(), String> {
     match change {
         Change::CoverLookup(on) => {
@@ -165,6 +202,10 @@ pub fn apply_setting(app: &AppHandle, change: &Change) -> Result<(), String> {
                     .map_err(|err| format!("keeping the mini player on top failed: {err}"))?;
             }
         }
+        // Already registered by `settings_set` before saving; the same shortcut again is a
+        // no-op.
+        Change::MiniShortcut(accelerator) => shortcut::apply(app, accelerator)?,
+        Change::StartWithSystem(on) => shortcut::apply_start_with_system(app, *on)?,
         other => eprintln!("setting changed: {other:?}"),
     }
     Ok(())
@@ -180,6 +221,22 @@ mod tests {
         assert_eq!(on_main_close(true), CloseAction::MinimizeAndMarkClosed);
         // macOS has the Dock icon and the menu bar: the window just goes away.
         assert_eq!(on_main_close(false), CloseAction::Hide);
+    }
+
+    #[test]
+    fn autostart_keeps_the_main_window_closed() {
+        assert_eq!(main_at_start(true), MainAtStart::StayClosed);
+        assert_eq!(main_at_start(false), MainAtStart::Show);
+    }
+
+    /// Created hidden, so a start at sign-in never flashes the window; setup shows it.
+    #[test]
+    fn main_window_is_created_hidden() {
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../../tauri.conf.json")).unwrap();
+        let main = &config["app"]["windows"][0];
+        assert_eq!(main["label"], MAIN_LABEL);
+        assert_eq!(main["visible"], false);
     }
 
     #[test]

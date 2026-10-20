@@ -7,12 +7,15 @@
   import { library, reloadLibrary } from '../stores/library.svelte';
   import { overlays } from '../stores/nav.svelte';
   import { settings, updateSettings } from '../stores/settings.svelte';
-  import type { Folder, LanguagePref, ReplayGainMode, Settings } from '../types';
+  import type { CrossfadeMode, Folder, LanguagePref, ReplayGainMode, Settings } from '../types';
   import Icon from './Icon.svelte';
   import Select, { type SelectOption } from './Select.svelte';
+  import ShortcutInput, { IS_MAC, describeShortcut } from './ShortcutInput.svelte';
+  import Slider from './Slider.svelte';
   import ViewHead from './ViewHead.svelte';
 
-  /** Settings: library folders, playback and language. Every change is saved at once. */
+  /** Settings: library folders, playback, the mini player, covers, the system start and
+   *  language. Every change is saved at once. */
 
   const DEFAULT_DEVICE = '';
 
@@ -134,15 +137,50 @@
   });
 
   const gainModes: ReplayGainMode[] = ['off', 'track', 'album'];
+  const crossfadeModes: CrossfadeMode[] = ['off', 'flow', 'always'];
 
-  function ongainkey(event: KeyboardEvent, index: number) {
+  /** Arrow keys in a segmented radio group: pick the neighbour (wrapping) and focus it. */
+  function onsegmentkey<T extends string>(event: KeyboardEvent, modes: T[], index: number, attribute: string, pick: (mode: T) => void) {
     const step = event.key === 'ArrowRight' || event.key === 'ArrowDown' ? 1 : event.key === 'ArrowLeft' || event.key === 'ArrowUp' ? -1 : 0;
     if (!step) return;
     event.preventDefault();
-    const next = gainModes[(index + step + gainModes.length) % gainModes.length];
-    void change({ replayGain: next });
+    const next = modes[(index + step + modes.length) % modes.length];
+    pick(next);
     const group = (event.currentTarget as HTMLElement).parentElement;
-    queueMicrotask(() => group?.querySelector<HTMLElement>(`[data-mode="${next}"]`)?.focus());
+    queueMicrotask(() => group?.querySelector<HTMLElement>(`[${attribute}="${next}"]`)?.focus());
+  }
+
+  // Crossfade length: 1 to 8 whole seconds on a 0..1 slider.
+  const FADE_MIN_S = 1;
+  const FADE_MAX_S = 8;
+  const FADE_STEPS = FADE_MAX_S - FADE_MIN_S;
+  /** The length shown while the slider is dragged, in seconds. */
+  let fadeDrag = $state<number | null>(null);
+  const fadeSeconds = $derived(fadeDrag ?? Math.round((settings.crossfadeMs ?? 4000) / 1000));
+  const toFadeSeconds = (share: number) => FADE_MIN_S + Math.round(Math.min(Math.max(share, 0), 1) * FADE_STEPS);
+
+  function commitFade(share: number) {
+    fadeDrag = null;
+    const ms = toFadeSeconds(share) * 1000;
+    if (ms !== settings.crossfadeMs) void change({ crossfadeMs: ms });
+  }
+
+  let shortcutError = $state<string | null>(null);
+
+  async function changeShortcut(accelerator: string) {
+    shortcutError = null;
+    try {
+      await updateSettings({ miniShortcut: accelerator });
+    } catch (err) {
+      // The backend says whether the keys cannot be a shortcut or another app holds them.
+      const message = String(err);
+      const keys = describeShortcut(accelerator, IS_MAC);
+      shortcutError = message.startsWith('invalid shortcut')
+        ? t('settings.shortcut.invalid')
+        : message.startsWith('shortcut taken')
+          ? t('settings.shortcut.taken', { keys })
+          : t('settings.saveFailed', { message });
+    }
   }
 </script>
 
@@ -276,12 +314,141 @@
                   tabindex={on ? 0 : -1}
                   class:on
                   onclick={() => change({ replayGain: mode })}
-                  onkeydown={(event) => ongainkey(event, index)}
+                  onkeydown={(event) => onsegmentkey(event, gainModes, index, 'data-mode', (next) => change({ replayGain: next }))}
                 >
                   {t(`settings.replayGain.${mode}`)}
                 </button>
               {/each}
             </div>
+          </div>
+        </div>
+
+        <div class="row">
+          <div class="row-text">
+            <span class="row-label" id="label-crossfade">{t('settings.crossfade')}</span>
+            <span class="hint">{t('settings.crossfadeHint')}</span>
+          </div>
+          <div class="control">
+            <div class="segments" role="radiogroup" aria-labelledby="label-crossfade">
+              {#each crossfadeModes as mode, index (mode)}
+                {@const on = settings.crossfade === mode}
+                <button
+                  type="button"
+                  role="radio"
+                  data-crossfade={mode}
+                  aria-checked={on}
+                  tabindex={on ? 0 : -1}
+                  class:on
+                  onclick={() => change({ crossfade: mode })}
+                  onkeydown={(event) => onsegmentkey(event, crossfadeModes, index, 'data-crossfade', (next) => change({ crossfade: next }))}
+                >
+                  {t(`settings.crossfade.${mode}`)}
+                </button>
+              {/each}
+            </div>
+          </div>
+        </div>
+
+        <div class="row">
+          <div class="row-text">
+            <span class="row-label">{t('settings.crossfadeLength')}</span>
+            <span class="hint">{t('settings.crossfadeLengthHint')}</span>
+          </div>
+          <div class="control length">
+            <Slider
+              label={t('settings.crossfadeLength')}
+              value={(fadeSeconds - FADE_MIN_S) / FADE_STEPS}
+              step={1 / FADE_STEPS}
+              valueText={t('settings.seconds', { count: fadeSeconds })}
+              disabled={settings.crossfade === 'off'}
+              oninput={(share) => (fadeDrag = toFadeSeconds(share))}
+              oncommit={commitFade}
+              oncancel={() => (fadeDrag = null)}
+            />
+            <span class="length-value" aria-hidden="true">{t('settings.seconds', { count: fadeSeconds })}</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section aria-labelledby="settings-mini">
+      <h2 id="settings-mini">{t('settings.mini')}</h2>
+      <div class="panel">
+        <div class="row">
+          <div class="row-text">
+            <span class="row-label" id="label-on-top">{t('settings.miniOnTop')}</span>
+            <span class="hint">{t('settings.miniOnTopHint')}</span>
+          </div>
+          <div class="control end">
+            <button
+              type="button"
+              class="switch"
+              role="switch"
+              aria-checked={settings.miniOnTop}
+              aria-labelledby="label-on-top"
+              onclick={() => change({ miniOnTop: !settings.miniOnTop })}
+            >
+              <i></i>
+            </button>
+          </div>
+        </div>
+
+        <div class="row">
+          <div class="row-text">
+            <span class="row-label">{t('settings.shortcut')}</span>
+            <span class="hint">{t('settings.shortcutHint')}</span>
+          </div>
+          <div class="control">
+            <ShortcutInput value={settings.miniShortcut} onchange={changeShortcut} />
+          </div>
+        </div>
+      </div>
+      {#if shortcutError}<p class="error" role="alert">{shortcutError}</p>{/if}
+    </section>
+
+    <section aria-labelledby="settings-covers">
+      <h2 id="settings-covers">{t('settings.covers')}</h2>
+      <div class="panel">
+        <div class="row">
+          <div class="row-text">
+            <span class="row-label" id="label-covers">{t('settings.coverLookup')}</span>
+            <span class="hint">{t('settings.coverLookupHint')}</span>
+          </div>
+          <div class="control end">
+            <button
+              type="button"
+              class="switch"
+              role="switch"
+              aria-checked={settings.coverLookup}
+              aria-labelledby="label-covers"
+              onclick={() => change({ coverLookup: !settings.coverLookup })}
+            >
+              <i></i>
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section aria-labelledby="settings-system">
+      <h2 id="settings-system">{t('settings.system')}</h2>
+      <div class="panel">
+        <div class="row">
+          <div class="row-text">
+            <span class="row-label" id="label-autostart">{t('settings.startWithSystem')}</span>
+            <span class="hint">{t('settings.startWithSystemHint')}</span>
+          </div>
+          <div class="control end">
+            <button
+              type="button"
+              class="switch"
+              role="switch"
+              aria-checked={settings.startWithSystem}
+              aria-labelledby="label-autostart"
+              onclick={() => change({ startWithSystem: !settings.startWithSystem })}
+            >
+              <i></i>
+            </button>
           </div>
         </div>
       </div>
@@ -599,6 +766,24 @@
   .control.end {
     display: flex;
     justify-content: flex-end;
+  }
+
+  .control.length {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+
+  .control.length > :global(.slider) {
+    flex: 1;
+  }
+
+  .length-value {
+    min-width: 30px;
+    text-align: right;
+    font-size: 13px;
+    color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
   }
 
   .switch {

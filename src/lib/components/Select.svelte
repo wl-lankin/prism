@@ -47,7 +47,8 @@
   /** A select-only combobox (WAI-ARIA pattern) drawn in the Prism style: the button keeps
    *  focus, the list follows with `aria-activedescendant`. Keys: Enter, Space, Alt+Down and
    *  the arrows open it; arrows, Home, End and typing a letter move; Enter or Space picks;
-   *  Esc and Tab close. */
+   *  Esc and Tab close. Home and End also open it on the first or last option; letters typed
+   *  within half a second match as one prefix. */
   let {
     value,
     options,
@@ -75,9 +76,10 @@
   const selectedIndex = $derived(Math.max(0, options.findIndex((option) => option.value === value)));
   const selected = $derived(options[selectedIndex]);
 
-  async function show() {
+  /** Opens the list with `start` (the selected option by default) active. */
+  async function show(start = selectedIndex) {
     if (disabled || open || options.length === 0) return;
-    active = selectedIndex;
+    active = Math.max(0, Math.min(options.length - 1, start));
     // Stay inside whatever clips the list (the settings scroller), flipping up if needed.
     if (button) {
       const placed = placeList(button.getBoundingClientRect(), clipBox(button), Math.min(options.length * 40 + 12, MAX_LIST));
@@ -105,12 +107,23 @@
     tick().then(() => list?.querySelector(`#${id}-${active}`)?.scrollIntoView?.({ block: 'nearest' }));
   }
 
-  /** Jumps to the next option starting with `letter`, after the active one. */
+  /** Letters typed within `TYPEAHEAD_MS` of each other form one prefix. */
+  const TYPEAHEAD_MS = 500;
+  let typed = '';
+  let typedAt = 0;
+
+  /** Jumps to the option starting with what was typed: a single letter moves on to the next
+   *  match after the active one, a longer prefix may stay on the active one. */
   function typeahead(letter: string) {
-    const lower = letter.toLowerCase();
-    for (let step = 1; step <= options.length; step++) {
+    const now = Date.now();
+    typed = now - typedAt <= TYPEAHEAD_MS ? typed + letter.toLowerCase() : letter.toLowerCase();
+    typedAt = now;
+    // The same letter again cycles through its matches.
+    const search = /^(.)\1+$/.test(typed) ? typed[0] : typed;
+    const first = search.length > 1 ? 0 : 1;
+    for (let step = first; step < options.length + first; step++) {
       const index = (active + step) % options.length;
-      if (options[index].label.toLowerCase().startsWith(lower)) {
+      if (options[index].label.toLowerCase().startsWith(search)) {
         move(index);
         return;
       }
@@ -120,11 +133,11 @@
   function onkeydown(event: KeyboardEvent) {
     if (disabled) return;
     if (!open) {
-      if (['ArrowDown', 'ArrowUp', 'Enter', ' '].includes(event.key)) {
+      if (['ArrowDown', 'ArrowUp', 'Enter', ' ', 'Home', 'End'].includes(event.key)) {
         event.preventDefault();
-        void show().then(() => {
-          if (event.key === 'ArrowUp' && !event.altKey) move(selectedIndex - 1);
-        });
+        const start =
+          event.key === 'Home' ? 0 : event.key === 'End' ? options.length - 1 : event.key === 'ArrowUp' && !event.altKey ? selectedIndex - 1 : selectedIndex;
+        void show(start);
       }
       return;
     }

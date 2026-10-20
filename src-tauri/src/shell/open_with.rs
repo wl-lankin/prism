@@ -102,14 +102,30 @@ fn play_files(
     dropped.commit_and_play(tracks, |ids| player.play(ids, 0))
 }
 
-/// Whether the user has no main window in front of them: it is closed, hidden or minimized.
-/// One place to change when the shell state tracks "closed" itself.
+/// Whether the user has no main window in front of them: the shell marked it closed. Without
+/// the shell state (early in setup) a hidden or minimized window counts as away.
 fn main_is_away(app: &AppHandle) -> bool {
-    match app.get_webview_window("main") {
-        Some(window) => {
-            !window.is_visible().unwrap_or(false) || window.is_minimized().unwrap_or(false)
-        }
+    let closed = app
+        .try_state::<super::ShellState>()
+        .map(|state| state.is_main_closed());
+    if closed.is_some() {
+        return away(closed, true, false);
+    }
+    match app.get_webview_window(super::MAIN_LABEL) {
+        Some(window) => away(
+            None,
+            window.is_visible().unwrap_or(false),
+            window.is_minimized().unwrap_or(false),
+        ),
         None => true,
+    }
+}
+
+/// `main_is_away`'s rule: the shell's "closed" when it is known, else hidden or minimized.
+fn away(main_closed: Option<bool>, visible: bool, minimized: bool) -> bool {
+    match main_closed {
+        Some(closed) => closed,
+        None => !visible || minimized,
     }
 }
 
@@ -276,6 +292,17 @@ mod tests {
     use crate::library::tags::fixtures;
     use crate::player::{with_dropped, EventSink, Opener, Player, PlayerOptions, Resolver};
     use crossbeam_channel::{Receiver, Sender};
+
+    #[test]
+    fn main_is_away_follows_the_shell_state_first() {
+        // The shell knows: its "closed" decides, whatever the window looks like.
+        assert!(away(Some(true), true, false));
+        assert!(!away(Some(false), true, true));
+        // No shell state yet: hidden or minimized counts as away.
+        assert!(away(None, false, false));
+        assert!(away(None, true, true));
+        assert!(!away(None, true, false));
+    }
 
     fn strings(items: &[&str]) -> Vec<String> {
         items.iter().map(|item| (*item).to_string()).collect()

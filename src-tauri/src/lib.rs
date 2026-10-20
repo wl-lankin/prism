@@ -111,10 +111,7 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
     let settings = Arc::new(SettingsStore::load(&config_dir.join("settings.json")));
     let initial = settings.get();
     app.manage(shell::ShellState::default());
-    // Hidden until the user asks for it.
-    if let Err(err) = shell::mini::create(app.handle(), initial.mini_on_top) {
-        eprintln!("creating the mini player failed: {err}");
-    }
+    app.manage(shell::shortcut::CurrentShortcut::default());
 
     let (db, notice) = match open_or_quarantine(&data_dir.join("library.db"))
         .map_err(|err| err.context(DataDir(data_dir.clone())))?
@@ -209,6 +206,14 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
         settings,
         thumbs: Arc::new(thumbs::ResizeGate::new(thumbs::ResizeGate::default_limit())),
     });
+    // After the app state: the mini page asks for it as soon as it loads. Hidden until the
+    // user asks for it.
+    if let Err(err) = shell::mini::create(app.handle(), initial.mini_on_top) {
+        eprintln!("creating the mini player failed: {err}");
+    }
+    if let Err(err) = shell::shortcut::apply(&handle, &initial.mini_shortcut) {
+        eprintln!("registering the mini player shortcut failed: {err}");
+    }
     media.start(handle.clone(), main_window_handle(app), cover_cache);
     // The tray and (Windows) the taskbar button: closing the main window leaves Prism there.
     if let Err(err) = shell::tray::create(&handle) {
@@ -220,6 +225,10 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
     }
 
     watch::start(handle.clone(), folders);
+    let args: Vec<String> = std::env::args_os()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    shell::start_main(&handle, shell::shortcut::is_autostart(&args));
     shell::open_with::play_launch_args(&handle);
 
     // Catch up on changes made while Prism was closed; unchanged files are skipped quickly.
@@ -253,6 +262,15 @@ pub fn run() {
         .register_asynchronous_uri_scheme_protocol("prism", protocol::register)
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(shell::shortcut::on_shortcut)
+                .build(),
+        )
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec![shell::shortcut::AUTOSTART_ARG]),
+        ))
         .setup(|app| match setup(app) {
             Ok(()) => Ok(()),
             Err(err) => fail_with(&err),

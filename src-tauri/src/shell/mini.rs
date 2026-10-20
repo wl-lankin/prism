@@ -74,6 +74,9 @@ pub struct PosI {
 pub enum Anchor {
     /// The bottom-right corner of the work area (Windows: the primary monitor's).
     WorkAreaBottomRight,
+    /// The top-right corner of the primary work area (macOS, under the menu bar, before the
+    /// menu bar icon's place is known).
+    WorkAreaTopRight,
     /// Centred under a rectangle, such as the menu bar icon that was clicked (macOS).
     BelowRect(PhysicalRect<i32, u32>),
 }
@@ -109,6 +112,10 @@ pub fn dock_position(work_area: RectI, size: SizeI, anchor: &Anchor, margin: i32
         Anchor::WorkAreaBottomRight => (
             work_area.x + work_area.w - size.w - margin,
             work_area.y + work_area.h - size.h - margin,
+        ),
+        Anchor::WorkAreaTopRight => (
+            work_area.x + work_area.w - size.w - margin,
+            work_area.y + margin,
         ),
         Anchor::BelowRect(rect) => {
             let width = i32::try_from(rect.size.width).unwrap_or(i32::MAX);
@@ -288,7 +295,7 @@ fn work_area(app: &AppHandle, anchor: &Anchor) -> Option<(RectI, f64)> {
             let y = f64::from(rect.position.y) + f64::from(rect.size.height) / 2.0;
             app.monitor_from_point(x, y).ok().flatten()
         }
-        Anchor::WorkAreaBottomRight => None,
+        Anchor::WorkAreaBottomRight | Anchor::WorkAreaTopRight => None,
     }
     .or_else(|| app.primary_monitor().ok().flatten())?;
     let area = monitor.work_area();
@@ -495,6 +502,22 @@ mod tests {
             dock_position(left_screen, SIZE, &anchor, 12),
             PosI { x: -404, y: 892 }
         );
+    }
+
+    #[test]
+    fn top_right_docks_under_the_menu_bar() {
+        let work_area = RectI {
+            x: 0,
+            y: 24,
+            w: 1440,
+            h: 876,
+        };
+        assert_eq!(
+            dock_position(work_area, SIZE, &Anchor::WorkAreaTopRight, 12),
+            PosI { x: 1036, y: 36 }
+        );
+        // The menu opens below a player docked at the top.
+        assert!(!Anchor::WorkAreaTopRight.room_above());
     }
 
     #[test]

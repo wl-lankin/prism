@@ -30,8 +30,23 @@ fn message(err: anyhow::Error) -> String {
     format!("{err:#}")
 }
 
-fn library(app: &AppHandle) -> Arc<Library> {
-    Arc::clone(&app.state::<AppState>().library)
+/// What a command answers when it arrives before setup managed the app state (a page that
+/// loaded early).
+const NOT_READY: &str = "the app state is not ready";
+
+/// The app state, or an error for the UI instead of a panic when it is not managed yet.
+fn app_state(app: &AppHandle) -> Result<State<'_, AppState>, String> {
+    ready(app.try_state::<AppState>())
+}
+
+/// `app_state`'s rule, apart from the app (a mock runtime does not start in unit tests on
+/// Windows).
+fn ready<T>(state: Option<T>) -> Result<T, String> {
+    state.ok_or_else(|| NOT_READY.to_string())
+}
+
+fn library(app: &AppHandle) -> Result<Arc<Library>, String> {
+    Ok(Arc::clone(&app_state(app)?.library))
 }
 
 /// Runs blocking work (scans, queries) off the async runtime's worker threads.
@@ -49,7 +64,7 @@ async fn read<T: Send + 'static>(
     app: &AppHandle,
     run: impl FnOnce(&Connection) -> anyhow::Result<T> + Send + 'static,
 ) -> Result<T, String> {
-    let library = library(app);
+    let library = library(app)?;
     blocking(move || run(&*lock(&library.db)?)).await
 }
 
@@ -113,10 +128,10 @@ pub fn player_set_volume(state: State<'_, AppState>, v: f32) -> Result<(), Strin
 /// the player is untouched. The dropped tracks are kept only when playback was accepted.
 #[tauri::command]
 pub async fn player_play_files(app: AppHandle, paths: Vec<String>) -> Result<u32, String> {
-    let dropped = Arc::clone(&app.state::<AppState>().dropped);
+    let dropped = Arc::clone(&app_state(&app)?.dropped);
     let reader = Arc::clone(&dropped);
     let tracks = blocking(move || Ok(reader.read(&paths))).await?;
-    let state = app.state::<AppState>();
+    let state = app_state(&app)?;
     dropped.commit_and_play(tracks, |ids| state.player.play(ids, 0))
 }
 
@@ -146,7 +161,11 @@ pub async fn player_queue_range(
     limit: u32,
 ) -> Result<Vec<QueueItem>, String> {
     let limit = limit.min(MAX_PAGE);
-    blocking(move || Ok(app.state::<AppState>().player.queue_range(offset, limit))).await
+    blocking(move || {
+        let state = app_state(&app).map_err(anyhow::Error::msg)?;
+        Ok(state.player.queue_range(offset, limit))
+    })
+    .await
 }
 
 // Library
@@ -156,7 +175,7 @@ pub async fn player_queue_range(
 #[tauri::command]
 pub async fn library_add_folder(app: AppHandle, path: String) -> Result<ScanReport, String> {
     let folder = folder_path(&path)?;
-    let library = library(&app);
+    let library = library(&app)?;
     // Watcher calls touch the file system too, so they run in the blocking task as well.
     blocking(move || {
         let report = library.add_folder(&folder, &tauri_emitter(app.clone()))?;
@@ -170,7 +189,7 @@ pub async fn library_add_folder(app: AppHandle, path: String) -> Result<ScanRepo
 #[tauri::command]
 pub async fn library_remove_folder(app: AppHandle, path: String) -> Result<(), String> {
     let folder = folder_path(&path)?;
-    let library = library(&app);
+    let library = library(&app)?;
     blocking(move || {
         library.remove_folder(&folder, &tauri_emitter(app.clone()))?;
         with_watcher(&app, |watcher| watcher.unwatch(&folder));
@@ -187,7 +206,7 @@ pub async fn library_folders(app: AppHandle) -> Result<Vec<Folder>, String> {
 /// Rescans every library folder; returns when done.
 #[tauri::command]
 pub async fn library_rescan(app: AppHandle) -> Result<(), String> {
-    let library = library(&app);
+    let library = library(&app)?;
     let emit_app = app.clone();
     blocking(move || {
         library.rescan_all(&tauri_emitter(emit_app))?;
@@ -248,7 +267,7 @@ pub async fn library_genres(app: AppHandle) -> Result<Vec<String>, String> {
 /// Plays a new Flow; favorites without any fall back to the whole library.
 #[tauri::command]
 pub async fn flow_start(app: AppHandle, variant: FlowVariant) -> Result<FlowOutcome, String> {
-    let flow = Arc::clone(&app.state::<AppState>().flow);
+    let flow = Arc::clone(&app_state(&app)?.flow);
     blocking(move || flow.start(variant)).await
 }
 
@@ -381,8 +400,16 @@ pub fn settings_get(state: State<'_, AppState>) -> Result<Settings, String> {
 pub async fn settings_set(app: AppHandle, patch: serde_json::Value) -> Result<Settings, String> {
     let notify = app.clone();
     let saved = blocking(move || {
-        let state = app.state::<AppState>();
-        state.settings.update(patch, |changes| {
+        let state = app_state(&app).map_err(anyhow::Error::msg)?;
+        // A new shortcut is registered first and only saved when the system took it; the
+        // error (invalid or taken) goes to the UI as it is.
+        let previous = state.settings.get().mini_shortcut;
+        let shortcut = patch.get("miniShortcut").and_then(|value| value.as_str());
+        if let Some(accelerator) = shortcut {
+            shell::shortcut::apply(&app, accelerator).map_err(anyhow::Error::msg)?;
+        }
+        let registered = shortcut.is_some();
+        let saved = state.settings.update(patch, |changes| {
             for change in changes {
                 let sent = match change {
                     Change::Volume(volume) => state.player.set_volume(*volume),
@@ -396,7 +423,14 @@ pub async fn settings_set(app: AppHandle, patch: serde_json::Value) -> Result<Se
                     eprintln!("applying a setting failed: {err}");
                 }
             }
-        })
+        });
+        if saved.is_err() && registered {
+            // Not saved: the saved shortcut goes back in place.
+            if let Err(err) = shell::shortcut::apply(&app, &previous) {
+                eprintln!("restoring the previous shortcut failed: {err}");
+            }
+        }
+        saved
     })
     .await?;
     // Every window follows the saved settings (the mini player's language, for one).
@@ -444,4 +478,16 @@ pub fn main_show(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub fn tray_set_labels(app: AppHandle, labels: TrayLabels) {
     shell::tray::set_labels(&app, &labels);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A command that arrives before setup managed the app state gets an error, not a panic.
+    #[test]
+    fn app_state_is_an_error_until_managed() {
+        assert_eq!(ready::<u8>(None), Err(NOT_READY.to_string()));
+        assert_eq!(ready(Some(7)), Ok(7));
+    }
 }
