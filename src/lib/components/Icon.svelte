@@ -32,6 +32,13 @@
     back: '<path d="M14.5 6 8.5 12l6 6"/>',
     folder: '<path d="M4 7.5A1.5 1.5 0 0 1 5.5 6h4l2 2h7A1.5 1.5 0 0 1 20 9.5v8a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 17.5z"/>',
     chevronDown: '<path d="m7 10 5 5 5-5"/>',
+    chevronRight: '<path d="m10 7 5 5-5 5"/>',
+    plus: '<path d="M12 5.5v13M5.5 12h13"/>',
+    edit: '<path d="M14.5 6.5 17.5 9.5"/><path d="M5.5 18.5 6.3 15 15.8 5.5a1.6 1.6 0 0 1 2.2 0l.5.5a1.6 1.6 0 0 1 0 2.2L9 17.7z"/>',
+    trash:
+      '<path d="M5 7.5h14M10 7.5V5.8a.8.8 0 0 1 .8-.8h2.4a.8.8 0 0 1 .8.8v1.7"/><path d="M6.8 7.5l.8 11a1.5 1.5 0 0 0 1.5 1.4h5.8a1.5 1.5 0 0 0 1.5-1.4l.8-11"/>',
+    grip: '<circle cx="9.5" cy="7" r=".9"/><circle cx="14.5" cy="7" r=".9"/><circle cx="9.5" cy="12" r=".9"/><circle cx="14.5" cy="12" r=".9"/><circle cx="9.5" cy="17" r=".9"/><circle cx="14.5" cy="17" r=".9"/>',
+    remove: '<path d="M6 12h12"/><circle cx="12" cy="12" r="8.5"/>',
     check: '<path d="m5.5 12.5 4 4 9-9"/>',
     refresh: '<path d="M19 12a7 7 0 1 1-2.05-4.95"/><path d="M19 4.5v4h-4"/>',
     external: '<path d="M13.5 5.5H18.5V10.5"/><path d="M18.5 5.5 11 13"/><path d="M16.5 14v3.5a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1H10"/>',

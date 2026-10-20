@@ -2,6 +2,7 @@ export type View =
   | 'home'
   | 'favorites'
   | 'playlists'
+  | 'playlist'
   | 'albums'
   | 'artists'
   | 'songs'
@@ -12,7 +13,7 @@ export type View =
 
 export interface Nav {
   view: View;
-  /** The album id for 'album', the artist name for 'artist'. */
+  /** The album id for 'album', the artist name for 'artist', the playlist id for 'playlist'. */
   param?: string;
 }
 

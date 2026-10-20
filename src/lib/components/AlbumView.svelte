@@ -9,7 +9,10 @@
   import { FAVORITE_KEY, isFavoriteKey, toggleFavorite } from '../stores/favorites.svelte';
   import { player } from '../stores/player.svelte';
   import type { Track } from '../types';
+  import { menuPoint } from '../menu';
+  import Backdrop from './Backdrop.svelte';
   import Cover from './Cover.svelte';
+  import TrackMenu, { type TrackMenuState } from './TrackMenu.svelte';
   import Heart from './Heart.svelte';
   import Icon from './Icon.svelte';
   import NowPlayingBars from './NowPlayingBars.svelte';
@@ -53,10 +56,7 @@
   const ids = $derived(tracks?.map((track) => track.id) ?? []);
   const playingId = $derived(player.track?.id ?? null);
   const backdrop = $derived(coverUrl(coverId, 96));
-  /** The backdrop is blurred at this small width and scaled up: far fewer pixels to blur
-   *  than blurring a full-width image, and it looks the same. */
-  const BACKDROP_PX = 64;
-  let backdropWidth = $state(1000);
+  let menu = $state<TrackMenuState | null>(null);
 
   function length(ms: number): string {
     const minutes = Math.max(1, Math.round(ms / 60000));
@@ -73,6 +73,19 @@
     if ((event.target as HTMLElement).closest('button')) return null;
     const row = (event.target as HTMLElement).closest<HTMLElement>('[data-index]');
     return row ? Number(row.dataset.index) : null;
+  }
+
+  /** Right-click (or the context menu key) on a row: select it and open the track menu. */
+  function oncontextmenu(event: MouseEvent) {
+    if (!tracks?.length) return;
+    const row = (event.target as HTMLElement).closest<HTMLElement>('[data-index]');
+    const i = row ? Number(row.dataset.index) : selected;
+    const track = tracks[i];
+    if (!track) return;
+    event.preventDefault();
+    selected = i;
+    const at = menuPoint(event, document.getElementById(`track-${i}`));
+    menu = { trackIds: [track.id], ...at, artist: track.albumArtist || track.artist };
   }
 
   function onkeydown(event: KeyboardEvent) {
@@ -99,9 +112,7 @@
 
 <div class="scroll">
   {#if backdrop}
-    <div class="backdrop" aria-hidden="true" bind:clientWidth={backdropWidth}>
-      <img src={backdrop} alt="" draggable="false" style="--k:{(backdropWidth * 1.3) / BACKDROP_PX}" />
-    </div>
+    <Backdrop src={backdrop} />
   {/if}
 
   <div class="inner">
@@ -154,6 +165,7 @@
           aria-label={title}
           aria-activedescendant={selected >= 0 ? `track-${selected}` : undefined}
           {onkeydown}
+          {oncontextmenu}
           onclick={(event) => {
             const i = rowIndex(event);
             if (i !== null) selected = i;
@@ -200,6 +212,10 @@
   </div>
 </div>
 
+{#if menu}
+  <TrackMenu {...menu} onclose={() => (menu = null)} />
+{/if}
+
 <style>
   .scroll {
     scrollbar-color: auto;
@@ -207,37 +223,6 @@
     height: 100%;
     overflow-y: auto;
     overflow-x: hidden;
-  }
-
-  /* The cover, tiny and blurred far past recognition, tints the top of the view. */
-  .backdrop {
-    position: absolute;
-    inset: 0 0 auto 0;
-    height: 520px;
-    overflow: hidden;
-    pointer-events: none;
-    /* Fades in under the title bar and out into the track list, so it has no hard edge. */
-    mask-image: linear-gradient(
-      to bottom,
-      rgba(0, 0, 0, 0.25) 0,
-      #000 110px,
-      rgba(0, 0, 0, 0.55) 55%,
-      transparent 100%
-    );
-  }
-
-  .backdrop img {
-    position: absolute;
-    left: 50%;
-    top: 50%;
-    width: 64px;
-    height: 34px;
-    margin: -17px 0 0 -32px;
-    object-fit: cover;
-    transform: scale(var(--k, 20));
-    filter: blur(4px) saturate(1.35);
-    opacity: 0.55;
-    animation: fade var(--dur-l) ease-out;
   }
 
   .inner {
@@ -436,12 +421,6 @@
   @media (max-width: 1000px) {
     .hero {
       gap: 24px;
-    }
-  }
-
-  @keyframes fade {
-    from {
-      opacity: 0;
     }
   }
 </style>

@@ -10,6 +10,9 @@
   import FlowRing, { type RingMode } from './lib/components/FlowRing.svelte';
   import Icon from './lib/components/Icon.svelte';
   import NowPlaying from './lib/components/NowPlaying.svelte';
+  import PlaylistsView from './lib/components/PlaylistsView.svelte';
+  import PlaylistView from './lib/components/PlaylistView.svelte';
+  import { initPlaylists } from './lib/stores/playlists.svelte';
   import SearchPalette from './lib/components/SearchPalette.svelte';
   import Settings from './lib/components/Settings.svelte';
   import Sidebar from './lib/components/Sidebar.svelte';
@@ -79,6 +82,18 @@
     initFavorites()
       .then((cleanup) => (gone ? cleanup() : (stop = cleanup)))
       .catch((err) => console.error('loading the favorites failed', err));
+    return () => {
+      gone = true;
+      stop?.();
+    };
+  });
+
+  $effect(() => {
+    let stop: (() => void) | undefined;
+    let gone = false;
+    initPlaylists()
+      .then((cleanup) => (gone ? cleanup() : (stop = cleanup)))
+      .catch((err) => console.error('loading the playlists failed', err));
     return () => {
       gone = true;
       stop?.();
@@ -185,6 +200,7 @@
     home: 'nav.home',
     favorites: 'nav.favorites',
     playlists: 'nav.playlists',
+    playlist: 'nav.playlists',
     albums: 'nav.albums',
     artists: 'nav.artists',
     songs: 'nav.songs',
@@ -260,8 +276,11 @@
               <FavoritesView />
             {:else if nav.view === 'nowplaying'}
               <NowPlaying />
+            {:else if nav.view === 'playlists'}
+              <PlaylistsView />
+            {:else if nav.view === 'playlist' && nav.param}
+              <PlaylistView playlistId={Number(nav.param)} />
             {:else}
-              <!-- Playlists arrive in a later version. -->
               <div class="placeholder">
                 <h1>{t(titles[nav.view])}</h1>
                 <p>{t(`view.${nav.view}.lead`)}</p>

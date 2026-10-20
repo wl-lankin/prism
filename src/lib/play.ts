@@ -1,5 +1,5 @@
 import { t } from './i18n';
-import { libraryAlbumTracks, libraryTracksRange, playerPlay } from './ipc';
+import { libraryAlbumTracks, libraryTracksRange, playerPlay, playlistEntries } from './ipc';
 import { shuffle } from './flow';
 import { notify } from './stores/notice.svelte';
 
@@ -28,6 +28,33 @@ export async function playAlbum(albumId: string, options: { trackId?: string; sh
     const ids = (await libraryAlbumTracks(albumId)).map((track) => track.id);
     if (options.shuffled) return playIds(shuffle(ids), 0);
     return playIds(ids, options.trackId ? Math.max(0, ids.indexOf(options.trackId)) : 0);
+  } catch (err) {
+    failed(err);
+  }
+}
+
+/** Plays a playlist from the entry at `fromPosition` (the first one by default). Entries whose
+ *  track is not in the index are skipped; when the chosen entry is one of them, playback
+ *  starts at the next playable entry. `shuffled` plays every playable entry in random order. */
+export async function playPlaylist(
+  id: number,
+  fromPosition = 0,
+  options: { shuffled?: boolean } = {},
+): Promise<void> {
+  try {
+    const ids: string[] = [];
+    let start = -1;
+    for (const entry of await playlistEntries(id)) {
+      if (!entry.track) continue;
+      if (start < 0 && entry.position >= fromPosition) start = ids.length;
+      ids.push(entry.trackId);
+    }
+    if (!ids.length) {
+      notify(t('playlist.nothingPlayable'));
+      return;
+    }
+    if (options.shuffled) return playIds(shuffle(ids), 0);
+    return playIds(ids, Math.max(0, start));
   } catch (err) {
     failed(err);
   }
