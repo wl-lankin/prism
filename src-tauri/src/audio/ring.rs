@@ -12,6 +12,20 @@ use super::source::StreamSpec;
 /// Duration of a volume, pause or clear ramp.
 const RAMP_MS: f32 = 20.0;
 
+/// Frames one ramp lasts at `sample_rate`.
+pub(crate) fn ramp_frames(sample_rate: u32) -> f32 {
+    RAMP_MS / 1000.0 * sample_rate.max(1) as f32
+}
+
+/// `value` moved one `step` toward `target`, never past it.
+pub(crate) fn ramp_toward(value: f32, target: f32, step: f32) -> f32 {
+    if value < target {
+        (value + step).min(target)
+    } else {
+        (value - step).max(target)
+    }
+}
+
 /// State shared between both sides.
 struct Control {
     volume: AtomicU32,
@@ -42,7 +56,7 @@ pub fn ring(spec: StreamSpec, capacity_frames: usize) -> (RingWriter, Renderer) 
     let renderer = Renderer {
         consumer,
         channels,
-        step: 1.0 / (RAMP_MS / 1000.0 * spec.sample_rate.max(1) as f32),
+        step: 1.0 / ramp_frames(spec.sample_rate),
         gain: 0.0,
         popped_total: 0,
         control,
@@ -157,11 +171,7 @@ impl Renderer {
             self.popped_total += got as u64;
             region[got..].fill(0.0);
             for samples in region.chunks_exact_mut(ch) {
-                if self.gain < target {
-                    self.gain = (self.gain + self.step).min(target);
-                } else if self.gain > target {
-                    self.gain = (self.gain - self.step).max(target);
-                }
+                self.gain = ramp_toward(self.gain, target, self.step);
                 for sample in samples {
                     *sample *= self.gain;
                 }

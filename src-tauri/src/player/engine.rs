@@ -13,7 +13,8 @@ use serde::Serialize;
 use super::queue::Queue;
 use crate::audio::gain::replaygain_factor;
 use crate::audio::{
-    open_source_with, AudioSource, Input, OutputFactory, Playback, PumpStatus, StreamSpec,
+    open_source_with, AudioSource, Input, NextOptions, OutputFactory, Playback, PumpStatus,
+    StreamSpec, READ_AHEAD_MS,
 };
 use crate::flow::FlowVariant;
 use crate::library::model::Track;
@@ -93,15 +94,50 @@ pub struct PlayerOptions {
     pub device: Option<String>,
     pub gapless: bool,
     pub replay_gain: ReplayGain,
+    /// When tracks blend into each other, and for how long (ms); see [`crossfade_for`].
+    pub crossfade: Crossfade,
+    pub crossfade_ms: u32,
 }
 
 impl Default for PlayerOptions {
+    /// Off for crossfade: the app passes the setting (whose default is Flow).
     fn default() -> Self {
         PlayerOptions {
             volume: DEFAULT_VOLUME,
             device: None,
             gapless: true,
             replay_gain: ReplayGain::Off,
+            crossfade: Crossfade::Off,
+            crossfade_ms: 0,
+        }
+    }
+}
+
+/// How long `next` blends into `current` (ms): `Off` never; `Flow` only inside a Flow;
+/// `Always` everywhere except into the following track of the same album, so albums stay
+/// gapless.
+pub fn crossfade_for(
+    mode: Crossfade,
+    ms: u32,
+    in_flow: bool,
+    current: &Track,
+    next: &Track,
+) -> u32 {
+    match mode {
+        Crossfade::Off => 0,
+        Crossfade::Flow if in_flow => ms,
+        Crossfade::Flow => 0,
+        Crossfade::Always => {
+            let album_goes_on = current.album_id == next.album_id
+                && matches!(
+                    (current.track_no.and_then(|no| no.checked_add(1)), next.track_no),
+                    (Some(following), Some(no)) if following == no
+                );
+            if album_goes_on {
+                0
+            } else {
+                ms
+            }
         }
     }
 }
@@ -164,6 +200,7 @@ enum Command {
     SetDevice(Option<String>),
     SetGapless(bool),
     SetReplayGain(ReplayGain),
+    SetCrossfade(Crossfade, u32),
     /// A fresher copy of a track (its cover changed): replaces the shown one when the ids match.
     UpdateTrack(Box<Track>),
     Shutdown,
@@ -281,8 +318,6 @@ pub struct Player {
     handle: PlayerHandle,
     resolver: Resolver,
     thread: Option<JoinHandle<()>>,
-    /// The crossfade setting; kept for now, the engine does not blend tracks yet.
-    crossfade: Mutex<(Crossfade, u32)>,
 }
 
 impl Player {
@@ -341,7 +376,6 @@ impl Player {
             handle,
             resolver,
             thread,
-            crossfade: Mutex::new((Crossfade::Off, 0)),
         }
     }
 
@@ -435,10 +469,10 @@ impl Player {
         self.send(Command::SetReplayGain(mode))
     }
 
-    /// Stores the crossfade mode and length (ms). Has no effect on playback yet.
+    /// The crossfade mode and length (ms), from the next track change on (see
+    /// [`crossfade_for`]). Manual next, prev and jump always cut without a fade.
     pub fn set_crossfade(&self, mode: Crossfade, ms: u32) -> Result<(), String> {
-        write_lock(&self.crossfade, (mode, ms));
-        Ok(())
+        self.send(Command::SetCrossfade(mode, ms))
     }
 
     /// The latest state, as the engine published it.
@@ -602,6 +636,8 @@ struct Engine {
     volume: f32,
     gapless: bool,
     replay_gain: ReplayGain,
+    crossfade: Crossfade,
+    crossfade_ms: u32,
     /// The user paused while the track was loading: start it paused.
     start_paused: bool,
     /// The track being decoded. Between a gapless hand-over and the moment it is heard it
@@ -647,7 +683,7 @@ impl Engine {
         let generation = Arc::new(AtomicU64::new(0));
         let (results, opened) = crossbeam_channel::unbounded();
         let openers = Openers::spawn(resolver, opener, Arc::clone(&generation), results);
-        Ok(Engine {
+        let mut engine = Engine {
             playback,
             queue: Queue::new(),
             queue_version: 0,
@@ -661,6 +697,8 @@ impl Engine {
             volume: options.volume,
             gapless: options.gapless,
             replay_gain: options.replay_gain,
+            crossfade: options.crossfade,
+            crossfade_ms: options.crossfade_ms,
             start_paused: false,
             current: None,
             decoding: false,
@@ -676,7 +714,54 @@ impl Engine {
             last_emit: Instant::now(),
             last_sent: None,
             last_level: Instant::now(),
-        })
+        };
+        engine.crossfade_changed();
+        Ok(engine)
+    }
+
+    /// The crossfade length that applies to the queue as it is (0 = none); the exception
+    /// for consecutive album tracks is made per track change in [`crossfade_for`].
+    fn fade_ms(&self) -> u32 {
+        match self.crossfade {
+            Crossfade::Off => 0,
+            Crossfade::Flow if self.flow.is_none() => 0,
+            Crossfade::Flow | Crossfade::Always => self.crossfade_ms,
+        }
+    }
+
+    /// While a crossfade is configured, every source is decoded further ahead (its end must
+    /// be decoded with more than the fade still to play) and the next track opens earlier.
+    fn crossfade_changed(&mut self) {
+        let fade_ms = self.fade_ms();
+        let target = if fade_ms > 0 {
+            READ_AHEAD_MS.max(fade_ms.saturating_add(1_000))
+        } else {
+            READ_AHEAD_MS
+        };
+        self.playback.set_read_ahead_ms(target);
+        if let (Some(current), Preload::Ready(next)) = (&self.current, &self.preload) {
+            let ms = self.crossfade_to(current, next);
+            self.playback.set_next_crossfade(ms);
+        }
+    }
+
+    /// How long `next` blends into `current`.
+    fn crossfade_to(&self, current: &Track, next: &Track) -> u32 {
+        crossfade_for(
+            self.crossfade,
+            self.crossfade_ms,
+            self.flow.is_some(),
+            current,
+            next,
+        )
+    }
+
+    /// How long before the current track's end the next one is opened.
+    fn preload_ms(&self) -> u64 {
+        match self.fade_ms() {
+            0 => PRELOAD_MS,
+            ms => PRELOAD_MS.max(ms as u64 + 3_000),
+        }
     }
 
     fn run(&mut self, commands: Receiver<Command>) {
@@ -724,6 +809,7 @@ impl Engine {
                 // A pending hand-over is settled at the index it belongs to.
                 self.settle_handover();
                 self.flow = flow;
+                self.crossfade_changed();
                 self.queue.set(ids, start);
                 self.queue_changed();
                 self.failures = 0;
@@ -784,11 +870,17 @@ impl Engine {
             Command::SetReplayGain(mode) => {
                 self.replay_gain = mode;
                 if let Some(track) = &self.current {
-                    self.playback.set_gain(track_gain(track, mode));
+                    // Playing already: a ramp, not a jump.
+                    self.playback.ramp_gain(track_gain(track, mode));
                 }
                 if let Preload::Ready(track) = &self.preload {
                     self.playback.set_next_gain(track_gain(track, mode));
                 }
+            }
+            Command::SetCrossfade(mode, ms) => {
+                self.crossfade = mode;
+                self.crossfade_ms = ms;
+                self.crossfade_changed();
             }
             Command::Shutdown => {}
         }
@@ -990,9 +1082,17 @@ impl Engine {
                 }
                 self.preload = match opened.result {
                     Ok((track, source)) => {
-                        self.playback.queue_next(Some(source));
-                        self.playback
-                            .set_next_gain(track_gain(&track, self.replay_gain));
+                        let crossfade_ms = self
+                            .current
+                            .as_ref()
+                            .map_or(0, |current| self.crossfade_to(current, &track));
+                        self.playback.queue_next_with(
+                            Some(source),
+                            NextOptions {
+                                gain: track_gain(&track, self.replay_gain),
+                                crossfade_ms,
+                            },
+                        );
                         Preload::Ready(Box::new(track))
                     }
                     Err(message) => Preload::Failed(opened.index, opened.id, message),
@@ -1064,8 +1164,8 @@ impl Engine {
         }
     }
 
-    /// Opens the next track once the current one is within [`PRELOAD_MS`] of its end, or
-    /// once it has been decoded to its end. The second rule needs no duration, so tracks
+    /// Opens the next track once the current one is within [`PRELOAD_MS`] of its end (with a
+    /// crossfade, `max(PRELOAD_MS, crossfade + 3 s)`), or once it has been decoded to its end. The second rule needs no duration, so tracks
     /// whose length the library does not know (often FFmpeg-decoded ones) are gapless too.
     fn maybe_preload(&mut self) {
         if !self.gapless || !matches!(self.preload, Preload::None) || !self.seekable() {
@@ -1082,7 +1182,7 @@ impl Engine {
             && track
                 .duration_ms
                 .saturating_sub(self.playback.position_ms())
-                <= PRELOAD_MS;
+                <= self.preload_ms();
         if !near_end && !self.playback.current_exhausted() {
             return;
         }
@@ -2547,6 +2647,144 @@ mod tests {
                     .any(|e| is_state(e, PlayerStatus::Idle))
         });
         assert_eq!(errors(&events), ids(&["missing"]));
+    }
+
+    /// A track of `album` at `track_no`.
+    fn album_track(id: &str, album: &str, track_no: u32) -> Track {
+        let mut track = fixture_track(id, "tagged.flac");
+        track.album_id = album.to_string();
+        track.track_no = Some(track_no);
+        track
+    }
+
+    #[test]
+    fn crossfade_for_rules() {
+        let one = album_track("1", "x", 1);
+        let two = album_track("2", "x", 2);
+        let three = album_track("3", "x", 3);
+        let other = album_track("o", "y", 2);
+        let mut untracked = album_track("u", "x", 2);
+        untracked.track_no = None;
+        let cases = [
+            // (mode, in Flow, current, next, expected)
+            (Crossfade::Off, false, &one, &other, 0),
+            (Crossfade::Off, true, &one, &other, 0),
+            (Crossfade::Flow, false, &one, &other, 0),
+            (Crossfade::Flow, true, &one, &other, 4_000),
+            (Crossfade::Flow, true, &one, &two, 4_000),
+            (Crossfade::Always, false, &one, &other, 4_000),
+            (Crossfade::Always, true, &one, &other, 4_000),
+            // The following track of the same album stays gapless, in Flow or not.
+            (Crossfade::Always, false, &one, &two, 0),
+            (Crossfade::Always, true, &two, &three, 0),
+            // Not the following one: a skip within the album, a step back, no number.
+            (Crossfade::Always, false, &one, &three, 4_000),
+            (Crossfade::Always, false, &two, &one, 4_000),
+            (Crossfade::Always, false, &one, &untracked, 4_000),
+        ];
+        for (mode, in_flow, current, next, expected) in cases {
+            assert_eq!(
+                crossfade_for(mode, 4_000, in_flow, current, next),
+                expected,
+                "{mode:?}, in Flow {in_flow}, {} -> {}",
+                current.id,
+                next.id
+            );
+        }
+    }
+
+    /// An opener of [`Tone`]s: `values` maps a track id to its value and length.
+    fn tone_opener(values: Vec<(&'static str, f32, u64)>) -> Opener {
+        Arc::new(move |track: &Track, _spec: StreamSpec| {
+            let (_, value, ms) = values
+                .iter()
+                .find(|(id, _, _)| *id == track.id)
+                .copied()
+                .ok_or_else(|| anyhow::anyhow!("no tone for {}", track.id))?;
+            Ok(Box::new(Tone::new(value, ms)) as Box<dyn AudioSource>)
+        })
+    }
+
+    fn crossfade_always(ms: u32) -> PlayerOptions {
+        PlayerOptions {
+            crossfade: Crossfade::Always,
+            crossfade_ms: ms,
+            ..PlayerOptions::default()
+        }
+    }
+
+    #[test]
+    fn crossfade_blends_the_next_track_in() {
+        let mut a = album_track("a", "x", 1);
+        a.duration_ms = 2_000;
+        let mut c = album_track("c", "y", 1);
+        c.duration_ms = 2_000;
+        let tracks = [a, c];
+        let resolver: Resolver =
+            Arc::new(move |id: &str| tracks.iter().find(|track| track.id == id).cloned());
+        let opener = tone_opener(vec![("a", TONE_A, 2_000), ("c", TONE_C, 2_000)]);
+        let h = harness_full(resolver, 5.0, Some(opener), crossfade_always(1_000));
+        h.player.play(ids(&["a", "c"]), 0).unwrap();
+        let events = collect_until(&h.events, Duration::from_secs(10), back_to_idle);
+        assert_eq!(changes(&events), ids(&["a", "c"]));
+        let played = h.played.lock().unwrap().clone();
+        let frames = played.len() / 2;
+        assert!(
+            frames.abs_diff(3 * 44_100) <= 4_096,
+            "{frames} frames for 2 s + 2 s with a 1 s overlap"
+        );
+        let blended = played
+            .iter()
+            .filter(|s| (**s - TONE_A).abs() > 1e-6 && (**s - TONE_C).abs() > 1e-6)
+            .count();
+        assert!(blended > 2 * 35_000, "{blended} samples of the two mixed");
+        assert!(
+            played.iter().all(|s| *s <= 0.56),
+            "equal power, no overshoot"
+        );
+    }
+
+    #[test]
+    fn manual_next_does_not_fade() {
+        let mut a = album_track("a", "x", 1);
+        a.duration_ms = SILENCE_MS;
+        let mut b = album_track("b", "y", 1);
+        b.duration_ms = 1_000;
+        let tracks = [a, b];
+        let resolver: Resolver =
+            Arc::new(move |id: &str| tracks.iter().find(|track| track.id == id).cloned());
+        let (preloaded_tx, preloaded) = crossbeam_channel::unbounded();
+        let tones = tone_opener(vec![("a", TONE_A, SILENCE_MS), ("b", TONE_C, 1_000)]);
+        let opener: Opener = Arc::new(move |track: &Track, spec: StreamSpec| {
+            let source = tones(track, spec);
+            if std::thread::current().name() == Some(OPENER_NEXT_THREAD) {
+                let _ = preloaded_tx.send(());
+            }
+            source
+        });
+        let h = harness_full(resolver, 1.0, Some(opener), crossfade_always(4_000));
+        h.player.play(ids(&["a", "b"]), 0).unwrap();
+        // With a 4 s fade the next track opens 7 s ahead: at once for "b".
+        preloaded
+            .recv_timeout(Duration::from_secs(5))
+            .expect("b is pre-opened with a fade queued");
+        std::thread::sleep(Duration::from_millis(50));
+        h.player.next().unwrap();
+        let events = collect_until(&h.events, Duration::from_secs(10), back_to_idle);
+        assert_eq!(changes(&events), ids(&["a", "b"]));
+        let played = h.played.lock().unwrap().clone();
+        assert!(
+            played
+                .iter()
+                .all(|s| (*s - TONE_A).abs() < 1e-6 || (*s - TONE_C).abs() < 1e-6),
+            "a was cut, nothing blended"
+        );
+        assert_eq!(
+            played_of(&h.played, TONE_C),
+            44_100 * 2,
+            "all of b, from its start"
+        );
+        assert!(played_of(&h.played, TONE_A) < TONE_A_SAMPLES * 4);
     }
 
     fn levels(events: &[PlayerEvent]) -> Vec<f32> {

@@ -157,6 +157,8 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
             device: initial.output_device,
             gapless: initial.gapless,
             replay_gain: initial.replay_gain,
+            crossfade: initial.crossfade,
+            crossfade_ms: initial.crossfade_ms,
         },
     );
     let lookup = library::lookup::LookupWorker::spawn(

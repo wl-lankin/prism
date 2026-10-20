@@ -25,7 +25,15 @@ pub struct LevelMeter {
     level: f32,
 }
 
-/// RMS (linear) to 0..1: `clamp((20*log10(rms) + 50) / 50, 0, 1)`.
+/// The equal-power crossfade at `t` (0..=1, clamped): `(outgoing, incoming)` factors,
+/// `(cos(t*pi/2), sin(t*pi/2))`. Their squares always add up to 1, so two uncorrelated
+/// tracks keep their loudness through the fade.
+pub fn equal_power(t: f32) -> (f32, f32) {
+    let angle = t.clamp(0.0, 1.0) * std::f32::consts::FRAC_PI_2;
+    (angle.cos(), angle.sin())
+}
+
+/// RMS (linear) to 0..1:`clamp((20*log10(rms) + 50) / 50, 0, 1)`.
 pub fn level_of_rms(rms: f32) -> f32 {
     if rms <= 0.0 || !rms.is_finite() {
         return 0.0;
@@ -138,6 +146,21 @@ mod tests {
         meter.push(&vec![0.0; RATE as usize]);
         meter.push(&sine(0.5, 20));
         assert!(meter.level() > 0.75, "{}", meter.level());
+    }
+
+    #[test]
+    fn equal_power_is_constant_power() {
+        for step in 0..=10 {
+            let (a, b) = equal_power(step as f32 / 10.0);
+            assert!(
+                (a * a + b * b - 1.0).abs() <= 1e-6,
+                "at {step}/10: {a}, {b}"
+            );
+        }
+        assert_eq!(equal_power(0.0), (1.0, 0.0));
+        let (a, b) = equal_power(1.0);
+        assert!(a.abs() < 1e-6 && (b - 1.0).abs() < 1e-6);
+        assert_eq!(equal_power(-1.0), equal_power(0.0), "clamped");
     }
 
     #[test]

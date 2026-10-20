@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::Receiver;
 
-pub use mix::LevelMeter;
+pub use mix::{equal_power, LevelMeter};
 pub use output::{
     list_devices, CpalOutputFactory, NullSink, Output, OutputEvent, OutputFactory, OutputSink,
 };
@@ -48,9 +48,9 @@ const STARVE_WAIT: Duration = Duration::ZERO;
 pub enum PumpStatus {
     /// Still playing the same source.
     Playing,
-    /// The current source ended and the queued next one took over. This fires when the next
-    /// source starts being decoded, before it is audible: delay a UI track change by
-    /// [`Playback::queued_ms`].
+    /// The current source ended and the queued next one took over, or a crossfade into it
+    /// started. This fires when the next source starts being decoded, before it is audible:
+    /// delay a UI track change by [`Playback::queued_ms`].
     Advanced,
     /// No source left; everything decoded has been handed to the sink.
     Finished,
@@ -85,8 +85,18 @@ pub struct Playback {
     /// A source error hit right after a hand-over, reported on the next pump.
     deferred_error: Option<anyhow::Error>,
     /// Linear factor for the current source's samples (ReplayGain) and for `next`.
-    gain: f32,
+    gain: Gain,
     next_gain: f32,
+    /// How long `next` blends into the current source's end; 0 is a gapless hand-over.
+    next_fade_ms: u32,
+    /// The previous source playing out under the current one, while a crossfade runs.
+    fade: Option<Fade>,
+    /// How far ahead every source is decoded ([`READ_AHEAD_MS`], more for a crossfade).
+    read_ahead_ms: u32,
+    /// The current source's output-spec samples during a crossfade, before they are mixed.
+    incoming: Vec<f32>,
+    /// The outgoing source's decoded samples during a crossfade.
+    outgoing: Vec<f32>,
     /// How long one `pump` may wait for a decode thread with nothing buffered
     /// ([`STARVE_WAIT`], zero, in production).
     starve_wait: Duration,
@@ -145,6 +155,174 @@ fn sane_gain(gain: f32) -> f32 {
     }
 }
 
+/// How the source queued with [`Playback::queue_next_with`] takes over.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NextOptions {
+    /// Linear factor for its samples (ReplayGain).
+    pub gain: f32,
+    /// How long it blends into the current source's end (equal power); 0 is gapless.
+    pub crossfade_ms: u32,
+}
+
+impl Default for NextOptions {
+    fn default() -> Self {
+        NextOptions {
+            gain: 1.0,
+            crossfade_ms: 0,
+        }
+    }
+}
+
+/// Frames in `ms` at `sample_rate`.
+fn frames_in(ms: u32, sample_rate: u32) -> u64 {
+    ms as u64 * sample_rate as u64 / 1000
+}
+
+/// A linear gain that moves to a new value over one ramp (as long as the output's volume
+/// ramps in [`ring`]) instead of jumping, so a change does not click.
+#[derive(Clone, Copy, Debug)]
+struct Gain {
+    value: f32,
+    target: f32,
+    /// Change per frame while ramping.
+    step: f32,
+}
+
+impl Gain {
+    fn fixed(gain: f32) -> Gain {
+        Gain {
+            value: gain,
+            target: gain,
+            step: 0.0,
+        }
+    }
+
+    fn ramp_to(&mut self, target: f32, sample_rate: u32) {
+        self.target = target;
+        self.step = (target - self.value).abs() / ring::ramp_frames(sample_rate);
+    }
+
+    /// Scales interleaved `samples` (clamped to full scale), ramping frame by frame.
+    fn apply(&mut self, samples: &mut [f32], channels: usize) {
+        if self.value == self.target {
+            if self.value != 1.0 {
+                let gain = self.value;
+                samples
+                    .iter_mut()
+                    .for_each(|sample| *sample = (*sample * gain).clamp(-1.0, 1.0));
+            }
+            return;
+        }
+        for frame in samples.chunks_mut(channels.max(1)) {
+            self.value = ring::ramp_toward(self.value, self.target, self.step);
+            let gain = self.value;
+            frame
+                .iter_mut()
+                .for_each(|sample| *sample = (*sample * gain).clamp(-1.0, 1.0));
+        }
+    }
+}
+
+/// The previous source playing out under the next one. It starts only once the previous
+/// source has been decoded to its end, so reading the rest of it never waits.
+struct Fade {
+    outgoing: ReadAhead,
+    /// The outgoing source's own resampler: both sources are converted separately.
+    resampler: Resampler,
+    gain: f32,
+    /// Output-spec samples of the outgoing source not mixed yet, from `offset`.
+    buffer: Vec<f32>,
+    offset: usize,
+    /// Nothing more comes from the outgoing source.
+    ended: bool,
+    /// Output frames mixed so far, of `length`.
+    position: u64,
+    length: u64,
+}
+
+impl Fade {
+    /// Buffers at least one more outgoing frame of `channels` samples; false once the
+    /// outgoing source has nothing left.
+    fn ensure(&mut self, channels: usize, scratch: &mut Vec<f32>) -> bool {
+        while self.buffer.len() - self.offset < channels {
+            if self.ended {
+                return false;
+            }
+            self.buffer.drain(..self.offset);
+            self.offset = 0;
+            scratch.clear();
+            match self.outgoing.try_read(scratch) {
+                Ok(ReadOutcome::Frames(_)) => {
+                    let gain = self.gain;
+                    if gain != 1.0 {
+                        scratch
+                            .iter_mut()
+                            .for_each(|sample| *sample = (*sample * gain).clamp(-1.0, 1.0));
+                    }
+                    if self.resampler.process(scratch, &mut self.buffer).is_err() {
+                        self.ended = true;
+                    }
+                }
+                // The previous track is almost over: an error at its very end only ends it.
+                // An exhausted source is never starved; if it were, it ends here too.
+                Ok(ReadOutcome::End | ReadOutcome::Starved) | Err(_) => {
+                    let _ = self.resampler.flush(&mut self.buffer);
+                    self.ended = true;
+                }
+            }
+        }
+        true
+    }
+
+    fn done(&self) -> bool {
+        self.position >= self.length
+    }
+
+    /// Mixes `incoming` (output spec) with the outgoing source into `out`: equal power over
+    /// the fade, then the incoming samples alone. Clamped to full scale.
+    fn mix(
+        &mut self,
+        incoming: &[f32],
+        channels: usize,
+        scratch: &mut Vec<f32>,
+        out: &mut Vec<f32>,
+    ) {
+        let channels = channels.max(1);
+        for frame in incoming.chunks(channels) {
+            if self.done() {
+                out.extend_from_slice(frame);
+                continue;
+            }
+            let (fade_out, fade_in) = equal_power(self.position as f32 / self.length as f32);
+            let old = self.ensure(channels, scratch);
+            for (channel, &sample) in frame.iter().enumerate() {
+                let previous = if old {
+                    self.buffer[self.offset + channel]
+                } else {
+                    0.0
+                };
+                out.push((previous * fade_out + sample * fade_in).clamp(-1.0, 1.0));
+            }
+            if old {
+                self.offset += channels;
+            }
+            self.position += 1;
+        }
+    }
+
+    /// The incoming source ended inside the fade: the rest of the outgoing one fades out alone.
+    fn play_out(&mut self, channels: usize, scratch: &mut Vec<f32>, out: &mut Vec<f32>) {
+        let channels = channels.max(1);
+        while !self.done() && self.ensure(channels, scratch) {
+            let (fade_out, _) = equal_power(self.position as f32 / self.length as f32);
+            let frame = &self.buffer[self.offset..self.offset + channels];
+            out.extend(frame.iter().map(|sample| sample * fade_out));
+            self.offset += channels;
+            self.position += 1;
+        }
+    }
+}
+
 impl Playback {
     /// Opens `device` (falling back to the default output). Never fails for lack of a device:
     /// without one, playback starts on a [`NullSink`] and `pump` reports `NoDevice`.
@@ -180,8 +358,13 @@ impl Playback {
             base_ms: 0,
             frames_read: 0,
             deferred_error: None,
-            gain: 1.0,
+            gain: Gain::fixed(1.0),
             next_gain: 1.0,
+            next_fade_ms: 0,
+            fade: None,
+            read_ahead_ms: READ_AHEAD_MS,
+            incoming: Vec::new(),
+            outgoing: Vec::new(),
             starve_wait: STARVE_WAIT,
             meter: LevelMeter::new(spec.sample_rate, spec.channels),
             heard: LevelTimeline::new(),
@@ -212,10 +395,11 @@ impl Playback {
     /// pre-opened next source) and starts decoding it ahead.
     pub fn set_source(&mut self, source: Box<dyn AudioSource>) -> anyhow::Result<()> {
         self.resampler = Some(Resampler::new(source.spec(), self.sink.spec())?);
-        self.current = Some(ReadAhead::spawn(source, READ_AHEAD_MS));
+        self.current = Some(ReadAhead::spawn(source, self.read_ahead_ms));
         self.next = None;
-        self.gain = 1.0;
+        self.gain = Gain::fixed(1.0);
         self.next_gain = 1.0;
+        self.next_fade_ms = 0;
         self.deferred_error = None;
         self.clear_buffers();
         self.base_ms = 0;
@@ -225,10 +409,36 @@ impl Playback {
     /// Pre-opened source to continue with when the current one ends. With the same spec the
     /// sample boundary is continuous.
     /// The next source starts at gain 1.0; see [`Playback::set_next_gain`]. It is decoded
-    /// ahead from now on, so its start is ready when the current one ends.
+    /// ahead from now on, so its start is ready when the current one ends. Same as
+    /// [`queue_next_with`](Self::queue_next_with) without a crossfade.
     pub fn queue_next(&mut self, source: Option<Box<dyn AudioSource>>) {
-        self.next = source.map(|source| ReadAhead::spawn(source, READ_AHEAD_MS));
-        self.next_gain = 1.0;
+        self.queue_next_with(source, NextOptions::default());
+    }
+
+    /// Like [`queue_next`](Self::queue_next), with the next source's gain and crossfade.
+    ///
+    /// A crossfade starts once the current source has been decoded to its end and at most
+    /// `crossfade_ms` of it is left; it lasts `min(crossfade_ms, what is left)`. Both sources
+    /// are resampled separately and mixed with [`equal_power`], each with its own gain, and
+    /// `pump` reports `Advanced` when the fade starts.
+    pub fn queue_next_with(&mut self, source: Option<Box<dyn AudioSource>>, options: NextOptions) {
+        self.next = source.map(|source| ReadAhead::spawn(source, self.read_ahead_ms));
+        self.next_gain = sane_gain(options.gain);
+        self.next_fade_ms = options.crossfade_ms;
+    }
+
+    /// Changes the crossfade into the queued next source (one that has not started yet).
+    pub fn set_next_crossfade(&mut self, crossfade_ms: u32) {
+        self.next_fade_ms = crossfade_ms;
+    }
+
+    /// How far ahead the current, the next and every later source are decoded. A crossfade
+    /// needs more than its own length buffered when a source has been decoded to its end.
+    pub fn set_read_ahead_ms(&mut self, ms: u32) {
+        self.read_ahead_ms = ms;
+        for reader in self.current.iter_mut().chain(self.next.iter_mut()) {
+            reader.set_target_ms(ms);
+        }
     }
 
     /// Stops playback and drops the current and next source (their decode threads stop on
@@ -245,6 +455,7 @@ impl Playback {
     pub fn drop_sources(&mut self) {
         self.current = None;
         self.next = None;
+        self.fade = None;
         self.deferred_error = None;
     }
 
@@ -258,6 +469,7 @@ impl Playback {
             .take()
             .into_iter()
             .chain(self.next.take())
+            .chain(self.fade.take().map(|fade| fade.outgoing))
             .collect();
         readers.iter().for_each(ReadAhead::stop);
         for reader in &readers {
@@ -300,9 +512,21 @@ impl Playback {
     }
 
     /// A linear factor applied to the current source's samples (ReplayGain), before the
-    /// output volume. Every new source starts at 1.0.
+    /// output volume, at once (for a source that is just starting). Every new source starts
+    /// at 1.0.
     pub fn set_gain(&mut self, gain: f32) {
-        self.gain = sane_gain(gain);
+        self.gain = Gain::fixed(sane_gain(gain));
+    }
+
+    /// Like [`set_gain`](Self::set_gain) for a source already playing (a ReplayGain mode
+    /// change): the factor moves there over 20 ms, as the output's volume does, so it does
+    /// not click.
+    pub fn ramp_gain(&mut self, gain: f32) {
+        let gain = sane_gain(gain);
+        match &self.current {
+            Some(current) => self.gain.ramp_to(gain, current.spec().sample_rate),
+            None => self.gain = Gain::fixed(gain),
+        }
     }
 
     /// The gain for the source queued with [`Playback::queue_next`]; it takes over with it.
@@ -434,6 +658,11 @@ impl Playback {
             self.pending.clear();
             self.pending_offset = 0;
 
+            if self.fade_due() {
+                self.start_fade()?;
+                *status = PumpStatus::Advanced;
+                continue;
+            }
             let Some(current) = self.current.as_mut() else {
                 return Ok(if *status == PumpStatus::Advanced {
                     *status
@@ -444,17 +673,29 @@ impl Playback {
             let Some(resampler) = self.resampler.as_mut() else {
                 return Ok(PumpStatus::Finished);
             };
+            let channels = self.sink.spec().channels as usize;
             self.decoded.clear();
             match current.try_read(&mut self.decoded)? {
                 ReadOutcome::Frames(frames) => {
                     self.frames_read += frames as u64;
-                    if self.gain != 1.0 {
-                        let gain = self.gain;
-                        self.decoded
-                            .iter_mut()
-                            .for_each(|sample| *sample = (*sample * gain).clamp(-1.0, 1.0));
+                    self.gain
+                        .apply(&mut self.decoded, current.spec().channels as usize);
+                    match self.fade.as_mut() {
+                        None => resampler.process(&self.decoded, &mut self.pending)?,
+                        Some(fade) => {
+                            self.incoming.clear();
+                            resampler.process(&self.decoded, &mut self.incoming)?;
+                            fade.mix(
+                                &self.incoming,
+                                channels,
+                                &mut self.outgoing,
+                                &mut self.pending,
+                            );
+                            if fade.done() {
+                                self.fade = None;
+                            }
+                        }
                     }
-                    resampler.process(&self.decoded, &mut self.pending)?;
                     continue;
                 }
                 ReadOutcome::Starved => {
@@ -471,6 +712,19 @@ impl Playback {
 
             // The current source ended.
             let spec = current.spec();
+            if let Some(mut fade) = self.fade.take() {
+                // It ended inside the fade (a track shorter than the fade): its tail goes in
+                // the mix and the rest of the previous one fades out alone.
+                self.incoming.clear();
+                resampler.flush(&mut self.incoming)?;
+                fade.mix(
+                    &self.incoming,
+                    channels,
+                    &mut self.outgoing,
+                    &mut self.pending,
+                );
+                fade.play_out(channels, &mut self.outgoing, &mut self.pending);
+            }
             match self.next.take() {
                 Some(next) => {
                     // Same spec: the resampler keeps running, so the boundary is seamless.
@@ -479,7 +733,8 @@ impl Playback {
                         self.resampler = Some(Resampler::new(next.spec(), self.sink.spec())?);
                     }
                     self.current = Some(next);
-                    self.gain = std::mem::replace(&mut self.next_gain, 1.0);
+                    self.gain = Gain::fixed(std::mem::replace(&mut self.next_gain, 1.0));
+                    self.next_fade_ms = 0;
                     self.base_ms = 0;
                     self.frames_read = 0;
                     *status = PumpStatus::Advanced;
@@ -490,6 +745,65 @@ impl Playback {
                 }
             }
         }
+    }
+
+    /// A crossfade into the queued next source is due: the current one has been decoded to
+    /// its end and no more than the fade's length of it is left.
+    fn fade_due(&self) -> bool {
+        if self.fade.is_some()
+            || self.next_fade_ms == 0
+            || self.next.is_none()
+            || self.resampler.is_none()
+        {
+            return false;
+        }
+        let Some(current) = &self.current else {
+            return false;
+        };
+        if !current.exhausted() {
+            return false;
+        }
+        let left = current.buffered_frames();
+        left > 0 && left <= frames_in(self.next_fade_ms, current.spec().sample_rate)
+    }
+
+    /// The queued next source becomes the current one and the current one plays out under
+    /// it for `min(crossfade, what is left)`.
+    fn start_fade(&mut self) -> anyhow::Result<()> {
+        let output = self.sink.spec();
+        let Some(next_spec) = self.next.as_ref().map(ReadAhead::spec) else {
+            return Ok(());
+        };
+        // Each source has a resampler of its own; the outgoing one keeps its state.
+        let incoming = Resampler::new(next_spec, output)?;
+        let (Some(outgoing), Some(next), Some(resampler)) = (
+            self.current.take(),
+            self.next.take(),
+            self.resampler.replace(incoming),
+        ) else {
+            return Ok(());
+        };
+        let left = outgoing.buffered_frames() as f64 * output.sample_rate as f64
+            / outgoing.spec().sample_rate.max(1) as f64;
+        let length = frames_in(self.next_fade_ms, output.sample_rate)
+            .min(left as u64)
+            .max(1);
+        self.fade = Some(Fade {
+            outgoing,
+            resampler,
+            gain: self.gain.target,
+            buffer: Vec::new(),
+            offset: 0,
+            ended: false,
+            position: 0,
+            length,
+        });
+        self.current = Some(next);
+        self.gain = Gain::fixed(std::mem::replace(&mut self.next_gain, 1.0));
+        self.next_fade_ms = 0;
+        self.base_ms = 0;
+        self.frames_read = 0;
+        Ok(())
     }
 
     /// Opens the default output in place of the [`NullSink`].
@@ -518,6 +832,8 @@ impl Playback {
     fn resume(&mut self) -> anyhow::Result<()> {
         self.pending.clear();
         self.pending_offset = 0;
+        // A crossfade in progress is cut: the new output continues with the incoming track.
+        self.fade = None;
         let Some(current) = self.current.as_mut() else {
             self.resume_ms = None;
             return Ok(());
@@ -537,6 +853,8 @@ impl Playback {
     }
 
     fn clear_buffers(&mut self) {
+        // A seek, a stop or a new source cuts a crossfade in progress.
+        self.fade = None;
         self.pending.clear();
         self.pending_offset = 0;
         self.frames_read = 0;
@@ -1262,6 +1580,283 @@ mod tests {
         playback.set_paused(false);
         playback.seek(0).unwrap();
         assert_eq!(playback.level(), 0.0, "a seek starts over");
+    }
+
+    /// `ms` of a constant `value` at `spec`, read 1024 frames at a time.
+    struct Dc {
+        value: f32,
+        spec: StreamSpec,
+        frames_left: u64,
+    }
+
+    fn dc(value: f32, spec: StreamSpec, ms: u32) -> Box<dyn AudioSource> {
+        Box::new(Dc {
+            value,
+            spec,
+            frames_left: frames_in(ms, spec.sample_rate),
+        })
+    }
+
+    impl AudioSource for Dc {
+        fn spec(&self) -> StreamSpec {
+            self.spec
+        }
+        fn read(&mut self, out: &mut Vec<f32>) -> anyhow::Result<usize> {
+            let frames = self.frames_left.min(1024) as usize;
+            out.extend(std::iter::repeat_n(
+                self.value,
+                frames * self.spec.channels as usize,
+            ));
+            self.frames_left -= frames as u64;
+            Ok(frames)
+        }
+        fn seek(&mut self, _ms: u64) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn duration_ms(&self) -> Option<u64> {
+            None
+        }
+    }
+
+    /// Frames the read-ahead hands over at a time: the granularity of a fade's start.
+    const BLOCK_FRAMES: usize = 4096;
+
+    /// Waits until the current source is decoded to its end without reading any of it, so a
+    /// fade starts exactly where the rules say, whatever the decode thread's timing.
+    fn wait_exhausted(playback: &Playback) {
+        wait_until(Duration::from_secs(10), || playback.current_exhausted());
+    }
+
+    fn fade_options(crossfade_ms: u32) -> NextOptions {
+        NextOptions {
+            gain: 1.0,
+            crossfade_ms,
+        }
+    }
+
+    /// Left channel of interleaved stereo samples.
+    fn left(samples: &[f32]) -> Vec<f32> {
+        samples.iter().step_by(2).copied().collect()
+    }
+
+    #[test]
+    fn crossfade_overlaps_tracks() {
+        let factory = FakeFactory::new(STEREO_48K, usize::MAX);
+        let mut playback = Playback::new(factory.clone(), None).unwrap();
+        playback.set_source(dc(1.0, STEREO_48K, 3_000)).unwrap();
+        playback.queue_next_with(Some(dc(0.5, STEREO_48K, 3_000)), fade_options(1_000));
+        wait_exhausted(&playback);
+        let (statuses, played) = play_until(&mut playback, &factory, |status| {
+            status == PumpStatus::Finished
+        });
+        assert!(statuses.contains(&PumpStatus::Advanced), "{statuses:?}");
+
+        let frames = left(&played);
+        assert!(
+            frames.len().abs_diff(240_000) <= BLOCK_FRAMES,
+            "{} frames for 3 s + 3 s with a 1 s overlap",
+            frames.len()
+        );
+        // All of the second track is played; the fade is the start of it.
+        let fade_start = frames.len() - 144_000;
+        let fade_end = 144_000;
+        assert!(fade_end - fade_start > 48_000 - BLOCK_FRAMES);
+        assert!(frames[..fade_start].iter().all(|s| *s == 1.0), "a alone");
+        let window = &frames[fade_start..fade_end];
+        assert!(
+            window.iter().all(|s| *s <= 1.0 && *s >= 0.5 - 1e-6),
+            "no sample above full scale"
+        );
+        assert!(
+            window.windows(2).all(|w| w[1] <= w[0] + 1e-6),
+            "the window only moves from a toward b"
+        );
+        assert!((window[0] - 1.0).abs() < 1e-3, "{}", window[0]);
+        let last = window[window.len() - 1];
+        assert!((last - 0.5).abs() < 0.01, "{last}");
+        assert!(frames[fade_end..].iter().all(|s| *s == 0.5), "b alone");
+    }
+
+    #[test]
+    fn short_track_shortens_the_fade() {
+        let factory = FakeFactory::new(STEREO_48K, usize::MAX);
+        let mut playback = Playback::new(factory.clone(), None).unwrap();
+        playback.set_source(dc(1.0, STEREO_48K, 500)).unwrap();
+        playback.queue_next_with(Some(dc(0.5, STEREO_48K, 3_000)), fade_options(4_000));
+        wait_exhausted(&playback);
+        let (statuses, played) = play_until(&mut playback, &factory, |status| {
+            status == PumpStatus::Finished
+        });
+        assert!(statuses.contains(&PumpStatus::Advanced), "{statuses:?}");
+        let frames = left(&played);
+        assert_eq!(
+            frames.len(),
+            144_000,
+            "3.5 s of tracks, 0.5 s of it overlapped"
+        );
+        assert!(frames.iter().all(|s| *s <= 1.0 && *s >= 0.5 - 1e-6));
+        assert!(
+            frames[24_000..].iter().all(|s| *s == 0.5),
+            "the fade took 0.5 s"
+        );
+    }
+
+    #[test]
+    fn next_shorter_than_the_fade_lets_the_previous_one_fade_out() {
+        let factory = FakeFactory::new(STEREO_48K, usize::MAX);
+        let mut playback = Playback::new(factory.clone(), None).unwrap();
+        playback.set_source(dc(1.0, STEREO_48K, 2_000)).unwrap();
+        playback.queue_next_with(Some(dc(0.5, STEREO_48K, 500)), fade_options(2_000));
+        wait_exhausted(&playback);
+        let (_, played) = play_until(&mut playback, &factory, |status| {
+            status == PumpStatus::Finished
+        });
+        let frames = left(&played);
+        assert_eq!(frames.len(), 96_000, "the previous track's length");
+        assert!(frames.iter().all(|s| (0.0..=1.0).contains(s)));
+        assert!(frames[95_999] < 0.01, "faded out: {}", frames[95_999]);
+    }
+
+    #[test]
+    fn crossfade_zero_is_gapless() {
+        let factory = FakeFactory::new(STEREO_44K, usize::MAX);
+        let mut playback = Playback::new(factory.clone(), None).unwrap();
+        playback.set_source(wav("gap_a.wav")).unwrap();
+        playback.queue_next_with(Some(wav("gap_b.wav")), fade_options(0));
+        assert_eq!(pump_settled(&mut playback).unwrap(), PumpStatus::Advanced);
+        assert_eq!(pump_settled(&mut playback).unwrap(), PumpStatus::Finished);
+        let expected: Vec<f32> = [decode_all("gap_a.wav"), decode_all("gap_b.wav")].concat();
+        let played = factory.last_queue().lock().unwrap().clone();
+        assert_eq!(played.len(), expected.len());
+        assert!(played == expected, "the boundary is sample-continuous");
+    }
+
+    #[test]
+    fn crossfade_keeps_each_sources_gain() {
+        let factory = FakeFactory::new(STEREO_48K, usize::MAX);
+        let mut playback = Playback::new(factory.clone(), None).unwrap();
+        playback.set_source(dc(1.0, STEREO_48K, 2_000)).unwrap();
+        playback.set_gain(0.5);
+        playback.queue_next_with(
+            Some(dc(1.0, STEREO_48K, 2_000)),
+            NextOptions {
+                gain: 0.25,
+                crossfade_ms: 500,
+            },
+        );
+        wait_exhausted(&playback);
+        let (_, played) = play_until(&mut playback, &factory, |status| {
+            status == PumpStatus::Finished
+        });
+        let frames = left(&played);
+        let fade_start = frames.len() - 96_000;
+        let length = 96_000 - fade_start;
+        assert!(frames[..fade_start].iter().all(|s| *s == 0.5));
+        for (position, sample) in frames[fade_start..96_000].iter().enumerate() {
+            let (a, b) = equal_power(position as f32 / length as f32);
+            assert!(
+                (sample - (0.5 * a + 0.25 * b)).abs() < 1e-5,
+                "at {position}"
+            );
+        }
+        assert!(frames[96_000..].iter().all(|s| *s == 0.25));
+    }
+
+    #[test]
+    fn crossfade_resamples_each_source_to_the_output() {
+        let factory = FakeFactory::new(STEREO_48K, usize::MAX);
+        let mut playback = Playback::new(factory.clone(), None).unwrap();
+        playback.set_source(dc(0.5, STEREO_48K, 3_000)).unwrap();
+        playback.queue_next_with(Some(dc(0.5, STEREO_44K, 3_000)), fade_options(1_000));
+        wait_exhausted(&playback);
+        let (_, played) = play_until(&mut playback, &factory, |status| {
+            status == PumpStatus::Finished
+        });
+        let frames = left(&played);
+        assert!(
+            frames.len().abs_diff(240_000) <= BLOCK_FRAMES + 64,
+            "{} frames: the 44.1 kHz track at 48 kHz",
+            frames.len()
+        );
+        // Past the fade (and the resampler's edges), the second track at its own level.
+        let middle = frames[150_000..200_000].iter();
+        assert!(middle.clone().all(|s| (s - 0.5).abs() < 0.01));
+    }
+
+    #[test]
+    fn level_follows_the_mix_through_a_crossfade() {
+        // Two uncorrelated tracks keep their loudness in an equal-power fade; two copies of
+        // the same DC add up to +3 dB in its middle, which only the mixed output shows.
+        let factory = FakeFactory::new(STEREO_48K, 4_800);
+        let mut playback = Playback::new(factory.clone(), None).unwrap();
+        playback.set_source(dc(0.5, STEREO_48K, 3_000)).unwrap();
+        playback.queue_next_with(Some(dc(0.5, STEREO_48K, 3_000)), fade_options(1_000));
+        wait_exhausted(&playback);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut loudest: f32 = 0.0;
+        while playback.pump().unwrap() != PumpStatus::Finished {
+            loudest = loudest.max(playback.meter.level());
+            play_queue(&factory);
+            assert!(Instant::now() < deadline, "never finished");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let mixed = mix::level_of_rms(0.5 * std::f32::consts::SQRT_2);
+        assert!((loudest - mixed).abs() <= 0.02, "{loudest} for {mixed}");
+        assert!(loudest > mix::level_of_rms(0.5) + 0.04);
+    }
+
+    #[test]
+    fn a_replay_gain_change_ramps_over_20_ms() {
+        let factory = FakeFactory::new(STEREO_48K, 48_000);
+        let mut playback = Playback::new(factory.clone(), None).unwrap();
+        playback.set_source(dc(0.5, STEREO_48K, 2_000)).unwrap();
+        wait_exhausted(&playback);
+        pump_settled(&mut playback).unwrap();
+        let mut played = factory
+            .last_queue()
+            .lock()
+            .unwrap()
+            .drain(..)
+            .collect::<Vec<_>>();
+        playback.ramp_gain(0.5);
+        let (_, rest) = play_until(&mut playback, &factory, |status| {
+            status == PumpStatus::Finished
+        });
+        played.extend(rest);
+        let frames = left(&played);
+        assert_eq!(frames.len(), 96_000);
+        let start = frames
+            .iter()
+            .position(|s| *s < 0.5)
+            .expect("the gain changed");
+        let ramp = frames[start..]
+            .iter()
+            .take_while(|s| **s > 0.25 + 1e-6)
+            .count();
+        // 20 ms at 48 kHz is 960 frames.
+        assert!((955..=961).contains(&ramp), "{ramp} frames");
+        assert!(frames[start - 1..].windows(2).all(|w| w[1] <= w[0]));
+        assert!(frames[start + ramp..]
+            .iter()
+            .all(|s| (s - 0.25).abs() < 1e-6));
+    }
+
+    #[test]
+    fn a_seek_during_a_fade_cuts_the_previous_track() {
+        let factory = FakeFactory::new(STEREO_48K, 4_800);
+        let mut playback = Playback::new(factory.clone(), None).unwrap();
+        playback.set_source(dc(1.0, STEREO_48K, 1_000)).unwrap();
+        playback.queue_next_with(Some(dc(0.5, STEREO_48K, 3_000)), fade_options(1_000));
+        wait_exhausted(&playback);
+        assert_eq!(playback.pump().unwrap(), PumpStatus::Advanced);
+        assert!(playback.fade.is_some());
+        playback.seek(0).unwrap();
+        assert!(playback.fade.is_none());
+        play_queue(&factory);
+        let (_, played) = play_until(&mut playback, &factory, |status| {
+            status == PumpStatus::Finished
+        });
+        assert!(played.iter().all(|s| *s == 0.5), "only the new track");
     }
 
     /// Manual check on real hardware: `cargo test -- --ignored smoke_plays`.
