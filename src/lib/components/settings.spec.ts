@@ -31,7 +31,7 @@ const { default: Select } = await import('./Select.svelte');
 const { default: About } = await import('./About.svelte');
 const { default: Settings } = await import('./Settings.svelte');
 const { setLang } = await import('../i18n');
-const { settings, updateSettings, saveVolume, flushVolume } = await import('../stores/settings.svelte');
+const { settings, updateSettings, DEFAULT_SETTINGS } = await import('../stores/settings.svelte');
 const { placeList } = await import('./Select.svelte');
 
 let target: HTMLElement;
@@ -271,18 +271,18 @@ it('reverts only the failed keys', async () => {
   expect(settings.replayGain).toBe('album');
 });
 
-it('debounces the volume save and flushes it on demand', async () => {
-  vi.useFakeTimers();
-  try {
-    saveVolume(0.2);
-    saveVolume(0.3);
-    expect(invoke).not.toHaveBeenCalledWith('settings_set', expect.anything());
-    await flushVolume();
-    expect(invoke).toHaveBeenCalledTimes(1);
-    expect(invoke).toHaveBeenCalledWith('settings_set', { patch: { volume: 0.3 } });
-    await vi.advanceTimersByTimeAsync(1000);
-    expect(invoke).toHaveBeenCalledTimes(1);
-  } finally {
-    vi.useRealTimers();
-  }
+it('has the same defaults as the backend', () => {
+  expect(DEFAULT_SETTINGS).toEqual({
+    language: 'system',
+    volume: 0.8,
+    outputDevice: null,
+    gapless: true,
+    replayGain: 'off',
+    crossfade: 'flow',
+    crossfadeMs: 4000,
+    coverLookup: true,
+    miniOnTop: false,
+    miniShortcut: 'CommandOrControl+Alt+P',
+    startWithSystem: false,
+  });
 });

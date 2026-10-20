@@ -3,7 +3,6 @@
   import { t } from '../i18n';
   import { playerNext, playerPrev, playerSeek, playerSetVolume } from '../ipc';
   import { player } from '../stores/player.svelte';
-  import { saveVolume } from '../stores/settings.svelte';
   import Cover from './Cover.svelte';
   import Icon from './Icon.svelte';
   import Slider from './Slider.svelte';
@@ -31,7 +30,6 @@
   function setVolume(v: number) {
     player.volume = v;
     playerSetVolume(v).catch(report('setting the volume'));
-    saveVolume(v);
   }
 
   function toggleMute() {
