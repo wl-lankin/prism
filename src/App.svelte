@@ -21,8 +21,8 @@
   import { notice, notify } from './lib/stores/notice.svelte';
   import { initPlayer, player } from './lib/stores/player.svelte';
 
-  /** The Flow ring sits inside the 84 px transport strip, centred with 8 px above and below. */
-  const RING = 68;
+  /** The Flow ring sits half out of the transport strip: centred on its top edge. */
+  const RING = 84;
   const isMac = typeof navigator !== 'undefined' && /Mac/.test(navigator.platform || navigator.userAgent);
 
   let glass = $state(false);
@@ -386,20 +386,23 @@
   .ring-dock {
     position: absolute;
     left: 50%;
-    /* Centred in the 84 px transport strip. */
-    bottom: calc((84px - var(--ring)) / 2);
+    /* Centred on the top edge of the 84 px transport strip: the lower half sits in the strip,
+       the upper half rises into the content above it. */
+    bottom: calc(84px - var(--ring) / 2);
     width: var(--ring);
     height: var(--ring);
     transform: translateX(-50%);
-    z-index: 2;
+    z-index: 3;
     border-radius: 50%;
+    /* A notch around the ring, so it reads as set into the strip's edge. */
+    box-shadow: 0 0 0 6px var(--bg);
+    background: var(--bg);
   }
 
-  /* Always in the DOM as a live region; only its text changes. It floats just above the
-     seek rail (the ring's top is 8 px below the strip's top edge). */
+  /* Always in the DOM as a live region; only its text changes. It floats above the ring. */
   .notice {
     position: absolute;
-    bottom: calc(100% + 8px + 12px);
+    bottom: calc(100% + 14px);
     left: 50%;
     transform: translate(-50%, 4px);
     pointer-events: none;
