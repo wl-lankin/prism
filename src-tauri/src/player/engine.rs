@@ -99,6 +99,8 @@ const STATE_INTERVAL: Duration = Duration::from_millis(250);
 const BUSY_TICK: Duration = Duration::from_millis(10);
 /// ...and while nothing needs pumping.
 const IDLE_TICK: Duration = Duration::from_millis(250);
+/// How long stopping the engine waits for the decode threads to drop their sources.
+const SHUTDOWN_WAIT: Duration = Duration::from_millis(200);
 
 impl PlayerState {
     fn idle(volume: f32) -> PlayerState {
@@ -475,7 +477,9 @@ impl Engine {
             self.tick();
             self.publish();
         }
-        self.playback.stop();
+        // Lets the decode threads drop their sources (killing FFmpeg children) before the
+        // process may exit; a read stuck longer than this is left behind.
+        self.playback.shutdown(SHUTDOWN_WAIT);
     }
 
     fn busy(&self) -> bool {
@@ -925,6 +929,7 @@ mod tests {
 
     use super::*;
     use crate::audio::output::BUFFER_MS;
+    use crate::audio::readahead::tests::SlowSource;
     use crate::audio::{open_source, Input, OutputEvent, OutputSink};
     use crate::library::tags::{self, fixtures};
     use crate::player::dropped::tests::drop_files;
@@ -1475,6 +1480,32 @@ mod tests {
         let expected: Vec<f32> = [decode_all("gap_a.wav"), decode_all("gap_b.wav")].concat();
         assert_eq!(played.len(), expected.len(), "no padding, nothing lost");
         assert!(played == expected, "one continuous run across the boundary");
+    }
+
+    #[test]
+    fn dropping_the_player_drops_the_decoded_sources() {
+        let mut track = fixture_track("slow", "tagged.flac");
+        track.duration_ms = 10_000;
+        let drops = Arc::new(Mutex::new(Vec::new()));
+        let opened = Arc::clone(&drops);
+        let opener: Opener = Arc::new(move |_track: &Track, _spec: StreamSpec| {
+            // Always in the middle of a 20 ms read: a stop that does not wait returns first.
+            let mut source = SlowSource::new(10);
+            source.read_delay = Duration::from_millis(20);
+            opened.lock().unwrap().push(Arc::clone(&source.drops));
+            Ok(Box::new(source) as Box<dyn AudioSource>)
+        });
+        let h = harness(vec![track], FAST, Some(opener));
+        h.player.play(ids(&["slow"]), 0).unwrap();
+        wait_state(&h.player, |s| s.status == PlayerStatus::Playing);
+        drop(h.player);
+        let drops = drops.lock().unwrap();
+        assert_eq!(drops.len(), 1);
+        assert_eq!(
+            drops[0].load(Ordering::SeqCst),
+            1,
+            "the source (an FFmpeg child in real life) was dropped before the drop returned"
+        );
     }
 
     fn decode_all(name: &str) -> Vec<f32> {

@@ -36,14 +36,10 @@ pub use source::{
 
 /// How long to wait between attempts to open an output device.
 const REOPEN_BACKOFF: Duration = Duration::from_secs(1);
-/// The most one `pump` waits for a decode thread that has nothing buffered yet and is not
-/// inside a source call, i.e. one that is starting up or waiting for a CPU (right after a
-/// start, seek or hand-over, when nothing new would be audible anyway). Such a thread always
-/// makes progress; normally it takes well under a millisecond, but with every core busy (a
-/// library scan) a new thread was measured waiting several hundred. The cap is a safety net,
-/// not a timing. Source I/O is never waited for this long: a thread inside one read or seek
-/// is given up on after [`readahead::SLOW_CALL`].
-const STARVE_WAIT: Duration = Duration::from_secs(2);
+/// How long `pump` waits for the decode thread when nothing is buffered: not at all. Pause,
+/// seek, next and state events must never queue behind a slow NAS read or a busy CPU; the
+/// engine simply pumps again on its next tick. (Tests may set [`Playback::starve_wait`].)
+const STARVE_WAIT: Duration = Duration::ZERO;
 
 /// What a [`Playback::pump`] call did. Errors from `pump` are always source (decode) errors.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -89,6 +85,9 @@ pub struct Playback {
     /// Linear factor for the current source's samples (ReplayGain) and for `next`.
     gain: f32,
     next_gain: f32,
+    /// How long one `pump` may wait for a decode thread with nothing buffered
+    /// ([`STARVE_WAIT`], zero, in production).
+    starve_wait: Duration,
 }
 
 /// A finite, non-negative gain; anything else plays unchanged.
@@ -136,6 +135,7 @@ impl Playback {
             deferred_error: None,
             gain: 1.0,
             next_gain: 1.0,
+            starve_wait: STARVE_WAIT,
         })
     }
 
@@ -172,7 +172,8 @@ impl Playback {
         self.next_gain = 1.0;
     }
 
-    /// Stops playback and drops the current and next source.
+    /// Stops playback and drops the current and next source (their decode threads stop on
+    /// their own, without being waited for).
     pub fn stop(&mut self) {
         self.current = None;
         self.next = None;
@@ -180,9 +181,31 @@ impl Playback {
         self.clear_buffers();
     }
 
+    /// Like [`stop`](Self::stop), for quitting: waits up to `limit` in total for the decode
+    /// threads to drop their sources, so FFmpeg children are killed before the process exits.
+    /// A source stuck in a read longer than that is left to its thread.
+    pub fn shutdown(&mut self, limit: Duration) {
+        let deadline = Instant::now() + limit;
+        let readers: Vec<ReadAhead> = self
+            .current
+            .take()
+            .into_iter()
+            .chain(self.next.take())
+            .collect();
+        readers.iter().for_each(ReadAhead::stop);
+        for reader in &readers {
+            reader.wait_stopped(deadline);
+        }
+        self.stop();
+    }
+
     /// Seeks the current source without waiting: the decode thread seeks while `pump` keeps
     /// returning (an FFmpeg restart can take seconds). A seek error arrives as a decode error
     /// from a later `pump`; the `Result` is kept for callers.
+    ///
+    /// Seeking back from the decoded end clears [`current_exhausted`](Self::current_exhausted);
+    /// a next source already queued stays queued (it has not been read from) and takes over
+    /// when the current one ends again.
     pub fn seek(&mut self, ms: u64) -> anyhow::Result<()> {
         let Some(current) = self.current.as_mut() else {
             return Ok(());
@@ -277,12 +300,10 @@ impl Playback {
             && self.sink.queued() == 0
     }
 
-    /// Handles output events and fills the sink as far as it has room, then returns. It does
-    /// not wait for the device or for source I/O: it takes what the decode thread has
-    /// buffered. With nothing buffered it waits for a decode thread that is only starting up
-    /// or busy (capped at [`STARVE_WAIT`]), but at most [`readahead::SLOW_CALL`] for one inside
-    /// a read or seek: a slow source (NAS, FFmpeg restart) costs at most one short wait per
-    /// slow call, and `pump` returns at once while that call runs on. Call it every few
+    /// Handles output events and fills the sink as far as it has room, then returns. It never
+    /// waits for the device, the source or the decode thread: it takes what has been decoded
+    /// ahead, and with nothing buffered (just after a start, seek or resume, or a source that
+    /// cannot keep up) it returns `Playing` and the sink plays what it holds. Call it every few
     /// milliseconds. `Err` is always a source error (the engine skips the track); a missing
     /// device is `Ok(NoDevice)`.
     pub fn pump(&mut self) -> anyhow::Result<PumpStatus> {
@@ -325,7 +346,7 @@ impl Playback {
     }
 
     fn fill(&mut self, status: &mut PumpStatus) -> anyhow::Result<PumpStatus> {
-        let wait_until = Instant::now() + STARVE_WAIT;
+        let wait_until = Instant::now() + self.starve_wait;
         loop {
             if self.pending_offset < self.pending.len() {
                 self.pending_offset += self.sink.push(&self.pending[self.pending_offset..]);
@@ -361,6 +382,7 @@ impl Playback {
                 }
                 ReadOutcome::Starved => {
                     let now = Instant::now();
+                    // Production never waits here (`starve_wait` is zero).
                     if now < wait_until && current.wait_ready(wait_until - now) {
                         continue;
                     }
@@ -557,13 +579,13 @@ mod tests {
         let factory = FakeFactory::new(STEREO_48K, 9_600);
         let mut playback = Playback::new(factory.clone(), Some("Speakers".into())).unwrap();
         playback.set_source(wav("gap_a.wav")).unwrap();
-        assert_eq!(playback.pump().unwrap(), PumpStatus::Playing);
+        assert_eq!(pump_settled(&mut playback).unwrap(), PumpStatus::Playing);
 
         let first = factory.senders.lock().unwrap()[0].clone();
         first
             .send(OutputEvent::DeviceLost("unplugged".into()))
             .unwrap();
-        assert_eq!(playback.pump().unwrap(), PumpStatus::Playing);
+        assert_eq!(pump_settled(&mut playback).unwrap(), PumpStatus::Playing);
 
         assert_eq!(
             *factory.opened.lock().unwrap(),
@@ -584,8 +606,8 @@ mod tests {
         playback.set_source(wav("gap_a.wav")).unwrap();
         playback.queue_next(Some(wav("gap_b.wav")));
         // The first pump decodes everything and reports the advance; the next one the end.
-        assert_eq!(playback.pump().unwrap(), PumpStatus::Advanced);
-        assert_eq!(playback.pump().unwrap(), PumpStatus::Finished);
+        assert_eq!(pump_settled(&mut playback).unwrap(), PumpStatus::Advanced);
+        assert_eq!(pump_settled(&mut playback).unwrap(), PumpStatus::Finished);
 
         let mut expected = Vec::new();
         for name in ["gap_a.wav", "gap_b.wav"] {
@@ -605,7 +627,7 @@ mod tests {
         playback.queue_next(Some(wav("tagged.flac")));
         let mut statuses = Vec::new();
         for _ in 0..1000 {
-            let status = playback.pump().unwrap();
+            let status = pump_settled(&mut playback).unwrap();
             if statuses.last() != Some(&status) {
                 statuses.push(status);
             }
@@ -632,7 +654,7 @@ mod tests {
         playback.set_source(wav("gap_a.wav")).unwrap();
         playback.seek(600).unwrap();
         assert_eq!(playback.position_ms(), 600);
-        playback.pump().unwrap();
+        pump_settled(&mut playback).unwrap();
         let frames = factory.last_queue().lock().unwrap().len() / 2;
         assert!(
             frames.abs_diff(44_100 * 4 / 10) <= 441,
@@ -672,8 +694,8 @@ mod tests {
         playback.set_source(wav("gap_a.wav")).unwrap();
         playback.reopen_backoff = Duration::ZERO;
         playback.next_reopen = Instant::now();
-        assert_eq!(playback.pump().unwrap(), PumpStatus::NoDevice);
-        assert_eq!(playback.pump().unwrap(), PumpStatus::NoDevice);
+        assert_eq!(pump_settled(&mut playback).unwrap(), PumpStatus::NoDevice);
+        assert_eq!(pump_settled(&mut playback).unwrap(), PumpStatus::NoDevice);
         assert_eq!(playback.frames_read, 0, "nothing was decoded");
         assert_eq!(
             *factory.opened.lock().unwrap(),
@@ -682,7 +704,7 @@ mod tests {
         );
 
         factory.fail.store(false, Ordering::SeqCst);
-        assert_eq!(playback.pump().unwrap(), PumpStatus::Playing);
+        assert_eq!(pump_settled(&mut playback).unwrap(), PumpStatus::Playing);
         assert!(playback.output_error().is_none());
         let played = factory.last_queue().lock().unwrap().clone();
         let mut expected = Vec::new();
@@ -700,7 +722,7 @@ mod tests {
         factory.fail.store(true, Ordering::SeqCst);
         let mut playback = Playback::new(factory.clone(), None).unwrap();
         for _ in 0..10 {
-            assert_eq!(playback.pump().unwrap(), PumpStatus::NoDevice);
+            assert_eq!(pump_settled(&mut playback).unwrap(), PumpStatus::NoDevice);
         }
         assert_eq!(
             factory.opened.lock().unwrap().len(),
@@ -716,10 +738,10 @@ mod tests {
         playback.reopen_backoff = Duration::ZERO;
         playback.set_source(wav("gap_a.wav")).unwrap();
         for _ in 0..3 {
-            playback.pump().unwrap();
+            pump_settled(&mut playback).unwrap();
             play_queue(&factory);
         }
-        playback.pump().unwrap(); // the sink holds unplayed audio when the device goes
+        pump_settled(&mut playback).unwrap(); // the sink holds unplayed audio when the device goes
         let position = playback.position_ms();
         assert!(position >= 290, "{position} ms played");
 
@@ -727,11 +749,11 @@ mod tests {
         let lost = factory.senders.lock().unwrap()[0].clone();
         lost.send(OutputEvent::DeviceLost("unplugged".into()))
             .unwrap();
-        assert_eq!(playback.pump().unwrap(), PumpStatus::NoDevice);
+        assert_eq!(pump_settled(&mut playback).unwrap(), PumpStatus::NoDevice);
         assert_eq!(playback.position_ms(), position);
 
         factory.fail.store(false, Ordering::SeqCst);
-        assert_eq!(playback.pump().unwrap(), PumpStatus::Playing);
+        assert_eq!(pump_settled(&mut playback).unwrap(), PumpStatus::Playing);
         assert!(playback.position_ms().abs_diff(position) <= 1);
         let played = factory.last_queue().lock().unwrap().clone();
         let mut expected = Vec::new();
@@ -751,8 +773,8 @@ mod tests {
         let mut playback = Playback::new(factory.clone(), None).unwrap();
         playback.set_source(wav("gap_a.wav")).unwrap();
         playback.queue_next(Some(Box::new(FailingSource)));
-        assert_eq!(playback.pump().unwrap(), PumpStatus::Advanced);
-        let err = playback.pump().unwrap_err();
+        assert_eq!(pump_settled(&mut playback).unwrap(), PumpStatus::Advanced);
+        let err = pump_settled(&mut playback).unwrap_err();
         assert!(err.to_string().contains("broken stream"), "{err:#}");
     }
 
@@ -763,7 +785,7 @@ mod tests {
         playback.set_source(wav("gap_a.wav")).unwrap();
         playback.queue_next(Some(wav("gap_b.wav")));
         playback.set_source(wav("gap_a.wav")).unwrap();
-        assert_eq!(playback.pump().unwrap(), PumpStatus::Finished);
+        assert_eq!(pump_settled(&mut playback).unwrap(), PumpStatus::Finished);
     }
 
     fn decode_all(name: &str) -> Vec<f32> {
@@ -781,8 +803,8 @@ mod tests {
         playback.set_gain(0.5);
         playback.queue_next(Some(wav("gap_b.wav")));
         playback.set_next_gain(0.25);
-        assert_eq!(playback.pump().unwrap(), PumpStatus::Advanced);
-        assert_eq!(playback.pump().unwrap(), PumpStatus::Finished);
+        assert_eq!(pump_settled(&mut playback).unwrap(), PumpStatus::Advanced);
+        assert_eq!(pump_settled(&mut playback).unwrap(), PumpStatus::Finished);
 
         let a = decode_all("gap_a.wav");
         let b = decode_all("gap_b.wav");
@@ -805,7 +827,7 @@ mod tests {
         let mut playback = Playback::new(factory.clone(), None).unwrap();
         playback.set_source(wav("gap_a.wav")).unwrap();
         playback.set_gain(100.0);
-        assert_eq!(playback.pump().unwrap(), PumpStatus::Finished);
+        assert_eq!(pump_settled(&mut playback).unwrap(), PumpStatus::Finished);
         let played = factory.last_queue().lock().unwrap().clone();
         assert!(!played.is_empty());
         assert!(played.iter().all(|sample| sample.abs() <= 1.0));
@@ -822,7 +844,7 @@ mod tests {
         playback.set_source(wav("gap_a.wav")).unwrap();
         playback.set_gain(0.5);
         playback.set_source(wav("gap_a.wav")).unwrap();
-        playback.pump().unwrap();
+        pump_settled(&mut playback).unwrap();
         let played = factory.last_queue().lock().unwrap().clone();
         assert!(played == decode_all("gap_a.wav"));
     }
@@ -833,10 +855,10 @@ mod tests {
         let mut playback = Playback::new(factory.clone(), None).unwrap();
         playback.set_source(wav("gap_a.wav")).unwrap();
         for _ in 0..3 {
-            playback.pump().unwrap();
+            pump_settled(&mut playback).unwrap();
             play_queue(&factory);
         }
-        playback.pump().unwrap();
+        pump_settled(&mut playback).unwrap();
         let position = playback.position_ms();
         assert!(position >= 290, "{position} ms played");
 
@@ -846,7 +868,7 @@ mod tests {
             Some(Some("USB DAC".to_string()))
         );
         assert!(playback.position_ms().abs_diff(position) <= 1);
-        assert_eq!(playback.pump().unwrap(), PumpStatus::Playing);
+        assert_eq!(pump_settled(&mut playback).unwrap(), PumpStatus::Playing);
         let played = factory.last_queue().lock().unwrap().clone();
         let expected = decode_all("gap_a.wav");
         let offset = (position as usize * 44_100 / 1000) * 2;
@@ -870,7 +892,7 @@ mod tests {
             "the named device, then the default"
         );
         assert!(playback.output_error().is_none());
-        assert_eq!(playback.pump().unwrap(), PumpStatus::Playing);
+        assert_eq!(pump_settled(&mut playback).unwrap(), PumpStatus::Playing);
         assert!(!factory.last_queue().lock().unwrap().is_empty());
     }
 
@@ -897,54 +919,106 @@ mod tests {
         }
     }
 
+    /// The old synchronous view of `pump`, for tests: pumps, and while the result is
+    /// `Playing` only because the decode thread has not caught up (the sink still has room
+    /// and the current source is not done), waits for it and pumps again.
+    fn pump_settled(playback: &mut Playback) -> anyhow::Result<PumpStatus> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let status = playback.pump()?;
+            let sink_full = playback.pending_offset < playback.pending.len();
+            if status != PumpStatus::Playing || sink_full {
+                return Ok(status);
+            }
+            let Some(current) = playback.current.as_ref() else {
+                return Ok(status);
+            };
+            assert!(
+                Instant::now() < deadline,
+                "the decode thread never caught up"
+            );
+            current.wait_ready(Duration::from_millis(100));
+        }
+    }
+
+    /// Polls `done` every 2 ms; panics after `timeout`.
+    #[track_caller]
+    fn wait_until(timeout: Duration, mut done: impl FnMut() -> bool) {
+        let deadline = Instant::now() + timeout;
+        while !done() {
+            assert!(Instant::now() < deadline, "not within {timeout:?}");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    /// The one coarse wall-clock bound in the non-blocking tests: far below the 500 ms stall
+    /// and the 1 s seek they run against, far above any scheduling hiccup.
+    const COARSE_PUMP_BOUND: Duration = Duration::from_millis(150);
+
     #[test]
     fn slow_source_does_not_block_pump() {
-        // A 100 ms device that plays 4 times faster than real time. The source stalls for
-        // 500 ms once, in the first read past the initial read-ahead (3 s): soon after the
-        // start, with about 3 s (750 ms at 4x) buffered. Decoding inline, a pump would hit
-        // the stall about 0.8 s in.
-        const SPEED: f64 = 4.0;
+        // A 100 ms device that plays 10 ms per step. The source stalls for 500 ms once, in
+        // the first read past the initial read-ahead (3 s, 132 reads of 1024 frames), so
+        // soon after playback starts, with about 3 s buffered.
+        const STEP: usize = 441 * 2;
         let factory = FakeFactory::new(STEREO_44K, 4_410 * 2);
         let mut playback = Playback::new(factory.clone(), None).unwrap();
         let mut source = SlowSource::new(10);
         source.stall = Some((140_000, Duration::from_millis(500)));
+        let stalling = Arc::clone(&source.stalling);
+        let reads = Arc::clone(&source.reads);
         playback.set_source(Box::new(source)).unwrap();
         let queue = factory.last_queue();
-        // Not timed: the first pump waits for the decode thread to start (a busy machine can
-        // take a while to schedule a new thread); then the read-ahead fills.
-        assert_eq!(playback.pump().unwrap(), PumpStatus::Playing);
-        std::thread::sleep(Duration::from_millis(300));
+        pump_settled(&mut playback).unwrap();
+        wait_until(Duration::from_secs(10), || {
+            reads.load(Ordering::SeqCst) >= 132
+        });
 
-        let started = Instant::now();
-        let mut last = started;
+        let deadline = Instant::now() + Duration::from_secs(20);
         let mut played: Vec<f32> = Vec::new();
         let mut slowest = Duration::ZERO;
+        let mut pumps_during_stall = 0;
+        let mut stall_seen = false;
         let mut under_runs = 0;
-        while started.elapsed() < Duration::from_millis(1_200) {
+        loop {
+            let stalled_before = stalling.load(Ordering::SeqCst);
             let pumped = Instant::now();
             assert_eq!(playback.pump().unwrap(), PumpStatus::Playing);
             slowest = slowest.max(pumped.elapsed());
-            std::thread::sleep(Duration::from_millis(2));
-            let now = Instant::now();
-            let due = ((now - last).as_secs_f64() * SPEED * 44_100.0) as usize * 2;
-            last = now;
+            if stalled_before && stalling.load(Ordering::SeqCst) {
+                // This pump started and returned while the source was stuck in its read.
+                pumps_during_stall += 1;
+            }
+            stall_seen |= stalled_before;
             let mut queue = queue.lock().unwrap();
-            if queue.is_empty() {
+            let past_stall = stall_seen && !stalled_before;
+            // Up to the end of the stall the buffer must carry the device; afterwards the
+            // test only fast-forwards to the stall point.
+            if queue.is_empty() && !past_stall {
                 under_runs += 1;
             }
-            let take = due.min(queue.len());
+            let step = if past_stall { STEP * 10 } else { STEP };
+            let take = step.min(queue.len());
             played.extend(queue.drain(..take));
+            drop(queue);
+            if stall_seen && !stalling.load(Ordering::SeqCst) && played.len() / 2 > 150_000 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{} frames played",
+                played.len() / 2
+            );
+            // At most 100 steps (1 s of audio) fit in the 500 ms stall: well inside the buffer.
+            std::thread::sleep(Duration::from_millis(5));
         }
+        // A pump that waited for the read could not start and return inside the stall.
         assert!(
-            slowest < Duration::from_millis(20),
-            "a pump took {slowest:?}"
+            pumps_during_stall >= 3,
+            "only {pumps_during_stall} pumps ran during the 500 ms stall"
         );
         assert_eq!(under_runs, 0, "the device never ran dry");
-        assert!(
-            played.len() / 2 > 154_350,
-            "playback went on past the stall point (3.5 s): {} frames",
-            played.len() / 2
-        );
+        assert!(slowest < COARSE_PUMP_BOUND, "a pump took {slowest:?}");
         assert!(
             played
                 .as_chunks::<2>()
@@ -952,7 +1026,7 @@ mod tests {
                 .iter()
                 .enumerate()
                 .all(|(index, frame)| frame_of(frame[0]) == index as u64),
-            "one continuous run from the buffer"
+            "one continuous run from the buffer, on past the stall point"
         );
     }
 
@@ -962,40 +1036,74 @@ mod tests {
         let mut playback = Playback::new(factory.clone(), None).unwrap();
         let mut source = SlowSource::new(10);
         source.seek_delay = Duration::from_secs(1);
+        let in_seek = Arc::clone(&source.in_seek);
+        let seeks_done = Arc::clone(&source.seeks_done);
         playback.set_source(Box::new(source)).unwrap();
-        playback.pump().unwrap();
+        pump_settled(&mut playback).unwrap();
         play_queue(&factory);
 
-        let started = Instant::now();
         playback.seek(5_000).unwrap();
-        assert!(
-            started.elapsed() < Duration::from_millis(20),
-            "seek took {:?}",
-            started.elapsed()
+        assert_eq!(
+            seeks_done.load(Ordering::SeqCst),
+            0,
+            "Playback::seek returned before the 1 s source seek finished"
         );
         assert_eq!(playback.position_ms(), 5_000);
 
         let queue = factory.last_queue();
-        let deadline = Instant::now() + Duration::from_secs(3);
-        let mut pumps = 0;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut pumps_during_seek = 0;
         let mut slowest = Duration::ZERO;
         while queue.lock().unwrap().is_empty() {
+            let seeking_before = in_seek.load(Ordering::SeqCst);
             let pumped = Instant::now();
             assert_eq!(playback.pump().unwrap(), PumpStatus::Playing);
             slowest = slowest.max(pumped.elapsed());
-            pumps += 1;
+            if seeking_before && in_seek.load(Ordering::SeqCst) {
+                pumps_during_seek += 1;
+            }
             assert!(Instant::now() < deadline, "nothing played after the seek");
-            std::thread::sleep(Duration::from_millis(2));
+            std::thread::sleep(Duration::from_millis(5));
         }
-        // The engine kept pumping through the 1 s seek (one sleep is 2 to 16 ms); at most one
-        // pump waited, for about `SLOW_CALL`, to see that the seek is slow.
-        assert!(pumps >= 10, "only {pumps} pumps during the seek");
         assert!(
-            slowest < Duration::from_millis(500),
-            "a pump waited for the seek: {slowest:?}"
+            pumps_during_seek >= 3,
+            "only {pumps_during_seek} pumps ran during the 1 s seek"
         );
+        assert!(slowest < COARSE_PUMP_BOUND, "a pump took {slowest:?}");
         let first = queue.lock().unwrap()[0];
         assert_eq!(frame_of(first), 220_500, "the first frames come from 5 s");
+    }
+
+    #[test]
+    fn shutdown_waits_for_the_decode_threads_to_drop_their_sources() {
+        let factory = FakeFactory::new(STEREO_44K, 8_820);
+        let mut playback = Playback::new(factory.clone(), None).unwrap();
+        let mut current = SlowSource::new(10);
+        current.read_delay = Duration::from_millis(1);
+        let mut next = SlowSource::new(10);
+        next.read_delay = Duration::from_millis(1);
+        let drops = [Arc::clone(&current.drops), Arc::clone(&next.drops)];
+        playback.set_source(Box::new(current)).unwrap();
+        playback.queue_next(Some(Box::new(next)));
+        playback.shutdown(Duration::from_secs(5));
+        assert!(
+            drops.iter().all(|count| count.load(Ordering::SeqCst) == 1),
+            "both sources were dropped before shutdown returned"
+        );
+        assert!(playback.is_drained());
+
+        // A read stuck past the limit: shutdown gives up on it instead of hanging.
+        let mut playback = Playback::new(factory.clone(), None).unwrap();
+        let mut stuck = SlowSource::new(10);
+        stuck.read_delay = Duration::from_secs(2);
+        let in_read = Arc::clone(&stuck.in_read);
+        playback.set_source(Box::new(stuck)).unwrap();
+        wait_until(Duration::from_secs(10), || in_read.load(Ordering::SeqCst));
+        playback.shutdown(Duration::from_millis(50));
+        assert!(
+            in_read.load(Ordering::SeqCst),
+            "returned while the read still ran"
+        );
     }
 
     #[test]
@@ -1006,7 +1114,7 @@ mod tests {
         playback.queue_next(Some(wav("gap_b.wav")));
         let deadline = Instant::now() + Duration::from_secs(5);
         while !playback.current_exhausted() {
-            assert_eq!(playback.pump().unwrap(), PumpStatus::Playing);
+            assert_eq!(pump_settled(&mut playback).unwrap(), PumpStatus::Playing);
             assert!(Instant::now() < deadline, "gap_a was never fully decoded");
             std::thread::sleep(Duration::from_millis(1));
         }

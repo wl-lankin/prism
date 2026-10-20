@@ -17,6 +17,11 @@ use anyhow::anyhow;
 use super::source::{guarded, AudioSource, StreamSpec};
 
 /// How far ahead of playback a source is decoded (inside the 2 to 4 s window).
+///
+/// Memory: the queue holds at most the target plus one chunk, as interleaved f32, so about
+/// `rate * channels * 4 bytes * 3 s` per `ReadAhead`: 1.06 MB at 44.1 kHz stereo, 1.15 MB
+/// at 48 kHz, 4.6 MB at 192 kHz (24/192 files decode to f32 like any other). Playback holds
+/// two (current and next).
 pub const READ_AHEAD_MS: u32 = 3_000;
 /// Frames per chunk the decode thread hands over.
 const CHUNK_FRAMES: usize = 4096;
@@ -192,7 +197,9 @@ impl ReadAhead {
                     let epoch = worker.epoch.load(Ordering::Acquire);
                     worker.deliver(epoch, Vec::new(), channels, Some(Item::Error(err)));
                 }
+                // The source is dropped by now (an FFmpeg child killed and reaped).
                 worker.lock().gone = true;
+                worker.queued.notify_all();
             });
         if let Err(err) = spawned {
             shared.deliver(
@@ -264,8 +271,9 @@ impl ReadAhead {
     /// but gives up on a source call that has run longer than [`SLOW_CALL`]: that is a slow
     /// source (a NAS, an FFmpeg restart), not a busy thread. A chunk wakes it at once; a
     /// timed check can overshoot by a timer tick (about 15 ms on Windows). True when a
-    /// `try_read` will not be starved.
-    pub fn wait_ready(&self, limit: Duration) -> bool {
+    /// `try_read` will not be starved. The engine never calls this (its `pump` does not
+    /// wait); it is for tests and an opt-in `Playback` wait.
+    pub(crate) fn wait_ready(&self, limit: Duration) -> bool {
         let deadline = Instant::now() + limit;
         let mut state = self.shared.lock();
         loop {
@@ -293,6 +301,9 @@ impl ReadAhead {
     /// Moves to `ms` without waiting: drops the buffered audio, and the decode thread seeks
     /// the source. Reads are starved until it has decoded from the new position; a seek
     /// error arrives through [`try_read`](Self::try_read).
+    ///
+    /// Seeking back from an exhausted source clears [`exhausted`](Self::exhausted): the
+    /// decoder runs again from `ms` and reports the end once more when it gets there.
     pub fn seek(&mut self, ms: u64) {
         let mut state = self.shared.lock();
         state.epoch += 1;
@@ -322,18 +333,46 @@ impl ReadAhead {
         self.shared.lock().target_frames = frames_for(ms, self.spec);
         self.shared.wake.notify_all();
     }
-}
 
-impl Drop for ReadAhead {
-    fn drop(&mut self) {
+    /// Tells the decode thread to stop, without waiting. A chunk in progress is abandoned
+    /// after the current source call; the thread then drops the source and exits.
+    pub fn stop(&self) {
         let mut state = self.shared.lock();
         state.stop = true;
-        // A chunk in progress is abandoned after the current read.
         state.epoch += 1;
         state.chunks.clear();
         self.shared.sync(&state);
         drop(state);
         self.shared.wake.notify_all();
+    }
+
+    /// After [`stop`](Self::stop): waits until `deadline` for the decode thread to have
+    /// dropped the source and exited (for a clean shutdown: an FFmpeg child is killed and
+    /// reaped there). False when a source call is still running at the deadline.
+    pub fn wait_stopped(&self, deadline: Instant) -> bool {
+        let mut state = self.shared.lock();
+        loop {
+            if state.gone {
+                return true;
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            state = self
+                .shared
+                .queued
+                .wait_timeout(state, deadline - now)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+    }
+}
+
+impl Drop for ReadAhead {
+    /// Stops the thread without waiting; the source is dropped on the decode thread.
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 
@@ -389,7 +428,7 @@ fn decode(mut source: Box<dyn AudioSource>, shared: &Shared, channels: usize) {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Instant;
 
@@ -425,6 +464,13 @@ pub(crate) mod tests {
         pub drops: Arc<AtomicUsize>,
         /// Counts `read` calls as they start.
         pub reads: Arc<AtomicUsize>,
+        /// Set for the whole of a `read` / `seek` / the one-off stall, so a test can see
+        /// what was still running when a call returned.
+        pub in_read: Arc<AtomicBool>,
+        pub in_seek: Arc<AtomicBool>,
+        pub stalling: Arc<AtomicBool>,
+        /// Counts finished `seek` calls.
+        pub seeks_done: Arc<AtomicUsize>,
     }
 
     impl SlowSource {
@@ -438,23 +484,23 @@ pub(crate) mod tests {
                 fail_at: None,
                 drops: Arc::new(AtomicUsize::new(0)),
                 reads: Arc::new(AtomicUsize::new(0)),
+                in_read: Arc::new(AtomicBool::new(false)),
+                in_seek: Arc::new(AtomicBool::new(false)),
+                stalling: Arc::new(AtomicBool::new(false)),
+                seeks_done: Arc::new(AtomicUsize::new(0)),
             }
         }
-    }
 
-    impl AudioSource for SlowSource {
-        fn spec(&self) -> StreamSpec {
-            SPEC
-        }
-        fn read(&mut self, out: &mut Vec<f32>) -> anyhow::Result<usize> {
-            self.reads.fetch_add(1, Ordering::SeqCst);
+        fn read_inner(&mut self, out: &mut Vec<f32>) -> anyhow::Result<usize> {
             if self.fail_at.is_some_and(|frame| self.position >= frame) {
                 anyhow::bail!("read failed at frame {}", self.position);
             }
             if let Some((frame, delay)) = self.stall {
                 if self.position >= frame {
                     self.stall = None;
+                    self.stalling.store(true, Ordering::SeqCst);
                     std::thread::sleep(delay);
+                    self.stalling.store(false, Ordering::SeqCst);
                 }
             }
             std::thread::sleep(self.read_delay);
@@ -465,9 +511,25 @@ pub(crate) mod tests {
             self.position += frames;
             Ok(frames as usize)
         }
+    }
+
+    impl AudioSource for SlowSource {
+        fn spec(&self) -> StreamSpec {
+            SPEC
+        }
+        fn read(&mut self, out: &mut Vec<f32>) -> anyhow::Result<usize> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            self.in_read.store(true, Ordering::SeqCst);
+            let result = self.read_inner(out);
+            self.in_read.store(false, Ordering::SeqCst);
+            result
+        }
         fn seek(&mut self, ms: u64) -> anyhow::Result<()> {
+            self.in_seek.store(true, Ordering::SeqCst);
             std::thread::sleep(self.seek_delay);
             self.position = ms * SPEC.sample_rate as u64 / 1000;
+            self.seeks_done.fetch_add(1, Ordering::SeqCst);
+            self.in_seek.store(false, Ordering::SeqCst);
             Ok(())
         }
         fn duration_ms(&self) -> Option<u64> {
@@ -510,15 +572,17 @@ pub(crate) mod tests {
     }
 
     const CHUNK: u64 = 4096;
+    /// How long a test waits for something that normally takes milliseconds: only a
+    /// liveness limit, generous for a machine where every core is busy (thread starts of
+    /// several hundred milliseconds were measured under the full suite).
+    const LIVENESS: Duration = Duration::from_secs(10);
 
     #[test]
     fn buffers_up_to_target() {
         let reader = ReadAhead::spawn(Box::new(SlowSource::new(10)), READ_AHEAD_MS);
         let target = READ_AHEAD_MS as u64 * SPEC.sample_rate as u64 / 1000;
         // Normally full within milliseconds; the bound allows for a busy machine.
-        wait_until(Duration::from_secs(2), || {
-            reader.buffered_frames() >= target
-        });
+        wait_until(LIVENESS, || reader.buffered_frames() >= target);
         std::thread::sleep(Duration::from_millis(200));
         let buffered = reader.buffered_frames();
         assert!(
@@ -532,22 +596,16 @@ pub(crate) mod tests {
     fn reading_refills_and_a_new_target_applies() {
         let mut reader = ReadAhead::spawn(Box::new(SlowSource::new(10)), 500);
         let target = 500 * SPEC.sample_rate as u64 / 1000;
-        wait_until(Duration::from_secs(2), || {
-            reader.buffered_frames() >= target
-        });
+        wait_until(LIVENESS, || reader.buffered_frames() >= target);
         let mut out = Vec::new();
-        let outcome = read_within(&mut reader, &mut out, Duration::from_secs(1)).unwrap();
+        let outcome = read_within(&mut reader, &mut out, LIVENESS).unwrap();
         assert_eq!(outcome, ReadOutcome::Frames(CHUNK as usize));
         assert_eq!(frame_of(out[0]), 0);
-        wait_until(Duration::from_secs(2), || {
-            reader.buffered_frames() >= target
-        });
+        wait_until(LIVENESS, || reader.buffered_frames() >= target);
 
         reader.set_target_ms(1_000);
         let bigger = 1_000 * SPEC.sample_rate as u64 / 1000;
-        wait_until(Duration::from_secs(2), || {
-            reader.buffered_frames() >= bigger
-        });
+        wait_until(LIVENESS, || reader.buffered_frames() >= bigger);
     }
 
     #[test]
@@ -557,7 +615,7 @@ pub(crate) mod tests {
         let mut reader = ReadAhead::spawn(Box::new(source), READ_AHEAD_MS);
         assert_eq!(reader.spec(), SPEC);
         assert_eq!(reader.duration_ms(), Some(226));
-        wait_until(Duration::from_secs(2), || reader.exhausted());
+        wait_until(LIVENESS, || reader.exhausted());
         assert_eq!(
             reader.buffered_frames(),
             10_000,
@@ -565,7 +623,7 @@ pub(crate) mod tests {
         );
         let mut out = Vec::new();
         loop {
-            match read_within(&mut reader, &mut out, Duration::from_secs(1)).unwrap() {
+            match read_within(&mut reader, &mut out, LIVENESS).unwrap() {
                 ReadOutcome::Frames(_) => {}
                 ReadOutcome::End => break,
                 ReadOutcome::Starved => unreachable!(),
@@ -592,7 +650,7 @@ pub(crate) mod tests {
         let mut reader = ReadAhead::spawn(Box::new(source), READ_AHEAD_MS);
         let mut out = Vec::new();
         let err = loop {
-            match read_within(&mut reader, &mut out, Duration::from_secs(1)) {
+            match read_within(&mut reader, &mut out, LIVENESS) {
                 Ok(ReadOutcome::Frames(_)) => {}
                 Ok(outcome) => panic!("{outcome:?} before the error"),
                 Err(err) => break err,
@@ -628,7 +686,7 @@ pub(crate) mod tests {
             }
         }
         let mut reader = ReadAhead::spawn(Box::new(Panics), READ_AHEAD_MS);
-        let err = read_within(&mut reader, &mut Vec::new(), Duration::from_secs(1)).unwrap_err();
+        let err = read_within(&mut reader, &mut Vec::new(), LIVENESS).unwrap_err();
         assert!(
             err.downcast_ref::<crate::audio::DecoderPanic>().is_some(),
             "{err:#}"
@@ -639,33 +697,48 @@ pub(crate) mod tests {
     fn seek_never_blocks_and_restarts_at_the_target() {
         let mut source = SlowSource::new(10);
         source.seek_delay = Duration::from_millis(300);
+        let seeks_done = Arc::clone(&source.seeks_done);
         let mut reader = ReadAhead::spawn(Box::new(source), READ_AHEAD_MS);
-        wait_until(Duration::from_secs(2), || reader.buffered_frames() > 0);
-        let started = Instant::now();
+        wait_until(LIVENESS, || reader.buffered_frames() > 0);
         reader.seek(2_000);
-        assert!(started.elapsed() < Duration::from_millis(20));
+        assert_eq!(
+            seeks_done.load(Ordering::SeqCst),
+            0,
+            "seek returned before the 300 ms source seek finished"
+        );
         assert_eq!(reader.buffered_frames(), 0, "the old chunks are gone");
         assert!(!reader.exhausted());
         let mut out = Vec::new();
-        read_within(&mut reader, &mut out, Duration::from_secs(2)).unwrap();
+        read_within(&mut reader, &mut out, LIVENESS).unwrap();
         assert_eq!(frame_of(out[0]), 88_200, "2 s at 44.1 kHz");
     }
 
     #[test]
     fn wait_ready_gives_up_on_a_slow_call() {
         let mut source = SlowSource::new(10);
-        source.read_delay = Duration::from_millis(500);
-        let reads = Arc::clone(&source.reads);
+        source.read_delay = Duration::from_secs(1);
+        let in_read = Arc::clone(&source.in_read);
         let reader = ReadAhead::spawn(Box::new(source), READ_AHEAD_MS);
-        wait_until(Duration::from_secs(2), || reads.load(Ordering::SeqCst) == 1);
-        std::thread::sleep(SLOW_CALL * 2); // the first read is under way
-        let started = Instant::now();
-        assert!(!reader.wait_ready(Duration::from_millis(400)));
+        wait_until(LIVENESS, || in_read.load(Ordering::SeqCst));
+        std::thread::sleep(SLOW_CALL * 2); // the first read has been running a while
+        assert!(!reader.wait_ready(Duration::from_secs(5)));
         assert!(
-            started.elapsed() < Duration::from_millis(5),
-            "a read that has run for {:?} is slow: waited {:?}",
-            SLOW_CALL * 2,
-            started.elapsed()
+            in_read.load(Ordering::SeqCst),
+            "wait_ready gave up while the 1 s read was still running"
+        );
+    }
+
+    #[test]
+    fn a_working_thread_is_waited_for() {
+        // Every read sleeps (one timer tick on Windows): slow overall, never one slow call.
+        let mut source = SlowSource::new(10);
+        source.read_delay = Duration::from_millis(1);
+        let mut reader = ReadAhead::spawn(Box::new(source), READ_AHEAD_MS);
+        assert!(reader.wait_ready(Duration::from_secs(5)));
+        let mut out = Vec::new();
+        assert_eq!(
+            reader.try_read(&mut out).unwrap(),
+            ReadOutcome::Frames(CHUNK as usize)
         );
     }
 
@@ -675,13 +748,11 @@ pub(crate) mod tests {
         // As if the thread had died: it exits and marks itself gone.
         reader.shared.lock().stop = true;
         reader.shared.wake.notify_all();
-        wait_until(Duration::from_secs(2), || reader.shared.lock().gone);
+        wait_until(LIVENESS, || reader.shared.lock().gone);
         reader.shared.lock().stop = false;
 
         reader.seek(500);
-        let started = Instant::now();
-        assert!(reader.wait_ready(Duration::from_secs(1)));
-        assert!(started.elapsed() < Duration::from_millis(5));
+        // No waiting at all: the error is queued by the seek itself.
         let err = reader.try_read(&mut Vec::new()).unwrap_err();
         assert!(err.to_string().contains("decode thread stopped"), "{err:#}");
         assert!(reader.exhausted());
@@ -690,18 +761,46 @@ pub(crate) mod tests {
     #[test]
     fn drop_stops_the_thread() {
         let mut source = SlowSource::new(10);
-        source.read_delay = Duration::from_millis(50);
+        source.read_delay = Duration::from_millis(200);
+        let drops = Arc::clone(&source.drops);
+        let in_read = Arc::clone(&source.in_read);
+        let reader = ReadAhead::spawn(Box::new(source), READ_AHEAD_MS);
+        wait_until(LIVENESS, || in_read.load(Ordering::SeqCst));
+        drop(reader);
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            0,
+            "drop did not wait for the running read"
+        );
+        // Normally right after the 200 ms read; the bound allows for a busy machine.
+        wait_until(LIVENESS, || drops.load(Ordering::SeqCst) == 1);
+    }
+
+    #[test]
+    fn wait_stopped_waits_for_the_source_to_be_dropped() {
+        let mut source = SlowSource::new(10);
+        source.read_delay = Duration::from_millis(5);
         let drops = Arc::clone(&source.drops);
         let reader = ReadAhead::spawn(Box::new(source), READ_AHEAD_MS);
-        std::thread::sleep(Duration::from_millis(20)); // mid-read
-        let started = Instant::now();
-        drop(reader);
-        assert!(
-            started.elapsed() < Duration::from_millis(20),
-            "drop does not wait"
+        reader.stop();
+        assert!(reader.wait_stopped(Instant::now() + Duration::from_secs(5)));
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            1,
+            "dropped before it returned"
         );
-        wait_until(Duration::from_millis(500), || {
-            drops.load(Ordering::SeqCst) == 1
-        });
+
+        // A read that outlasts the deadline: it gives up and leaves the thread to finish.
+        let mut source = SlowSource::new(10);
+        source.read_delay = Duration::from_secs(1);
+        let drops = Arc::clone(&source.drops);
+        let in_read = Arc::clone(&source.in_read);
+        let reader = ReadAhead::spawn(Box::new(source), READ_AHEAD_MS);
+        wait_until(LIVENESS, || in_read.load(Ordering::SeqCst));
+        reader.stop();
+        assert!(!reader.wait_stopped(Instant::now() + Duration::from_millis(50)));
+        assert!(in_read.load(Ordering::SeqCst), "the read was still running");
+        drop(reader);
+        wait_until(LIVENESS, || drops.load(Ordering::SeqCst) == 1);
     }
 }
