@@ -14,7 +14,7 @@ use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::units::{Time, TimeBase, Timestamp};
 
-use super::source::{guarded, AudioSource, Input, StreamSpec};
+use super::source::{guarded, AudioSource, DecoderPanic, Input, StreamSpec};
 
 /// Consecutive undecodable packets after which a stream is considered broken.
 const MAX_CONSECUTIVE_ERRORS: u32 = 32;
@@ -139,7 +139,7 @@ impl SymphoniaSource {
         }
         let result = guarded("symphonia decoder", || self.decode_next_unguarded(out));
         if let Err(err) = &result {
-            if err.to_string().contains("panicked") {
+            if err.is::<DecoderPanic>() {
                 self.poisoned = true;
             }
         }

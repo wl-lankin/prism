@@ -3,41 +3,64 @@
 //! [`Playback`] is the piece of engine logic the engine thread (Task 8) drives: it pulls from
 //! the current source, resamples to the output spec, keeps the sink fed, moves on to a
 //! pre-opened next source without a gap and reopens the output when the device is lost.
+//!
+//! Threading contract: `Playback` and `OutputSink` are not `Send`; build them on the engine
+//! thread and pass the `Arc<dyn OutputFactory>` in. Open sources (`open_source[_with]`) off the
+//! engine thread and hand them over with [`Playback::set_source`] / [`Playback::queue_next`].
 
 pub mod ffmpeg;
 pub mod output;
 pub mod resample;
+pub mod ring;
 pub mod source;
 pub mod symph;
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-use anyhow::Context;
 use crossbeam_channel::Receiver;
 
-pub use output::{list_devices, CpalOutputFactory, Output, OutputEvent, OutputFactory, OutputSink};
+pub use output::{
+    list_devices, CpalOutputFactory, NullSink, Output, OutputEvent, OutputFactory, OutputSink,
+};
 pub use resample::Resampler;
-pub use source::{open_source, open_source_with, AudioSource, Input, StreamSpec};
+pub use source::{
+    open_source, open_source_with, AudioSource, DecoderPanic, Input, StreamSpec,
+    FFMPEG_DEFAULT_SPEC,
+};
 
 use source::guarded;
 
-/// What a [`Playback::pump`] call did.
+/// How long to wait between attempts to open an output device.
+const REOPEN_BACKOFF: Duration = Duration::from_secs(1);
+
+/// What a [`Playback::pump`] call did. Errors from `pump` are always source (decode) errors.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PumpStatus {
     /// Still playing the same source.
     Playing,
-    /// The current source ended and the queued next one took over.
+    /// The current source ended and the queued next one took over. This fires when the next
+    /// source starts being decoded, before it is audible: delay a UI track change by
+    /// [`Playback::queued_ms`].
     Advanced,
     /// No source left; everything decoded has been handed to the sink.
     Finished,
+    /// No output device could be opened; nothing was decoded. Retried about once a second,
+    /// then playback resumes where it was.
+    NoDevice,
 }
 
 pub struct Playback {
     factory: Arc<dyn OutputFactory>,
     sink: Box<dyn OutputSink>,
     events: Receiver<OutputEvent>,
-    /// Set when reopening after a lost device failed; retried on the next pump.
+    /// The sink is a [`NullSink`] and the default output must be (re)opened.
     needs_reopen: bool,
+    next_reopen: Instant,
+    reopen_backoff: Duration,
+    output_error: Option<String>,
+    /// Position to continue from once an output is back.
+    resume_ms: Option<u64>,
     volume: f32,
     paused: bool,
     current: Option<Box<dyn AudioSource>>,
@@ -50,17 +73,33 @@ pub struct Playback {
     /// Source position of the last set_source/seek, and frames read since then.
     base_ms: u64,
     frames_read: u64,
+    /// A source error hit right after a hand-over, reported on the next pump.
+    deferred_error: Option<anyhow::Error>,
 }
 
 impl Playback {
+    /// Opens `device` (falling back to the default output). Never fails for lack of a device:
+    /// without one, playback starts on a [`NullSink`] and `pump` reports `NoDevice`.
     pub fn new(factory: Arc<dyn OutputFactory>, device: Option<String>) -> anyhow::Result<Self> {
-        let sink = factory.open(device)?;
+        let mut output_error = None;
+        let mut opened = factory.open(device.clone());
+        if let (Err(_), Some(_)) = (&opened, &device) {
+            opened = factory.open(None);
+        }
+        let sink = opened.unwrap_or_else(|err| {
+            output_error = Some(format!("{err:#}"));
+            Box::new(NullSink::new())
+        });
         let events = sink.errors();
         Ok(Playback {
             factory,
             sink,
             events,
-            needs_reopen: false,
+            needs_reopen: output_error.is_some(),
+            next_reopen: Instant::now() + REOPEN_BACKOFF,
+            reopen_backoff: REOPEN_BACKOFF,
+            output_error,
+            resume_ms: None,
             volume: 1.0,
             paused: false,
             current: None,
@@ -71,6 +110,7 @@ impl Playback {
             pending_offset: 0,
             base_ms: 0,
             frames_read: 0,
+            deferred_error: None,
         })
     }
 
@@ -79,10 +119,18 @@ impl Playback {
         self.sink.spec()
     }
 
-    /// Replaces the current source immediately (drops anything queued in the sink).
+    /// Why no output device is open, while `pump` reports `NoDevice`.
+    pub fn output_error(&self) -> Option<&str> {
+        self.output_error.as_deref()
+    }
+
+    /// Replaces the current source immediately (drops anything queued in the sink and the
+    /// pre-opened next source).
     pub fn set_source(&mut self, source: Box<dyn AudioSource>) -> anyhow::Result<()> {
         self.resampler = Some(Resampler::new(source.spec(), self.sink.spec())?);
         self.current = Some(source);
+        self.next = None;
+        self.deferred_error = None;
         self.clear_buffers();
         self.base_ms = 0;
         Ok(())
@@ -98,9 +146,12 @@ impl Playback {
     pub fn stop(&mut self) {
         self.current = None;
         self.next = None;
+        self.deferred_error = None;
         self.clear_buffers();
     }
 
+    /// Seeks the current source. Blocks for as long as the source's seek takes (an FFmpeg
+    /// source restarts FFmpeg and waits for its first output).
     pub fn seek(&mut self, ms: u64) -> anyhow::Result<()> {
         let Some(current) = self.current.as_mut() else {
             return Ok(());
@@ -123,17 +174,22 @@ impl Playback {
 
     /// Approximate position in the current source of the sample being heard.
     pub fn position_ms(&self) -> u64 {
+        if let Some(ms) = self.resume_ms {
+            return ms;
+        }
         let Some(current) = self.current.as_ref() else {
             return 0;
         };
         let source_rate = current.spec().sample_rate.max(1) as f64;
-        let out = self.sink.spec();
-        let buffered_samples = (self.pending.len() - self.pending_offset) + self.sink.queued();
-        let buffered_out_frames = buffered_samples as f64 / out.channels.max(1) as f64;
         let buffered_source_frames =
-            buffered_out_frames * source_rate / out.sample_rate.max(1) as f64;
+            self.buffered_out_frames() * source_rate / self.sink.spec().sample_rate.max(1) as f64;
         let played = (self.frames_read as f64 - buffered_source_frames).max(0.0);
         self.base_ms + (played * 1000.0 / source_rate) as u64
+    }
+
+    /// How long until everything handed over so far has been heard.
+    pub fn queued_ms(&self) -> u64 {
+        (self.buffered_out_frames() * 1000.0 / self.sink.spec().sample_rate.max(1) as f64) as u64
     }
 
     /// True once nothing is left to play, including the sink's queue.
@@ -143,31 +199,64 @@ impl Playback {
             && self.sink.queued() == 0
     }
 
-    /// Handles output events and fills the sink as far as it has room. Never blocks; call it
-    /// every few milliseconds. A decode error is returned as `Err` (the engine skips the track).
+    /// Handles output events and fills the sink as far as it has room, then returns. It does
+    /// not wait for the device; it only blocks for as long as a source's `read` takes (local
+    /// decoding, or an FFmpeg pipe that was primed at open/seek). Call it every few
+    /// milliseconds. `Err` is always a source error (the engine skips the track); a missing
+    /// device is `Ok(NoDevice)`.
     pub fn pump(&mut self) -> anyhow::Result<PumpStatus> {
+        if let Some(err) = self.deferred_error.take() {
+            return Err(err);
+        }
         let lost = self
             .events
             .try_iter()
             .any(|event| matches!(event, OutputEvent::DeviceLost(_)));
-        if lost || self.needs_reopen {
-            self.reopen()?;
+        if lost && !self.needs_reopen {
+            self.resume_ms = Some(self.position_ms());
+            self.sink = Box::new(NullSink::new());
+            self.events = self.sink.errors();
+            self.needs_reopen = true;
+            self.next_reopen = Instant::now();
+        }
+        if self.needs_reopen {
+            if Instant::now() < self.next_reopen {
+                return Ok(PumpStatus::NoDevice);
+            }
+            if let Err(err) = self.reopen() {
+                self.output_error = Some(format!("{err:#}"));
+                self.next_reopen = Instant::now() + self.reopen_backoff;
+                return Ok(PumpStatus::NoDevice);
+            }
+            self.resume()?;
         }
 
         let mut status = PumpStatus::Playing;
+        match self.fill(&mut status) {
+            Ok(status) => Ok(status),
+            Err(err) if status == PumpStatus::Advanced => {
+                // Report the hand-over now and the new source's error on the next pump.
+                self.deferred_error = Some(err);
+                Ok(PumpStatus::Advanced)
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    fn fill(&mut self, status: &mut PumpStatus) -> anyhow::Result<PumpStatus> {
         loop {
             if self.pending_offset < self.pending.len() {
                 self.pending_offset += self.sink.push(&self.pending[self.pending_offset..]);
                 if self.pending_offset < self.pending.len() {
-                    return Ok(status);
+                    return Ok(*status);
                 }
             }
             self.pending.clear();
             self.pending_offset = 0;
 
             let Some(current) = self.current.as_mut() else {
-                return Ok(if status == PumpStatus::Advanced {
-                    status
+                return Ok(if *status == PumpStatus::Advanced {
+                    *status
                 } else {
                     PumpStatus::Finished
                 });
@@ -196,7 +285,7 @@ impl Playback {
                     self.current = Some(next);
                     self.base_ms = 0;
                     self.frames_read = 0;
-                    status = PumpStatus::Advanced;
+                    *status = PumpStatus::Advanced;
                 }
                 None => {
                     resampler.flush(&mut self.pending)?;
@@ -206,23 +295,28 @@ impl Playback {
         }
     }
 
-    /// Reopens the default output after the device was lost and resumes where playback was.
+    /// Opens the default output in place of the [`NullSink`].
     fn reopen(&mut self) -> anyhow::Result<()> {
-        let position = self.position_ms();
-        self.needs_reopen = true;
-        let sink = self
-            .factory
-            .open(None)
-            .context("reopening the default output after the device was lost")?;
+        let sink = self.factory.open(None)?;
         self.needs_reopen = false;
+        self.output_error = None;
         self.sink = sink;
         self.events = self.sink.errors();
         self.sink.set_volume(self.volume);
         self.sink.set_paused(self.paused);
-        if let Some(current) = self.current.as_mut() {
-            self.resampler = Some(Resampler::new(current.spec(), self.sink.spec())?);
-            self.pending.clear();
-            self.pending_offset = 0;
+        Ok(())
+    }
+
+    /// Continues the current source at the remembered position on the new output.
+    fn resume(&mut self) -> anyhow::Result<()> {
+        self.pending.clear();
+        self.pending_offset = 0;
+        let Some(current) = self.current.as_mut() else {
+            self.resume_ms = None;
+            return Ok(());
+        };
+        self.resampler = Some(Resampler::new(current.spec(), self.sink.spec())?);
+        if let Some(position) = self.resume_ms.take() {
             guarded("seek", || current.seek(position))?;
             self.base_ms = position;
             self.frames_read = 0;
@@ -230,10 +324,16 @@ impl Playback {
         Ok(())
     }
 
+    fn buffered_out_frames(&self) -> f64 {
+        let buffered_samples = (self.pending.len() - self.pending_offset) + self.sink.queued();
+        buffered_samples as f64 / self.sink.spec().channels.max(1) as f64
+    }
+
     fn clear_buffers(&mut self) {
         self.pending.clear();
         self.pending_offset = 0;
         self.frames_read = 0;
+        self.resume_ms = None;
         if let Some(resampler) = self.resampler.as_mut() {
             resampler.reset();
         }
@@ -246,6 +346,7 @@ mod tests {
     use super::*;
     use crate::library::tags::fixtures;
     use crossbeam_channel::Sender;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex;
 
     /// An output that accepts up to `capacity` samples and plays nothing.
@@ -286,6 +387,8 @@ mod tests {
         senders: Mutex<Vec<Sender<OutputEvent>>>,
         /// What each opened sink holds; the test plays it by draining.
         queues: Mutex<Vec<Arc<Mutex<Vec<f32>>>>>,
+        /// While set, every open fails as if no device existed.
+        fail: AtomicBool,
     }
 
     impl FakeFactory {
@@ -296,6 +399,7 @@ mod tests {
                 opened: Mutex::default(),
                 senders: Mutex::default(),
                 queues: Mutex::default(),
+                fail: AtomicBool::new(false),
             })
         }
 
@@ -307,6 +411,9 @@ mod tests {
     impl OutputFactory for FakeFactory {
         fn open(&self, device: Option<String>) -> anyhow::Result<Box<dyn OutputSink>> {
             self.opened.lock().unwrap().push(device);
+            if self.fail.load(Ordering::SeqCst) {
+                anyhow::bail!("no default output device");
+            }
             let (tx, rx) = crossbeam_channel::unbounded();
             self.senders.lock().unwrap().push(tx);
             let queued = Arc::new(Mutex::new(Vec::new()));
@@ -421,11 +528,138 @@ mod tests {
         );
     }
 
+    /// A source with the gap_*.wav spec that fails on its first read.
+    struct FailingSource;
+
+    impl AudioSource for FailingSource {
+        fn spec(&self) -> StreamSpec {
+            STEREO_44K
+        }
+        fn read(&mut self, _out: &mut Vec<f32>) -> anyhow::Result<usize> {
+            anyhow::bail!("broken stream")
+        }
+        fn seek(&mut self, _ms: u64) -> anyhow::Result<()> {
+            Ok(())
+        }
+        fn duration_ms(&self) -> Option<u64> {
+            None
+        }
+    }
+
+    /// Plays everything the fake sink holds (the test's stand-in for the audio callback).
+    fn play_queue(factory: &FakeFactory) {
+        factory.last_queue().lock().unwrap().clear();
+    }
+
+    #[test]
+    fn no_device_reports_no_device_without_consuming_the_source() {
+        let factory = FakeFactory::new(STEREO_44K, 8_820);
+        factory.fail.store(true, Ordering::SeqCst);
+        let mut playback = Playback::new(factory.clone(), Some("Speakers".into())).unwrap();
+        assert!(playback.output_error().is_some());
+        playback.set_source(wav("gap_a.wav")).unwrap();
+        playback.reopen_backoff = Duration::ZERO;
+        playback.next_reopen = Instant::now();
+        assert_eq!(playback.pump().unwrap(), PumpStatus::NoDevice);
+        assert_eq!(playback.pump().unwrap(), PumpStatus::NoDevice);
+        assert_eq!(playback.frames_read, 0, "nothing was decoded");
+        assert_eq!(
+            *factory.opened.lock().unwrap(),
+            vec![Some("Speakers".to_string()), None, None, None],
+            "the requested device, then the default, retried"
+        );
+
+        factory.fail.store(false, Ordering::SeqCst);
+        assert_eq!(playback.pump().unwrap(), PumpStatus::Playing);
+        assert!(playback.output_error().is_none());
+        let played = factory.last_queue().lock().unwrap().clone();
+        let mut expected = Vec::new();
+        wav("gap_a.wav").read(&mut expected).unwrap();
+        assert_eq!(
+            played[..1000],
+            expected[..1000],
+            "playback starts at the beginning"
+        );
+    }
+
+    #[test]
+    fn reopen_attempts_back_off() {
+        let factory = FakeFactory::new(STEREO_44K, 8_820);
+        factory.fail.store(true, Ordering::SeqCst);
+        let mut playback = Playback::new(factory.clone(), None).unwrap();
+        for _ in 0..10 {
+            assert_eq!(playback.pump().unwrap(), PumpStatus::NoDevice);
+        }
+        assert_eq!(
+            factory.opened.lock().unwrap().len(),
+            1,
+            "no retry within the backoff"
+        );
+    }
+
+    #[test]
+    fn lost_device_resumes_from_the_same_position() {
+        let factory = FakeFactory::new(STEREO_44K, 8_820);
+        let mut playback = Playback::new(factory.clone(), None).unwrap();
+        playback.reopen_backoff = Duration::ZERO;
+        playback.set_source(wav("gap_a.wav")).unwrap();
+        for _ in 0..3 {
+            playback.pump().unwrap();
+            play_queue(&factory);
+        }
+        playback.pump().unwrap(); // the sink holds unplayed audio when the device goes
+        let position = playback.position_ms();
+        assert!(position >= 290, "{position} ms played");
+
+        factory.fail.store(true, Ordering::SeqCst);
+        let lost = factory.senders.lock().unwrap()[0].clone();
+        lost.send(OutputEvent::DeviceLost("unplugged".into()))
+            .unwrap();
+        assert_eq!(playback.pump().unwrap(), PumpStatus::NoDevice);
+        assert_eq!(playback.position_ms(), position);
+
+        factory.fail.store(false, Ordering::SeqCst);
+        assert_eq!(playback.pump().unwrap(), PumpStatus::Playing);
+        assert!(playback.position_ms().abs_diff(position) <= 1);
+        let played = factory.last_queue().lock().unwrap().clone();
+        let mut expected = Vec::new();
+        let mut source = wav("gap_a.wav");
+        while source.read(&mut expected).unwrap() > 0 {}
+        let offset = (position as usize * 44_100 / 1000) * 2;
+        assert_eq!(
+            played[..1000],
+            expected[offset..offset + 1000],
+            "the new output continues where the old one stopped"
+        );
+    }
+
+    #[test]
+    fn error_after_a_hand_over_still_reports_the_advance() {
+        let factory = FakeFactory::new(STEREO_44K, usize::MAX);
+        let mut playback = Playback::new(factory.clone(), None).unwrap();
+        playback.set_source(wav("gap_a.wav")).unwrap();
+        playback.queue_next(Some(Box::new(FailingSource)));
+        assert_eq!(playback.pump().unwrap(), PumpStatus::Advanced);
+        let err = playback.pump().unwrap_err();
+        assert!(err.to_string().contains("broken stream"), "{err:#}");
+    }
+
+    #[test]
+    fn set_source_drops_the_queued_next_source() {
+        let factory = FakeFactory::new(STEREO_44K, usize::MAX);
+        let mut playback = Playback::new(factory.clone(), None).unwrap();
+        playback.set_source(wav("gap_a.wav")).unwrap();
+        playback.queue_next(Some(wav("gap_b.wav")));
+        playback.set_source(wav("gap_a.wav")).unwrap();
+        assert_eq!(playback.pump().unwrap(), PumpStatus::Finished);
+    }
+
     /// Manual check on real hardware: `cargo test -- --ignored smoke_plays`.
     #[test]
     #[ignore = "needs an audio output device"]
     fn smoke_plays_tone_on_default_device() {
         let mut playback = Playback::new(Arc::new(CpalOutputFactory), None).unwrap();
+        assert_eq!(playback.output_error(), None, "no output device could be opened");
         println!("output spec: {:?}", playback.output_spec());
         playback.set_source(wav("tagged.flac")).unwrap();
         let started = std::time::Instant::now();

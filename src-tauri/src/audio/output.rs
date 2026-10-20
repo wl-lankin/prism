@@ -1,23 +1,23 @@
 //! Audio output: the `OutputSink` abstraction and its cpal implementation.
 //!
 //! The engine thread pushes interleaved f32 samples in the device spec into an `rtrb` ring
-//! buffer (about 200 ms); the cpal callback pops them, applies the volume with a 20 ms ramp
-//! and writes silence on under-runs instead of blocking.
+//! buffer (about 200 ms); the cpal callback pops them (see [`super::ring`]), applies the volume
+//! with a 20 ms ramp and writes silence on under-runs instead of blocking.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{anyhow, bail, Context};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{ErrorKind, FromSample, SampleFormat, SizedSample, StreamConfig};
 use crossbeam_channel::{Receiver, Sender};
 
-use super::source::StreamSpec;
+use super::ring::{ring, Renderer, RingWriter};
+use super::source::{StreamSpec, FFMPEG_DEFAULT_SPEC};
 
 /// Ring buffer length.
 const BUFFER_MS: u32 = 200;
-/// Duration of a volume (or pause) ramp.
-const RAMP_MS: f32 = 20.0;
+/// Samples the callback renders per step, from a buffer allocated when the stream opens.
+const BLOCK_SAMPLES: usize = 4096;
 
 /// Something an output reports to the engine.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -60,21 +60,49 @@ impl OutputFactory for CpalOutputFactory {
     }
 }
 
-/// State shared between the engine side and the cpal callback.
-struct Shared {
-    volume: AtomicU32,
-    paused: AtomicBool,
-    clear: AtomicBool,
+/// Stand-in while no output device can be opened: it accepts nothing.
+pub struct NullSink {
+    events: Receiver<OutputEvent>,
+}
+
+impl NullSink {
+    pub fn new() -> Self {
+        // The sender is dropped at once: this sink never reports anything.
+        let (_, events) = crossbeam_channel::bounded(0);
+        NullSink { events }
+    }
+}
+
+impl Default for NullSink {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl OutputSink for NullSink {
+    fn spec(&self) -> StreamSpec {
+        FFMPEG_DEFAULT_SPEC
+    }
+    fn push(&mut self, _samples: &[f32]) -> usize {
+        0
+    }
+    fn queued(&self) -> usize {
+        0
+    }
+    fn clear(&mut self) {}
+    fn set_volume(&mut self, _volume: f32) {}
+    fn set_paused(&mut self, _paused: bool) {}
+    fn errors(&self) -> Receiver<OutputEvent> {
+        self.events.clone()
+    }
 }
 
 /// A cpal output stream fed from a ring buffer.
 pub struct Output {
     _stream: cpal::Stream,
-    producer: rtrb::Producer<f32>,
-    capacity: usize,
+    writer: RingWriter,
     spec: StreamSpec,
     device: String,
-    shared: Arc<Shared>,
     events: Receiver<OutputEvent>,
 }
 
@@ -102,16 +130,9 @@ impl Output {
             sample_rate: config.sample_rate,
             channels: config.channels,
         };
-        let channels = spec.channels as usize;
-        let capacity = (spec.sample_rate * BUFFER_MS / 1000) as usize * channels;
-        let (producer, consumer) = rtrb::RingBuffer::new(capacity);
-        let shared = Arc::new(Shared {
-            volume: AtomicU32::new(1f32.to_bits()),
-            paused: AtomicBool::new(false),
-            clear: AtomicBool::new(false),
-        });
+        let (writer, renderer) = ring(spec, (spec.sample_rate * BUFFER_MS / 1000) as usize);
         let (tx, rx) = crossbeam_channel::unbounded();
-        let parts = (consumer, Arc::clone(&shared), tx, spec);
+        let parts = (renderer, tx, spec);
         let stream = match format {
             SampleFormat::F32 => build::<f32>(&device, config, parts),
             SampleFormat::F64 => build::<f64>(&device, config, parts),
@@ -126,11 +147,9 @@ impl Output {
         stream.play().with_context(|| format!("starting {name}"))?;
         Ok(Output {
             _stream: stream,
-            producer,
-            capacity,
+            writer,
             spec,
             device: name,
-            shared,
             events: rx,
         })
     }
@@ -144,38 +163,21 @@ impl OutputSink for Output {
     fn spec(&self) -> StreamSpec {
         self.spec
     }
-
     fn push(&mut self, samples: &[f32]) -> usize {
-        let channels = self.spec.channels as usize;
-        let room = self.producer.slots() / channels * channels;
-        let take = (samples.len() / channels * channels).min(room);
-        let (pushed, _) = self.producer.push_partial_slice(&samples[..take]);
-        pushed.len()
+        self.writer.push(samples)
     }
-
     fn queued(&self) -> usize {
-        self.capacity - self.producer.slots()
+        self.writer.queued()
     }
-
     fn clear(&mut self) {
-        self.shared.clear.store(true, Ordering::Release);
+        self.writer.clear();
     }
-
     fn set_volume(&mut self, volume: f32) {
-        let volume = if volume.is_finite() {
-            volume.clamp(0.0, 1.0)
-        } else {
-            1.0
-        };
-        self.shared
-            .volume
-            .store(volume.to_bits(), Ordering::Relaxed);
+        self.writer.set_volume(volume);
     }
-
     fn set_paused(&mut self, paused: bool) {
-        self.shared.paused.store(paused, Ordering::Relaxed);
+        self.writer.set_paused(paused);
     }
-
     fn errors(&self) -> Receiver<OutputEvent> {
         self.events.clone()
     }
@@ -196,66 +198,28 @@ fn device_name(device: &cpal::Device) -> Option<String> {
         .map(|description| description.name().to_string())
 }
 
-type Parts = (
-    rtrb::Consumer<f32>,
-    Arc<Shared>,
-    Sender<OutputEvent>,
-    StreamSpec,
-);
+type Parts = (Renderer, Sender<OutputEvent>, StreamSpec);
 
 fn build<T>(
     device: &cpal::Device,
     config: StreamConfig,
-    (mut consumer, shared, events, spec): Parts,
+    (mut renderer, events, spec): Parts,
 ) -> anyhow::Result<cpal::Stream>
 where
     T: SizedSample + FromSample<f32>,
 {
-    let channels = spec.channels as usize;
-    let step = 1.0 / (RAMP_MS / 1000.0 * spec.sample_rate as f32);
-    let mut gain = 0f32;
-    let mut scratch = vec![0f32; 8192];
-    let callback_shared = Arc::clone(&shared);
+    let channels = spec.channels.max(1) as usize;
+    let block = (BLOCK_SAMPLES / channels).max(1) * channels;
+    let mut scratch = vec![0f32; block];
     let lost = AtomicBool::new(false);
 
     let data = move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
-        let shared = &callback_shared;
-        if shared.clear.swap(false, Ordering::AcqRel) {
-            let queued = consumer.slots();
-            if let Ok(chunk) = consumer.read_chunk(queued) {
-                chunk.commit_all();
+        for out in data.chunks_mut(block) {
+            let buf = &mut scratch[..out.len()];
+            renderer.render(buf);
+            for (sample_out, sample) in out.iter_mut().zip(buf.iter()) {
+                *sample_out = T::from_sample(*sample);
             }
-        }
-        if scratch.len() < data.len() {
-            scratch.resize(data.len(), 0.0);
-        }
-        let buf = &mut scratch[..data.len()];
-        let paused = shared.paused.load(Ordering::Relaxed);
-        let target = if paused {
-            0.0
-        } else {
-            f32::from_bits(shared.volume.load(Ordering::Relaxed))
-        };
-
-        // Paused and fully ramped down: keep the queue for resuming.
-        let got = if paused && gain == 0.0 {
-            0
-        } else {
-            consumer.pop_partial_slice(buf).0.len()
-        };
-        buf[got..].fill(0.0);
-        for frame in buf.chunks_exact_mut(channels) {
-            if gain < target {
-                gain = (gain + step).min(target);
-            } else if gain > target {
-                gain = (gain - step).max(target);
-            }
-            for sample in frame {
-                *sample *= gain;
-            }
-        }
-        for (out, sample) in data.iter_mut().zip(buf.iter()) {
-            *out = T::from_sample(*sample);
         }
     };
 

@@ -91,11 +91,15 @@ impl AudioSource for FfmpegSource {
         Ok(frames)
     }
 
+    /// Restarts FFmpeg at `ms` and waits for its first output (up to the 5 s stall timeout),
+    /// so the following `read` does not block on FFmpeg starting up.
     fn seek(&mut self, ms: u64) -> anyhow::Result<()> {
-        let process = Process::spawn(&self.input, self.spec.sample_rate, ms)?;
+        let mut process = Process::spawn(&self.input, self.spec.sample_rate, ms)?;
+        // Past the end FFmpeg exits cleanly without output: the source is then finished.
+        let first = process.next_chunk()?.unwrap_or_default();
         self.process = process;
         self.partial.clear();
-        self.pending.clear();
+        self.pending = first;
         Ok(())
     }
 
@@ -127,12 +131,23 @@ impl Process {
         let mut child = command
             .spawn()
             .with_context(|| format!("starting {}", program.display()))?;
-        let stdout = child.stdout.take().context("ffmpeg stdout")?;
-        let stderr = child.stderr.take().context("ffmpeg stderr")?;
+        let readers = (|| {
+            let stdout = child.stdout.take().context("ffmpeg stdout")?;
+            let stderr = child.stderr.take().context("ffmpeg stderr")?;
+            anyhow::Ok((pump_stdout(stdout)?, collect_stderr(stderr)?))
+        })();
+        let (chunks, stderr) = match readers {
+            Ok(readers) => readers,
+            Err(err) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(err);
+            }
+        };
         Ok(Process {
             child,
-            chunks: pump_stdout(stdout),
-            stderr: Some(collect_stderr(stderr)),
+            chunks,
+            stderr: Some(stderr),
             finished: false,
         })
     }
@@ -173,7 +188,7 @@ impl Drop for Process {
     }
 }
 
-fn pump_stdout(mut stdout: ChildStdout) -> Receiver<Vec<u8>> {
+fn pump_stdout(mut stdout: ChildStdout) -> anyhow::Result<Receiver<Vec<u8>>> {
     let (tx, rx) = crossbeam_channel::bounded(4);
     thread::Builder::new()
         .name("ffmpeg-stdout".into())
@@ -189,12 +204,12 @@ fn pump_stdout(mut stdout: ChildStdout) -> Receiver<Vec<u8>> {
                 }
             }
         })
-        .expect("spawning the ffmpeg reader thread");
-    rx
+        .context("spawning the ffmpeg reader thread")?;
+    Ok(rx)
 }
 
 /// Collects the first few KB of stderr for error messages, and drains the rest.
-fn collect_stderr(mut stderr: ChildStderr) -> JoinHandle<String> {
+fn collect_stderr(mut stderr: ChildStderr) -> anyhow::Result<JoinHandle<String>> {
     thread::Builder::new()
         .name("ffmpeg-stderr".into())
         .spawn(move || {
@@ -210,7 +225,7 @@ fn collect_stderr(mut stderr: ChildStderr) -> JoinHandle<String> {
             }
             text
         })
-        .expect("spawning the ffmpeg stderr thread")
+        .context("spawning the ffmpeg stderr thread")
 }
 
 fn describe(input: &Input) -> String {
@@ -222,6 +237,11 @@ fn describe(input: &Input) -> String {
 mod tests {
     use super::*;
     use crate::library::tags::fixtures;
+
+    const FFMPEG_TEST_SPEC: StreamSpec = StreamSpec {
+        sample_rate: 48_000,
+        channels: 2,
+    };
 
     #[test]
     fn ffmpeg_failure_surfaces_as_an_error() {
@@ -240,5 +260,20 @@ mod tests {
         .err()
         .expect("a missing file fails");
         assert!(err.to_string().contains("ffmpeg failed"), "{err:#}");
+    }
+
+    #[test]
+    fn seek_waits_for_the_first_output() {
+        if tools::ffmpeg_path().is_none() {
+            println!("ffmpeg not found: skipping seek_waits_for_the_first_output");
+            return;
+        }
+        let input = Input::File(fixtures().join("opus.opus"));
+        let mut source = FfmpegSource::open(&input, FFMPEG_TEST_SPEC).unwrap();
+        source.seek(300).unwrap();
+        assert!(!source.pending.is_empty(), "the restarted FFmpeg is primed");
+        source.seek(5_000).unwrap();
+        assert!(source.pending.is_empty());
+        assert_eq!(source.read(&mut Vec::new()).unwrap(), 0, "past the end");
     }
 }

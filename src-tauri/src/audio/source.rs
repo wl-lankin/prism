@@ -1,9 +1,8 @@
 //! The decoding side of the audio engine: what a source is and how one is opened.
 
+use std::fmt;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
-
-use anyhow::anyhow;
 
 use super::ffmpeg::FfmpegSource;
 use super::symph::SymphoniaSource;
@@ -38,6 +37,10 @@ pub const FFMPEG_DEFAULT_SPEC: StreamSpec = StreamSpec {
 
 /// Opens `input` with symphonia, falling back to FFmpeg (48 kHz stereo) when the probe fails
 /// or symphonia has no decoder for the codec.
+///
+/// Opening can take a while (it decodes the first packet; FFmpeg may need up to 5 s for its
+/// first output), so call this off the engine thread and hand the source in through
+/// `Playback::set_source` / `Playback::queue_next`.
 pub fn open_source(input: &Input) -> anyhow::Result<Box<dyn AudioSource>> {
     open_source_with(input, None)
 }
@@ -58,8 +61,23 @@ pub fn open_source_with(
     Ok(Box::new(FfmpegSource::open(input, target)?))
 }
 
-/// Runs decoder code, turning a panic into an error so a hostile file cannot kill the
-/// engine thread.
+/// A decoder panicked; the error a [`guarded`] call returns in that case.
+#[derive(Debug)]
+pub struct DecoderPanic {
+    pub what: String,
+    pub message: String,
+}
+
+impl fmt::Display for DecoderPanic {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} panicked: {}", self.what, self.message)
+    }
+}
+
+impl std::error::Error for DecoderPanic {}
+
+/// Runs decoder code, turning a panic into a [`DecoderPanic`] error so a hostile file cannot
+/// kill the engine thread.
 pub(crate) fn guarded<T>(what: &str, run: impl FnOnce() -> anyhow::Result<T>) -> anyhow::Result<T> {
     match panic::catch_unwind(AssertUnwindSafe(run)) {
         Ok(result) => result,
@@ -69,7 +87,11 @@ pub(crate) fn guarded<T>(what: &str, run: impl FnOnce() -> anyhow::Result<T>) ->
                 .map(|s| s.to_string())
                 .or_else(|| payload.downcast_ref::<String>().cloned())
                 .unwrap_or_else(|| "unknown panic".into());
-            Err(anyhow!("{what} panicked: {message}"))
+            Err(DecoderPanic {
+                what: what.to_string(),
+                message,
+            }
+            .into())
         }
     }
 }
