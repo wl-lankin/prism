@@ -142,8 +142,20 @@ export const miniToggle = () => call<void>('mini_toggle');
 export const miniLayout = () => call<MiniLayout>('mini_layout');
 /** The mini player's Flow menu opened or closed (the window's shape follows). */
 export const miniMenu = (open: boolean) => call<void>('mini_menu', { open });
-/** Shows, restores and focuses the main window. */
+/** Shows, restores and focuses the main window; hides the mini player. */
 export const mainShow = () => call<void>('main_show');
+
+/** The tray menu's (and the Windows thumbnail buttons') strings, in the UI language. */
+export interface TrayLabels {
+  open: string;
+  playPause: string;
+  next: string;
+  previous: string;
+  quit: string;
+}
+
+/** Sends the tray strings; the main window does it whenever the language resolves or changes. */
+export const traySetLabels = (labels: TrayLabels) => call<void>('tray_set_labels', { labels });
 
 /** A place for the main window to go to (`nav://go`), sent from the mini player. */
 export interface NavTarget {

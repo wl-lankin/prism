@@ -110,6 +110,7 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
     let config_dir = dirs.config;
     let settings = Arc::new(SettingsStore::load(&config_dir.join("settings.json")));
     let initial = settings.get();
+    app.manage(shell::ShellState::default());
     // Hidden until the user asks for it.
     if let Err(err) = shell::mini::create(app.handle(), initial.mini_on_top) {
         eprintln!("creating the mini player failed: {err}");
@@ -148,6 +149,7 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
         fan_out(vec![
             tauri_sink(handle.clone()),
             media.sink(),
+            shell::player_sink(handle.clone()),
             library::history::spawn_recorder(Arc::clone(&library.db)),
             Arc::new(move |event| {
                 if let Some(sink) = to_flow.get() {
@@ -208,6 +210,14 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
         thumbs: Arc::new(thumbs::ResizeGate::new(thumbs::ResizeGate::default_limit())),
     });
     media.start(handle.clone(), main_window_handle(app), cover_cache);
+    // The tray and (Windows) the taskbar button: closing the main window leaves Prism there.
+    if let Err(err) = shell::tray::create(&handle) {
+        eprintln!("creating the tray icon failed: {err}");
+    }
+    #[cfg(target_os = "windows")]
+    if let Some(window) = app.get_webview_window(shell::MAIN_LABEL) {
+        shell::taskbar_win::attach(&handle, &window);
+    }
 
     watch::start(handle.clone(), folders);
 
@@ -243,7 +253,13 @@ pub fn run() {
             Err(err) => fail_with(&err),
         })
         .on_window_event(|window, event| {
-            if window.label() == "main" {
+            if window.label() == shell::MAIN_LABEL {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    // Prism keeps playing: the main window steps aside (`shell::close_main`).
+                    api.prevent_close();
+                    shell::close_main(window);
+                    return;
+                }
                 window::on_main_event(window, event);
             } else if window.label() == shell::mini::MINI_LABEL {
                 shell::mini::on_event(window, event);
@@ -294,17 +310,26 @@ pub fn run() {
             commands::mini_layout,
             commands::mini_menu,
             commands::main_show,
+            commands::tray_set_labels,
             window::window_vibrancy,
             startup::startup_notice,
         ])
         .build(tauri::generate_context!())
         .unwrap_or_else(|err| fail_with(&anyhow::Error::new(err)))
-        .run(|app, event| {
-            if let tauri::RunEvent::Exit = event {
+        .run(|app, event| match event {
+            tauri::RunEvent::Exit => {
                 if let Some(state) = app.try_state::<AppState>() {
                     state.settings.flush();
                 }
             }
+            // A click on the Dock icon brings the main window back.
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Reopen { .. } => {
+                if let Err(err) = shell::main_show(app) {
+                    eprintln!("opening Prism failed: {err}");
+                }
+            }
+            _ => {}
         });
 }
 
