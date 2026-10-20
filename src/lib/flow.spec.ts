@@ -70,7 +70,14 @@ it('opens on a long press and swallows the click that ends it', () => {
   button.addEventListener('click', clicked);
   const action = holdToOpen(node, onhold);
 
-  button.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, clientX: 40, clientY: 50 }));
+  // A second finger (not the primary pointer) never opens it.
+  button.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, isPrimary: false }));
+  vi.advanceTimersByTime(HOLD_MS * 2);
+  expect(onhold).not.toHaveBeenCalled();
+
+  button.dispatchEvent(
+    new PointerEvent('pointerdown', { bubbles: true, button: 0, isPrimary: true, clientX: 40, clientY: 50 }),
+  );
   vi.advanceTimersByTime(HOLD_MS - 1);
   expect(onhold).not.toHaveBeenCalled();
   vi.advanceTimersByTime(1);
@@ -80,7 +87,7 @@ it('opens on a long press and swallows the click that ends it', () => {
   expect(clicked).not.toHaveBeenCalled();
 
   // A short press is a plain click.
-  button.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0 }));
+  button.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, isPrimary: true }));
   vi.advanceTimersByTime(200);
   button.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
   button.dispatchEvent(new MouseEvent('click', { bubbles: true }));

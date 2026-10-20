@@ -149,7 +149,10 @@
   /** Opens the Flow menu above the ring (centred on it), so the ring stays in view. */
   function openFlowMenu() {
     const box = dock?.getBoundingClientRect();
-    if (box) flowMenu = { x: box.left + box.width / 2, y: box.top };
+    if (!box) return;
+    // The menu hands focus back to whatever had it when it opened: make that the ring.
+    dock?.querySelector<HTMLElement>('.ring')?.focus();
+    flowMenu = { x: box.left + box.width / 2, y: box.top };
   }
 
   /** Views that show the library, and so the empty state when it has no tracks. */

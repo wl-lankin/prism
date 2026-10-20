@@ -61,7 +61,7 @@ export function holdToOpen(node: HTMLElement, onhold: (x: number, y: number) => 
     timer = undefined;
   };
   const down = (event: PointerEvent) => {
-    if (event.button !== 0) return;
+    if (event.button !== 0 || !event.isPrimary) return;
     cancel();
     held = false;
     start = [event.clientX, event.clientY];

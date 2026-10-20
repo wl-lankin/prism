@@ -29,7 +29,7 @@ const en = {
   'window.close': 'Close',
 
   'ring.flow': 'Flow',
-  'ring.flowHint': 'Flow from your favorites. Right-click for more.',
+  'ring.flowHint': 'Flow from your favorites. Right-click or hold for more.',
   'ring.play': 'Play',
   'ring.pause': 'Pause',
 
@@ -201,7 +201,7 @@ const de: Record<Key, string> = {
   'window.close': 'Schließen',
 
   'ring.flow': 'Flow',
-  'ring.flowHint': 'Flow aus deinen Favoriten. Rechtsklick für mehr.',
+  'ring.flowHint': 'Flow aus deinen Favoriten. Rechtsklick oder gedrückt halten für mehr.',
   'ring.play': 'Abspielen',
   'ring.pause': 'Pause',
 

@@ -68,6 +68,60 @@ it('lists genres, filters them as you type and starts the one picked', async () 
   target.remove();
 });
 
+it('hands the pick to onpick instead of starting it', async () => {
+  const target = document.createElement('div');
+  document.body.append(target);
+  const onpick = vi.fn();
+  const onclose = vi.fn();
+  const menu = mount(FlowMenu, { target, props: { x: 200, y: 400, onclose, onpick } });
+  flushSync();
+  target.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')[0].click();
+  expect(onpick).toHaveBeenCalledWith({ kind: 'favorites' });
+  expect(onclose).toHaveBeenCalled();
+  await Promise.resolve();
+  expect(invoke).not.toHaveBeenCalledWith('flow_start', expect.anything());
+  unmount(menu);
+  target.remove();
+});
+
+it('opens above the point anchored by its bottom edge, capped to the room above', async () => {
+  const target = document.createElement('div');
+  document.body.append(target);
+  const menu = mount(FlowMenu, { target, props: { x: 200, y: 500, onclose: () => {} } });
+  flushSync();
+  const box = target.querySelector<HTMLElement>('[role="menu"]')!;
+  await vi.waitFor(() => {
+    flushSync();
+    expect(box.style.bottom).toBe(`${window.innerHeight - 500 + 8}px`);
+  });
+  expect(box.style.top).toBe('');
+  expect(box.style.maxHeight).toBe(`${500 - 16}px`);
+  unmount(menu);
+  target.remove();
+});
+
+it('gives focus back to the opener and closes when focus leaves', async () => {
+  const ring = document.createElement('button');
+  const elsewhere = document.createElement('button');
+  document.body.append(ring, elsewhere);
+  ring.focus();
+  const target = document.createElement('div');
+  document.body.append(target);
+  const onclose = vi.fn();
+  const menu = mount(FlowMenu, { target, props: { x: 200, y: 400, onclose } });
+  flushSync();
+  const first = target.querySelector<HTMLButtonElement>('[role="menuitem"]')!;
+  await vi.waitFor(() => expect(document.activeElement).toBe(first));
+  elsewhere.focus();
+  expect(onclose).toHaveBeenCalled();
+  first.focus();
+  unmount(menu);
+  expect(document.activeElement).toBe(ring);
+  target.remove();
+  ring.remove();
+  elsewhere.remove();
+});
+
 it('closes on Escape', () => {
   const target = document.createElement('div');
   document.body.append(target);

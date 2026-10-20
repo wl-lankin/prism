@@ -7,18 +7,31 @@
   import type { FlowVariant } from '../types';
   import Icon from './Icon.svelte';
 
-  /** The Flow variants, opened at a point (the ring's right-click or long press). Picking
-   *  one starts that Flow and closes the menu. Esc, a click elsewhere or leaving the window
-   *  closes it. Used by the main window and the mini player. */
-  let { x, y, onclose }: { x: number; y: number; onclose: () => void } = $props();
+  /** The Flow variants, opened at a point (above the ring, after a right-click or long
+   *  press). Picking one closes the menu and starts that Flow through `playFlow`, or hands
+   *  the variant to `onpick` instead (the mini player handles an empty library and the
+   *  notice itself). Esc, a click elsewhere, focus leaving it or leaving the window closes
+   *  it; focus then returns to what had it before (the ring). Used by the main window and
+   *  the mini player. */
+  let {
+    x,
+    y,
+    onclose,
+    onpick,
+  }: { x: number; y: number; onclose: () => void; onpick?: (variant: FlowVariant) => void } = $props();
 
   const MARGIN = 8;
 
   let menu: HTMLDivElement | undefined = $state();
   let filterInput: HTMLInputElement | undefined = $state();
   let left = $state(0);
-  let top = $state(0);
+  /** Opening above: anchored by its bottom edge, so a list that shrinks (filtering) stays
+   *  next to the point. Below: anchored by its top edge. */
+  let edge: { side: 'top' | 'bottom'; px: number } = $state({ side: 'bottom', px: 0 });
+  let room = $state(0);
   let placed = $state(false);
+  /** Whatever had focus when the menu opened; it gets it back on close. */
+  const opener = typeof document !== 'undefined' ? (document.activeElement as HTMLElement | null) : null;
   let picking = $state(false);
   let genres: string[] | null = $state(null);
   let genreError: string | null = $state(null);
@@ -30,20 +43,43 @@
   });
   const playing = $derived(player.status === 'idle' ? null : player.flow);
 
-  /** Opens above and to the right of the point, flipping and clamping to stay inside. */
+  /** Centred on the point, above it when it fits there or has more room than below; never
+   *  past the window's edges (a short window caps the height and the genre list scrolls). */
   async function place() {
     await tick();
     if (!menu) return;
     const { width, height } = menu.getBoundingClientRect();
-    const fitsAbove = y - height - MARGIN >= MARGIN;
-    top = fitsAbove ? y - height - MARGIN : Math.min(y + MARGIN, window.innerHeight - height - MARGIN);
+    const above = y - 2 * MARGIN;
+    const below = window.innerHeight - y - 2 * MARGIN;
+    if (height <= above || above >= below) {
+      edge = { side: 'bottom', px: window.innerHeight - y + MARGIN };
+      room = Math.max(0, above);
+    } else {
+      edge = { side: 'top', px: y + MARGIN };
+      room = Math.max(0, below);
+    }
     left = Math.max(MARGIN, Math.min(x - width / 2, window.innerWidth - width - MARGIN));
     placed = true;
   }
 
   onMount(() => {
     void place().then(() => items()[0]?.focus());
+    return () => {
+      // Back to the ring, unless the user already moved focus somewhere else.
+      const active = document.activeElement;
+      if (opener?.isConnected && (!active || active === document.body || menu?.contains(active))) opener.focus();
+    };
   });
+
+  /** Keeps focus inside while the content swaps (the focused item is about to go away). */
+  function holdFocus() {
+    menu?.focus();
+  }
+
+  function onfocusout(event: FocusEvent) {
+    const next = event.relatedTarget as Node | null;
+    if (next && !menu?.contains(next)) onclose();
+  }
 
   $effect(() => {
     // Re-place when opened at another point (a second right-click).
@@ -58,10 +94,12 @@
 
   async function start(variant: FlowVariant) {
     onclose();
-    await playFlow(variant);
+    if (onpick) onpick(variant);
+    else await playFlow(variant);
   }
 
   async function openGenres() {
+    holdFocus();
     picking = true;
     filter = '';
     if (genres === null) {
@@ -78,6 +116,7 @@
   }
 
   async function back() {
+    holdFocus();
     picking = false;
     await place();
     items()[2]?.focus();
@@ -137,11 +176,12 @@
   bind:this={menu}
   class="menu"
   class:placed
-  style="left:{left}px;top:{top}px"
+  style="left:{left}px;{edge.side}:{edge.px}px;max-height:{room}px"
   role="menu"
   tabindex="-1"
   aria-label={picking ? t('flow.fromGenre') : t('flow.menu')}
   {onkeydown}
+  {onfocusout}
   oncontextmenu={(event) => event.preventDefault()}
 >
   {#if !picking}
@@ -238,6 +278,9 @@
       0 4px 14px rgba(0, 0, 0, 0.4);
     color: var(--text);
     visibility: hidden;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
   }
 
   .menu.placed {
@@ -376,8 +419,15 @@
   }
 
   .genres {
+    flex: 0 1 auto;
+    min-height: 0;
     max-height: 240px;
     overflow-y: auto;
+  }
+
+  .item,
+  .head {
+    flex: none;
   }
 
   .genre-item {

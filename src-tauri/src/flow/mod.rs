@@ -40,8 +40,9 @@ struct Session {
     deck: Deck,
     /// The queue version before the Flow's play: older states are ignored.
     after_version: u64,
-    /// The queue length an append in flight leads to; no second refill until it is seen.
-    awaiting: Option<u32>,
+    /// The queue version an append in flight was sent at; no second refill until a state
+    /// with a newer version arrives.
+    awaiting: Option<u64>,
 }
 
 enum Message {
@@ -82,7 +83,7 @@ impl FlowService {
                         Message::Start(started) => session = Some(*started),
                         Message::State(state) => {
                             if let Some(current) = session.as_mut() {
-                                if !refill(current, &state, &refill_player) {
+                                if !refill(current, &state, |ids| refill_player.append(ids)) {
                                     session = None;
                                 }
                             }
@@ -143,8 +144,13 @@ impl FlowService {
     }
 }
 
-/// Acts on one player state for `session`; false once the queue is no longer this Flow's.
-fn refill(session: &mut Session, state: &PlayerState, player: &PlayerHandle) -> bool {
+/// Acts on one player state for `session`, appending through `append`; false once the queue
+/// is no longer this Flow's.
+fn refill(
+    session: &mut Session,
+    state: &PlayerState,
+    append: impl FnOnce(Vec<String>) -> Result<(), String>,
+) -> bool {
     if state.queue_version <= session.after_version {
         // From before the Flow's play.
         return true;
@@ -152,8 +158,9 @@ fn refill(session: &mut Session, state: &PlayerState, player: &PlayerHandle) -> 
     if state.flow.as_ref() != Some(&session.variant) {
         return false;
     }
-    if let Some(length) = session.awaiting {
-        if state.queue_length < length {
+    if let Some(version) = session.awaiting {
+        // Every append bumps the queue version: a newer state already holds it.
+        if state.queue_version <= version {
             return true;
         }
         session.awaiting = None;
@@ -162,9 +169,8 @@ fn refill(session: &mut Session, state: &PlayerState, player: &PlayerHandle) -> 
         return true;
     }
     let batch = session.deck.next_batch(FLOW_BATCH);
-    let length = state.queue_length + batch.len() as u32;
-    if !batch.is_empty() && player.append(batch).is_ok() {
-        session.awaiting = Some(length);
+    if !batch.is_empty() && append(batch).is_ok() {
+        session.awaiting = Some(state.queue_version);
     }
     true
 }
@@ -223,8 +229,9 @@ fn placeholders(count: usize) -> String {
 
 /// The tracks a Flow of `variant` deals from, each once. Favorites: favorite tracks, every
 /// track of a favorite album, and every track whose artist or album artist is a favorite
-/// artist (exact name). A pool under `PAD_TARGET` is padded from the library: first tracks
-/// by the pool's artists, then tracks of the pool's genres.
+/// artist (exact name). A favorites pool under `PAD_TARGET` is padded from the library:
+/// first tracks by the pool's artists, then tracks of the pool's genres. A genre pool is
+/// never padded.
 pub fn pool(conn: &Connection, variant: &FlowVariant) -> anyhow::Result<Vec<Candidate>> {
     let mut found: Vec<Row> = Vec::new();
     let push = |row: Row| {
@@ -249,7 +256,9 @@ pub fn pool(conn: &Connection, variant: &FlowVariant) -> anyhow::Result<Vec<Cand
             push,
         )?,
     }
-    if found.len() < PAD_TARGET {
+    // Only favorites are padded: a genre Flow stays in its genre however small, and the
+    // library already holds everything.
+    if *variant == FlowVariant::Favorites && found.len() < PAD_TARGET {
         pad(conn, &mut found)?;
     }
     Ok(found.into_iter().map(|(candidate, _)| candidate).collect())
@@ -431,6 +440,8 @@ mod tests {
         add(&conn, "r3", "S", "S", "s", Some("ROCK"));
         add(&conn, "j1", "J", "J", "j", Some("Jazz"));
         add(&conn, "n1", "N", "N", "n", None);
+        // Same artist and album as the rock tracks, another genre: not dealt.
+        add(&conn, "r4", "R", "R", "r", Some("Jazz"));
         let pool = pool(
             &conn,
             &FlowVariant::Genre {
@@ -439,6 +450,124 @@ mod tests {
         )
         .unwrap();
         assert_eq!(ids(&pool), vec!["r1", "r2", "r3"]);
+    }
+
+    #[test]
+    fn small_genre_pool_is_not_padded() {
+        let db = Db::open_in_memory().unwrap();
+        let conn = db.0.lock().unwrap();
+        for i in 0..150 {
+            let artist = format!("Artist {}", i % 5);
+            let genre = if i < 12 { "Folk" } else { "Jazz" };
+            add(
+                &conn,
+                &format!("t{i:03}"),
+                &artist,
+                &artist,
+                &format!("album {}", i % 5),
+                Some(genre),
+            );
+        }
+        let pool = pool(
+            &conn,
+            &FlowVariant::Genre {
+                genre: "folk".into(),
+            },
+        )
+        .unwrap();
+        let expected: Vec<String> = (0..12).map(|i| format!("t{i:03}")).collect();
+        assert_eq!(
+            ids(&pool),
+            expected.iter().map(String::as_str).collect::<Vec<_>>()
+        );
+    }
+
+    mod refill_rules {
+        use rand::SeedableRng;
+
+        use super::super::*;
+
+        fn session() -> Session {
+            let pool = (0..120)
+                .map(|i| Candidate {
+                    id: format!("t{i:03}"),
+                    artist: format!("A{}", i % 7),
+                    last_played: None,
+                })
+                .collect();
+            Session {
+                variant: FlowVariant::Library,
+                deck: Deck::new(pool, 0, StdRng::seed_from_u64(3)),
+                after_version: 4,
+                awaiting: None,
+            }
+        }
+
+        fn state(version: u64, index: u32, length: u32) -> PlayerState {
+            PlayerState {
+                status: crate::player::PlayerStatus::Playing,
+                track: None,
+                position_ms: 0,
+                duration_ms: 0,
+                volume: 1.0,
+                queue_index: index,
+                queue_length: length,
+                queue_version: version,
+                flow: Some(FlowVariant::Library),
+            }
+        }
+
+        /// Runs `refill` and returns (still the session, how many ids were appended).
+        fn step(session: &mut Session, state: &PlayerState) -> (bool, usize) {
+            let mut appended = 0;
+            let alive = refill(session, state, |ids| {
+                appended = ids.len();
+                Ok(())
+            });
+            (alive, appended)
+        }
+
+        #[test]
+        fn states_from_before_the_play_are_ignored() {
+            let mut s = session();
+            // The previous queue was near its end, but that was before this Flow's play.
+            assert_eq!(step(&mut s, &state(4, 95, 100)), (true, 0));
+            assert_eq!(step(&mut s, &state(3, 99, 100)), (true, 0));
+            assert!(s.awaiting.is_none());
+        }
+
+        #[test]
+        fn refills_once_per_append_then_again_after_it_lands() {
+            let mut s = session();
+            assert_eq!(step(&mut s, &state(5, 0, 50)), (true, 0));
+            assert_eq!(step(&mut s, &state(5, 40, 50)), (true, FLOW_BATCH));
+            // The append is in flight: the next position updates do not send another.
+            assert_eq!(step(&mut s, &state(5, 41, 50)), (true, 0));
+            // Landed (newer version): far from the end again.
+            assert_eq!(step(&mut s, &state(6, 42, 100)), (true, 0));
+            assert!(s.awaiting.is_none());
+            assert_eq!(step(&mut s, &state(6, 90, 100)), (true, FLOW_BATCH));
+        }
+
+        #[test]
+        fn a_stale_state_does_not_stall_the_refill() {
+            // A restart of the same Flow seen through a stale state of the old, longer
+            // queue: the append it sends is judged by version, not by the old length.
+            let mut s = session();
+            assert_eq!(step(&mut s, &state(5, 95, 100)), (true, FLOW_BATCH));
+            // The fresh queue (50 long, version bumped by the append) is seen next.
+            assert_eq!(step(&mut s, &state(6, 0, 100)), (true, 0));
+            assert!(s.awaiting.is_none(), "the append landed");
+            assert_eq!(step(&mut s, &state(6, 91, 100)), (true, FLOW_BATCH));
+        }
+
+        #[test]
+        fn another_queue_ends_the_session() {
+            let mut s = session();
+            let mut other = state(5, 0, 2);
+            other.flow = None;
+            assert_eq!(step(&mut s, &other), (false, 0));
+        }
     }
 
     #[test]
