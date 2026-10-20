@@ -11,6 +11,9 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Sent to every window with the full settings after each save.
+pub const EVENT_CHANGED: &str = "settings://changed";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Language {

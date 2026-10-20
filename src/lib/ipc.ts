@@ -170,7 +170,12 @@ export const onPlaylistsChanged = (cb: () => void): Promise<UnlistenFn> =>
   listen('playlists://changed', () => cb());
 export const onNavGo = (cb: (target: NavTarget) => void): Promise<UnlistenFn> =>
   listen<NavTarget>('nav://go', (event) => cb(event.payload));
-export const onMiniLayout = (cb: (layout: MiniLayout) => void): Promise<UnlistenFn> =>
+/** The full settings after any window saved a change. */
+export const onSettingsChanged = (cb: (settings: Settings) => void): Promise<UnlistenFn> =>
+  listen<Settings>('settings://changed', (event) => cb(event.payload));
+/** The mini player was just shown (it never gets focus or a visibility change for it). */
+export const onMiniShown = (cb: () => void): Promise<UnlistenFn> => listen('mini://shown', () => cb());
+export const onMiniLayout =(cb: (layout: MiniLayout) => void): Promise<UnlistenFn> =>
   listen<MiniLayout>('mini://layout', (event) => cb(event.payload));
-export const onScanProgress =(cb: (progress: ScanProgress) => void): Promise<UnlistenFn> =>
+export const onScanProgress = (cb: (progress: ScanProgress) => void): Promise<UnlistenFn> =>
   listen<ScanProgress>('library://scan-progress', (event) => cb(event.payload));

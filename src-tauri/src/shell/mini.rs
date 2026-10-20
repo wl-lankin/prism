@@ -28,6 +28,24 @@ const MARGIN: f64 = 12.0;
 
 /// Tells the page where the player sits in the window.
 pub const EVENT_LAYOUT: &str = "mini://layout";
+/// Tells the page the mini player was just shown.
+pub const EVENT_SHOWN: &str = "mini://shown";
+
+/// `WM_MOUSEACTIVATE` and `MA_NOACTIVATE` (winuser.h), here so the decision is testable on
+/// every platform.
+const WM_MOUSEACTIVATE: u32 = 0x0021;
+const MA_NOACTIVATE: isize = 3;
+
+/// The answer the mini window gives to a window message itself, before the default handling.
+///
+/// A click on the page lands in WebView2's child window, which asks its top-level parent
+/// with `WM_MOUSEACTIVATE` whether to activate. `WS_EX_NOACTIVATE` alone should already keep
+/// the window inactive, but WebView2 focuses its own window on a mousedown; answering
+/// `MA_NOACTIVATE` here as well makes sure a click on previous, next or the heart never
+/// takes the activation (and the keyboard) from the app the user is typing in.
+pub fn own_reply(message: u32) -> Option<isize> {
+    (message == WM_MOUSEACTIVATE).then_some(MA_NOACTIVATE)
+}
 
 /// A rectangle in physical px.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -191,9 +209,51 @@ pub fn create(app: &AppHandle, on_top: bool) -> tauri::Result<WebviewWindow> {
         .visible(config.visible)
         .build()?;
     crate::window::clear_system_chrome(&window);
+    never_activate(&window);
     shape::apply(&window, Some(&region(layout().top)));
     Ok(window)
 }
+
+/// Windows: subclasses the window so it answers `WM_MOUSEACTIVATE` itself (`own_reply`).
+#[cfg(target_os = "windows")]
+fn never_activate(window: &WebviewWindow) {
+    use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+    use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
+    use windows_sys::Win32::UI::WindowsAndMessaging::WM_NCDESTROY;
+
+    const ID: usize = 0x5052_4d49; // "PRMI"
+
+    unsafe extern "system" fn proc(
+        hwnd: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        _id: usize,
+        _data: usize,
+    ) -> LRESULT {
+        if let Some(reply) = own_reply(message) {
+            return reply;
+        }
+        if message == WM_NCDESTROY {
+            // SAFETY: removing our own subclass from the window that is going away.
+            unsafe { RemoveWindowSubclass(hwnd, Some(proc), ID) };
+        }
+        // SAFETY: the arguments are the ones this message arrived with.
+        unsafe { DefSubclassProc(hwnd, message, wparam, lparam) }
+    }
+
+    let Ok(hwnd) = window.hwnd() else {
+        return;
+    };
+    // SAFETY: `hwnd` is the live mini window, subclassed on the thread that created it (the
+    // setup runs on the main thread); `proc` lives for the whole program.
+    if unsafe { SetWindowSubclass(hwnd.0 as _, Some(proc), ID, 0) } == 0 {
+        eprintln!("subclassing the mini player failed");
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn never_activate(_window: &WebviewWindow) {}
 
 fn window(app: &AppHandle) -> Option<WebviewWindow> {
     app.get_webview_window(MINI_LABEL)
@@ -248,8 +308,9 @@ pub fn show(app: &AppHandle, anchor: &Anchor) -> tauri::Result<()> {
         };
         window.set_position(PhysicalPosition::new(at.x, at.y - room))?;
     }
-    shape::apply(&window, Some(&region(layout_for(room_above).top)));
-    show_inactive(&window);
+    show_inactive(&window, region(layout_for(room_above).top));
+    // Shown without activation, the page sees no focus or visibility change: tell it.
+    let _ = window.emit_to(MINI_LABEL, EVENT_SHOWN, ());
     Ok(())
 }
 
@@ -300,13 +361,15 @@ pub fn on_event(window: &tauri::Window, event: &tauri::WindowEvent) {
 /// window (measured: it stayed behind), so the window goes into the topmost band and, unless
 /// it is meant to stay on top, straight back out of it: `HWND_NOTOPMOST` leaves it at the top
 /// of the normal windows.
+/// The shape goes on first, so the window never shows unshaped.
 #[cfg(target_os = "windows")]
-fn show_inactive(window: &WebviewWindow) {
+fn show_inactive(window: &WebviewWindow, region: Region) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         GetWindowLongW, SetWindowPos, ShowWindow, GWL_EXSTYLE, HWND_NOTOPMOST, HWND_TOPMOST,
         SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_SHOWNOACTIVATE, WS_EX_TOPMOST,
     };
 
+    shape::apply(window, Some(&region));
     let Ok(hwnd) = window.hwnd() else {
         return;
     };
@@ -324,21 +387,23 @@ fn show_inactive(window: &WebviewWindow) {
 }
 
 /// macOS: `orderFrontRegardless` brings the panel up without making Prism the active app.
-/// AppKit wants it on the main thread.
+/// AppKit wants it on the main thread, so it runs later; the shape is applied in the same
+/// closure, after the window is ordered front. Applied before, the cursor tracker would see
+/// a hidden window, stop at once and leave the whole window taking clicks.
 #[cfg(target_os = "macos")]
-fn show_inactive(window: &WebviewWindow) {
+fn show_inactive(window: &WebviewWindow, region: Region) {
     let target = window.clone();
     let shown = window.run_on_main_thread(move || {
-        let Ok(ns_window) = target.ns_window() else {
-            return;
-        };
-        // SAFETY: `ns_window` is the live NSWindow behind the mini window, used on the main
-        // thread.
-        #[allow(unused_unsafe)]
-        unsafe {
-            let ns_window = &*(ns_window as *const objc2_app_kit::NSWindow);
-            ns_window.orderFrontRegardless();
+        if let Ok(ns_window) = target.ns_window() {
+            // SAFETY: `ns_window` is the live NSWindow behind the mini window, used on the
+            // main thread.
+            #[allow(unused_unsafe)]
+            unsafe {
+                let ns_window = &*(ns_window as *const objc2_app_kit::NSWindow);
+                ns_window.orderFrontRegardless();
+            }
         }
+        shape::apply(&target, Some(&region));
     });
     if let Err(err) = shown {
         eprintln!("showing the mini player failed: {err}");
@@ -346,8 +411,9 @@ fn show_inactive(window: &WebviewWindow) {
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-fn show_inactive(window: &WebviewWindow) {
+fn show_inactive(window: &WebviewWindow, region: Region) {
     let _ = window.show();
+    shape::apply(window, Some(&region));
 }
 
 #[cfg(test)]
@@ -442,6 +508,14 @@ mod tests {
         assert!(!config.resizable);
         assert!(!config.always_on_top);
         assert!(builder_config(true).always_on_top);
+    }
+
+    #[test]
+    fn mouse_activation_is_refused() {
+        assert_eq!(own_reply(0x0021), Some(3));
+        // Clicks themselves, and everything else, go on to the default handling.
+        assert_eq!(own_reply(0x0201), None);
+        assert_eq!(own_reply(0x0006), None);
     }
 
     #[test]

@@ -48,13 +48,21 @@ const emitTo = vi.fn(async (..._args: unknown[]) => {});
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: (cmd: string, args?: Record<string, unknown>) => invoke(cmd, args),
 }));
+type Handler = (event: { payload: unknown }) => void;
+const handlers = new Map<string, Handler>();
 vi.mock('@tauri-apps/api/event', () => ({
-  listen: vi.fn(async () => () => {}),
+  listen: vi.fn(async (name: string, handler: Handler) => {
+    handlers.set(name, handler);
+    return () => {
+      if (handlers.get(name) === handler) handlers.delete(name);
+    };
+  }),
   emitTo: (...args: unknown[]) => emitTo(...args),
 }));
 
 const { default: MiniPlayer } = await import('./MiniPlayer.svelte');
 const { setLang } = await import('../i18n');
+const { DEFAULT_SETTINGS } = await import('../stores/settings.svelte');
 
 let target: HTMLElement;
 beforeEach(() => {
@@ -140,5 +148,35 @@ it('handles an empty library inside the mini player', async () => {
     expect(target.querySelector('[role="status"]')?.textContent).toContain('Your library is empty');
   });
   expect(emitTo).not.toHaveBeenCalled();
+  unmount(mini);
+});
+
+it('reads the settings again and closes the Flow menu when it is shown', async () => {
+  const mini = mount(MiniPlayer, { target });
+  await settle();
+  const reads = () => invoke.mock.calls.filter((call) => call[0] === 'settings_get').length;
+  const before = reads();
+  target.querySelector('.ring')!.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true }));
+  await vi.waitFor(async () => {
+    await settle();
+    expect(document.querySelector('[role="menu"]')).not.toBeNull();
+  });
+  expect(invoke).toHaveBeenCalledWith('mini_menu', { open: true });
+  handlers.get('mini://shown')!({ payload: null });
+  await settle();
+  expect(document.querySelector('[role="menu"]')).toBeNull();
+  expect(invoke).toHaveBeenCalledWith('mini_menu', { open: false });
+  expect(reads()).toBe(before + 1);
+  unmount(mini);
+});
+
+it('follows a language change made in the main window', async () => {
+  const mini = mount(MiniPlayer, { target });
+  await settle();
+  handlers.get('settings://changed')!({
+    payload: { ...DEFAULT_SETTINGS, language: 'de' },
+  });
+  await settle();
+  expect([...target.querySelectorAll('button')].some((b) => b.textContent?.trim() === 'Prism öffnen')).toBe(true);
   unmount(mini);
 });

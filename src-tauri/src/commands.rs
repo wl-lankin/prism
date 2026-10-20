@@ -378,7 +378,8 @@ pub fn settings_get(state: State<'_, AppState>) -> Result<Settings, String> {
 /// debounced volume save during a device pick) reach the player once each and in order.
 #[tauri::command]
 pub async fn settings_set(app: AppHandle, patch: serde_json::Value) -> Result<Settings, String> {
-    blocking(move || {
+    let notify = app.clone();
+    let saved = blocking(move || {
         let state = app.state::<AppState>();
         state.settings.update(patch, |changes| {
             for change in changes {
@@ -396,7 +397,12 @@ pub async fn settings_set(app: AppHandle, patch: serde_json::Value) -> Result<Se
             }
         })
     })
-    .await
+    .await?;
+    // Every window follows the saved settings (the mini player's language, for one).
+    if let Err(err) = notify.emit(crate::settings::EVENT_CHANGED, &saved) {
+        eprintln!("emitting the settings change failed: {err}");
+    }
+    Ok(saved)
 }
 
 /// Names of the output devices, as `outputDevice` takes them.

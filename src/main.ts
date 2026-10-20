@@ -3,11 +3,9 @@ import '@fontsource-variable/space-grotesk';
 import './lib/theme.css';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { mount } from 'svelte';
-import App from './App.svelte';
-import MiniPlayer from './lib/components/MiniPlayer.svelte';
 import { MINI_LABEL } from './lib/ipc';
 
-/** Both windows load this page; the mini window gets the mini player. */
+/** Both windows load this page; each imports only its own component (and its CSS). */
 function label(): string {
   try {
     return getCurrentWindow().label;
@@ -17,5 +15,6 @@ function label(): string {
 }
 
 const target = document.getElementById('app')!;
-if (label() === MINI_LABEL) mount(MiniPlayer, { target });
-else mount(App, { target });
+const { default: root } =
+  label() === MINI_LABEL ? await import('./lib/components/MiniPlayer.svelte') : await import('./App.svelte');
+mount(root, { target });

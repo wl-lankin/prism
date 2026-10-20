@@ -44,13 +44,13 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 # DWM attributes for the transparent main window (no border, no rounded system corners, no
 # backdrop), GDI for its window region (the click-through strip), and ShowWindow /
 # SetWindowPos to show the mini player without activating it.
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # orderFrontRegardless for the mini player (shown without activating Prism); the same
 # versions Tauri uses.
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", features = ["NSResponder", "NSWindow"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSResponder", "NSWindow"] }
 
 [profile.release]
 opt-level = 3

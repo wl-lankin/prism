@@ -31,7 +31,7 @@
   import { notice, notify } from './lib/stores/notice.svelte';
   import { initPlayer, player } from './lib/stores/player.svelte';
   import { initRing, ring } from './lib/stores/ring.svelte';
-  import { initSettings } from './lib/stores/settings.svelte';
+  import { followSettings, initSettings } from './lib/stores/settings.svelte';
   import { initWindow, windowState } from './lib/stores/window.svelte';
   import shape from './lib/window-shape.json';
 
@@ -145,6 +145,19 @@
 
   $effect(() => {
     initSettings().catch((err) => console.error('loading the settings failed', err));
+  });
+
+  // Saves from the mini player (or any other window) show up here too.
+  $effect(() => {
+    let stop: (() => void) | undefined;
+    let gone = false;
+    followSettings()
+      .then((unlisten) => (gone ? unlisten() : (stop = unlisten)))
+      .catch(() => {});
+    return () => {
+      gone = true;
+      stop?.();
+    };
   });
 
   // Files dropped onto the window play at once, without being indexed.

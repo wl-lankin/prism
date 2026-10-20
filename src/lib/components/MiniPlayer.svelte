@@ -9,6 +9,7 @@
     miniMenu,
     navGoMain,
     onMiniLayout,
+    onMiniShown,
     playerNext,
     playerPrev,
     playerSetVolume,
@@ -18,7 +19,7 @@
   import { notice, notify } from '../stores/notice.svelte';
   import { initPlayer, player } from '../stores/player.svelte';
   import { initRing, ring } from '../stores/ring.svelte';
-  import { initSettings } from '../stores/settings.svelte';
+  import { followSettings, initSettings } from '../stores/settings.svelte';
   import type { FlowVariant } from '../types';
   import shape from '../window-shape.json';
   import Cover from './Cover.svelte';
@@ -66,16 +67,30 @@
     };
   });
 
-  // The language is a setting; read it again whenever the player shows, so a change made in
-  // the main window meanwhile is followed.
+  const loadSettings = () => initSettings().catch((err) => console.error('loading the settings failed', err));
+
+  // The language is a setting: saves from the main window arrive as `settings://changed`.
+  // The window is shown without activation, so the page sees no focus or visibility change:
+  // the backend says `mini://shown` instead. Then the settings are read again (in case an
+  // event was missed) and a Flow menu left open from last time closes.
   $effect(() => {
-    const load = () => initSettings().catch((err) => console.error('loading the settings failed', err));
-    load();
-    const onvisible = () => {
-      if (document.visibilityState === 'visible') load();
+    loadSettings();
+    const stops: (() => void)[] = [];
+    let gone = false;
+    const keep = (stop: () => void) => (gone ? stop() : stops.push(stop));
+    followSettings()
+      .then(keep)
+      .catch(() => {});
+    onMiniShown(() => {
+      closeFlowMenu();
+      loadSettings();
+    })
+      .then(keep)
+      .catch(() => {});
+    return () => {
+      gone = true;
+      for (const stop of stops) stop();
     };
-    document.addEventListener('visibilitychange', onvisible);
-    return () => document.removeEventListener('visibilitychange', onvisible);
   });
 
   $effect(() => {
