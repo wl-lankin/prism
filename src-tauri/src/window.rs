@@ -71,18 +71,28 @@ pub fn setup(app: &tauri::App) {
 }
 
 /// Keeps the main window's click-through shape in step with its size, scale and state
-/// (maximized and fullscreen windows have no strip, so no shape). Focus also re-applies it,
-/// which restarts the macOS cursor tracker after the window was hidden.
+/// (a maximized window has no strip, so no shape). Focus also re-applies it, which restarts
+/// the macOS cursor tracker after the window was hidden; moves refresh the tracker's cached
+/// position.
 pub fn on_main_event(window: &tauri::Window, event: &WindowEvent) {
-    let reshape = match event {
-        WindowEvent::Resized(_) | WindowEvent::ScaleFactorChanged { .. } => true,
-        WindowEvent::Focused(focused) => cfg!(target_os = "macos") && *focused,
-        _ => false,
+    let (reshape, moved) = match event {
+        WindowEvent::Resized(_) => (true, false),
+        WindowEvent::ScaleFactorChanged { .. } => (true, true),
+        WindowEvent::Moved(_) => (false, true),
+        WindowEvent::Focused(focused) => (cfg!(target_os = "macos") && *focused, false),
+        _ => (false, false),
     };
+    if !reshape && !moved {
+        return;
+    }
+    let Some(window) = window.get_webview_window(window.label()) else {
+        return;
+    };
+    if moved {
+        shape::moved(&window);
+    }
     if reshape {
-        if let Some(window) = window.get_webview_window(window.label()) {
-            shape::reshape_main(&window);
-        }
+        shape::reshape_main(&window);
     }
 }
 

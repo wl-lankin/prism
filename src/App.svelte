@@ -11,6 +11,7 @@
   import SearchPalette from './lib/components/SearchPalette.svelte';
   import Settings from './lib/components/Settings.svelte';
   import Sidebar from './lib/components/Sidebar.svelte';
+  import ResizeBand from './lib/components/ResizeBand.svelte';
   import SongList from './lib/components/SongList.svelte';
   import TitleBar from './lib/components/TitleBar.svelte';
   import TransportStrip from './lib/components/TransportStrip.svelte';
@@ -194,7 +195,7 @@
   <!-- First in the DOM so the main control comes early in the tab order; placed by CSS. -->
   <div
     class="ring-dock"
-    style="--ring:{ring}px;--dock-bottom:{dockBottom}px;--notice-lift:{NOTICE_LIFT - dockTop}px"
+    style="--ring:{ring}px;--bezel:{MAIN.bezel}px;--dock-bottom:{dockBottom}px;--notice-lift:{NOTICE_LIFT - dockTop}px"
   >
     <div class="notice" class:shown={notice.text} role="status" aria-live="polite">{notice.text ?? ''}</div>
     <FlowRing {mode} {progress} size={ring} onactivate={activate} />
@@ -254,6 +255,9 @@
     <div class="transport">
       <TransportStrip ringGap={ring + 44} ringInside={maximized} />
     </div>
+
+    <!-- The strip below the card is click-through, so the card's bottom edge resizes. -->
+    <ResizeBand gap={ring + 2 * MAIN.bezel} />
 
     {#if dragging}
       <div class="drop" aria-hidden="true">
@@ -463,7 +467,7 @@
     z-index: 3;
     border-radius: 50%;
     /* A dark bezel, so the ring reads as set into the card's edge. */
-    box-shadow: 0 0 0 6px var(--bg);
+    box-shadow: 0 0 0 var(--bezel) var(--bg);
     background: var(--bg);
   }
 
