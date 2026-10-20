@@ -1,5 +1,54 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { coverUrl } from './ipc';
+
+const invoke = vi.fn(async (..._args: unknown[]) => undefined);
+vi.mock('@tauri-apps/api/core', () => ({ invoke: (...args: unknown[]) => invoke(...args) }));
+const listen = vi.fn(async (..._args: unknown[]) => () => {});
+vi.mock('@tauri-apps/api/event', () => ({ listen: (...args: unknown[]) => listen(...args) }));
+
+const ipc = await import('./ipc');
+const { coverUrl } = ipc;
+
+it('maps every command onto its fixed name and argument keys', async () => {
+  const calls: [() => Promise<unknown>, string, Record<string, unknown> | undefined][] = [
+    [() => ipc.playerPlay(['a', 'b'], 1), 'player_play', { trackIds: ['a', 'b'], startIndex: 1 }],
+    [ipc.playerToggle, 'player_toggle', undefined],
+    [ipc.playerNext, 'player_next', undefined],
+    [ipc.playerPrev, 'player_prev', undefined],
+    [() => ipc.playerSeek(1500.4), 'player_seek', { ms: 1500 }],
+    [() => ipc.playerSetVolume(0.3), 'player_set_volume', { v: 0.3 }],
+    [ipc.playerState, 'player_state', undefined],
+    [() => ipc.libraryAddFolder('C:\\Music'), 'library_add_folder', { path: 'C:\\Music' }],
+    [() => ipc.libraryRemoveFolder('C:\\Music'), 'library_remove_folder', { path: 'C:\\Music' }],
+    [ipc.libraryFolders, 'library_folders', undefined],
+    [ipc.libraryRescan, 'library_rescan', undefined],
+    [ipc.libraryAlbums, 'library_albums', undefined],
+    [() => ipc.libraryAlbumTracks('local:1'), 'library_album_tracks', { albumId: 'local:1' }],
+    [ipc.libraryArtists, 'library_artists', undefined],
+    [() => ipc.libraryArtistAlbums('Air'), 'library_artist_albums', { name: 'Air' }],
+    [ipc.libraryTrackCount, 'library_track_count', undefined],
+    [() => ipc.libraryTracksRange(100, 50), 'library_tracks_range', { offset: 100, limit: 50 }],
+    [() => ipc.librarySearch('tear', 20), 'library_search', { q: 'tear', limit: 20 }],
+  ];
+  for (const [run, command, args] of calls) {
+    invoke.mockClear();
+    await run();
+    expect(invoke).toHaveBeenCalledWith(command, args);
+  }
+});
+
+it('listens on the fixed event names and unwraps payloads', async () => {
+  const seen: unknown[] = [];
+  await ipc.onPlayerState((state) => seen.push(state));
+  await ipc.onPlayerError((error) => seen.push(error));
+  await ipc.onLibraryChanged(() => seen.push('changed'));
+  await ipc.onScanProgress((progress) => seen.push(progress));
+  const names = listen.mock.calls.map((call) => call[0]);
+  expect(names).toEqual(['player://state', 'player://error', 'library://changed', 'library://scan-progress']);
+  for (const call of listen.mock.calls) {
+    (call[1] as (event: { payload: unknown }) => void)({ payload: call[0] });
+  }
+  expect(seen).toEqual(['player://state', 'player://error', 'changed', 'library://scan-progress']);
+});
 
 afterEach(() => vi.unstubAllGlobals());
 
