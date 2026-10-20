@@ -1,5 +1,6 @@
 <script lang="ts">
   import { getVersion } from '@tauri-apps/api/app';
+  import { invoke } from '@tauri-apps/api/core';
   import { open } from '@tauri-apps/plugin-dialog';
   import logoUrl from '../../../assets/logo.svg';
   import { lang, systemLang, t, tc } from '../i18n';
@@ -25,6 +26,14 @@
   let devices = $state.raw<string[]>([]);
   let saveError = $state<string | null>(null);
   let version = $state('');
+  let spikeOut = $state('');
+  async function spike(cmd: string) {
+    try {
+      spikeOut = String(await invoke<string>(cmd));
+    } catch (err) {
+      spikeOut = 'ERROR: ' + String(err);
+    }
+  }
 
   const scan = $derived(library.scan);
   const busy = $derived(adding || rescanning || !!scan);
@@ -307,6 +316,16 @@
       </div>
       {#if saveError}<p class="error" role="alert">{saveError}</p>{/if}
     </section>
+
+    {#if import.meta.env.DEV}
+      <section aria-label="YTM spike">
+        <h3>YTM sign-in spike (dev only)</h3>
+        <button type="button" onclick={() => spike('spike_open_ytm')}>Open YouTube Music</button>
+        <button type="button" onclick={() => spike('spike_open_google_signin')}>Open Google sign-in</button>
+        <button type="button" onclick={() => spike('spike_ytm_probe')}>Probe</button>
+        <pre style="white-space: pre-wrap; user-select: text">{spikeOut}</pre>
+      </section>
+    {/if}
 
     <section class="about" aria-label={t('app.about')}>
       <img src={logoUrl} alt="" width="40" height="40" draggable="false" />
