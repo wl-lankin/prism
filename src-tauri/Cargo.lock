@@ -3411,6 +3411,8 @@ dependencies = [
  "lofty",
  "notify",
  "notify-debouncer-mini",
+ "objc2",
+ "objc2-app-kit",
  "rand 0.9.5",
  "rayon",
  "reqwest 0.12.28",

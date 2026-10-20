@@ -18,7 +18,7 @@ pub struct Vibrancy(pub bool);
 /// rounded corners (the card rounds itself) and any system backdrop. Older Windows versions
 /// ignore the attributes they do not know.
 #[cfg(target_os = "windows")]
-fn clear_system_chrome(window: &tauri::WebviewWindow) {
+pub(crate) fn clear_system_chrome(window: &tauri::WebviewWindow) {
     use std::ffi::c_void;
     use windows_sys::Win32::Graphics::Dwm::{
         DwmSetWindowAttribute, DWMSBT_NONE, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE,
@@ -50,7 +50,7 @@ fn clear_system_chrome(window: &tauri::WebviewWindow) {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn clear_system_chrome(_window: &tauri::WebviewWindow) {}
+pub(crate) fn clear_system_chrome(_window: &tauri::WebviewWindow) {}
 
 /// Clears the main window's background so the area outside the card is see-through.
 ///
@@ -114,5 +114,25 @@ mod tests {
         assert_eq!(main["label"], "main");
         assert_eq!(main["transparent"], true);
         assert_eq!(main["backgroundColor"], "#00000000");
+    }
+
+    /// The HMR socket is a dev-server matter: only the dev CSP allows it.
+    #[test]
+    fn production_csp_has_no_dev_server_socket() {
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let security = &config["app"]["security"];
+        let prod = security["csp"]["connect-src"].as_str().unwrap();
+        assert!(!prod.contains("ws:"), "{prod}");
+        let dev = security["devCsp"]["connect-src"].as_str().unwrap();
+        assert!(dev.contains("ws://localhost:1441"), "{dev}");
+    }
+
+    /// Both windows get the commands and events; the capabilities name them.
+    #[test]
+    fn capabilities_cover_both_windows() {
+        let capability: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
+        assert_eq!(capability["windows"], serde_json::json!(["main", "mini"]));
     }
 }

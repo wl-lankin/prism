@@ -24,14 +24,14 @@
   import ViewHead from './lib/components/ViewHead.svelte';
   import { activateIdle, holdToOpen } from './lib/flow';
   import { t, tc, type Key } from './lib/i18n';
-  import { playerPlayFiles, playerToggle, startupNotice, windowVibrancy } from './lib/ipc';
+  import { onNavGo, playerPlayFiles, playerToggle, startupNotice, windowVibrancy } from './lib/ipc';
   import { initFavorites } from './lib/stores/favorites.svelte';
   import { initLibrary, library } from './lib/stores/library.svelte';
-  import { nav, overlays, type View } from './lib/stores/nav.svelte';
+  import { go, nav, overlays, type View } from './lib/stores/nav.svelte';
   import { notice, notify } from './lib/stores/notice.svelte';
   import { initPlayer, player } from './lib/stores/player.svelte';
   import { initRing, ring } from './lib/stores/ring.svelte';
-  import { initSettings } from './lib/stores/settings.svelte';
+  import { followSettings, initSettings } from './lib/stores/settings.svelte';
   import { initWindow, windowState } from './lib/stores/window.svelte';
   import shape from './lib/window-shape.json';
 
@@ -122,6 +122,19 @@
     };
   });
 
+  // The mini player sends the main window places to go (its cover opens Now Playing).
+  $effect(() => {
+    let stop: (() => void) | undefined;
+    let gone = false;
+    onNavGo((target) => go(target.view, target.param))
+      .then((unlisten) => (gone ? unlisten() : (stop = unlisten)))
+      .catch(() => {});
+    return () => {
+      gone = true;
+      stop?.();
+    };
+  });
+
   $effect(() => {
     startupNotice()
       .then((file) => {
@@ -132,6 +145,19 @@
 
   $effect(() => {
     initSettings().catch((err) => console.error('loading the settings failed', err));
+  });
+
+  // Saves from the mini player (or any other window) show up here too.
+  $effect(() => {
+    let stop: (() => void) | undefined;
+    let gone = false;
+    followSettings()
+      .then((unlisten) => (gone ? unlisten() : (stop = unlisten)))
+      .catch(() => {});
+    return () => {
+      gone = true;
+      stop?.();
+    };
   });
 
   // Files dropped onto the window play at once, without being indexed.

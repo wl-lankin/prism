@@ -189,13 +189,14 @@
   /* The spectrum, blurred, under everything: the ring's light on the window. Its reach
      (blur, inset, offset) sets the `glow` values in window-shape.json: the transparent
      window's click-through shape keeps that much room around the ring, so measure the glow
-     again and update the JSON when changing it. */
+     again and update the JSON when changing it. A window with less room around the ring
+     (the mini player) sets a tighter `--glow-blur` and `--glow-drop`. */
   .glow {
     inset: 10%;
     background: conic-gradient(from var(--spin), var(--c1), var(--c2), var(--c3), var(--c4), var(--c1));
-    filter: blur(calc(var(--size) * 0.2));
+    filter: blur(var(--glow-blur, calc(var(--size) * 0.2)));
     opacity: var(--glow-o, 0.5);
-    transform: translateY(12%) scale(var(--glow-s, 1));
+    transform: translateY(var(--glow-drop, 12%)) scale(var(--glow-s, 1));
     transition:
       opacity var(--dur) ease-out,
       transform var(--dur) ease-out;
