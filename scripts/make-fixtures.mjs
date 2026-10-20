@@ -1,0 +1,102 @@
+// Generates the small audio fixtures the Rust library tests read.
+// Run with `node scripts/make-fixtures.mjs`; needs `ffmpeg` on PATH.
+// Every file is a 1-second sine (or derived from one), so the set stays far below 300 KB.
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const root = fileURLToPath(new URL('..', import.meta.url));
+const out = join(root, 'src-tauri/tests/fixtures');
+const work = mkdtempSync(join(tmpdir(), 'prism-fixtures-'));
+
+const ffmpeg = (args) =>
+  execFileSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', ...args], { stdio: 'inherit' });
+
+const hasEncoder = (name) => {
+  const list = execFileSync('ffmpeg', ['-hide_banner', '-encoders'], { encoding: 'utf8' });
+  return list.split('\n').some((line) => line.trim().split(/\s+/)[1] === name);
+};
+
+// Keeps ffmpeg from writing its own "encoder" tags so untagged files really have no tags.
+const bitexact = ['-fflags', '+bitexact', '-flags:a', '+bitexact', '-map_metadata', '-1'];
+const sine = ['-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=22050:duration=1'];
+const mono = ['-ac', '1'];
+
+const meta = (tags) => Object.entries(tags).flatMap(([key, value]) => ['-metadata', `${key}=${value}`]);
+
+/** ID3v2.3 tag with a single TIT2 frame encoded as ISO-8859-1 (encoding byte 0x00). */
+const id3v23Latin1Title = (title) => {
+  const text = Buffer.concat([Buffer.from([0x00]), Buffer.from(title, 'latin1')]);
+  const frameHeader = Buffer.alloc(10);
+  frameHeader.write('TIT2', 0, 'ascii');
+  frameHeader.writeUInt32BE(text.length, 4);
+  const frames = Buffer.concat([frameHeader, text]);
+  const size = frames.length;
+  const header = Buffer.from([
+    0x49, 0x44, 0x33, 0x03, 0x00, 0x00,
+    (size >> 21) & 0x7f, (size >> 14) & 0x7f, (size >> 7) & 0x7f, size & 0x7f,
+  ]);
+  return Buffer.concat([header, frames]);
+};
+
+try {
+  rmSync(out, { recursive: true, force: true });
+  mkdirSync(join(out, 'cover'), { recursive: true });
+
+  const png = join(work, 'cover.png');
+  ffmpeg(['-f', 'lavfi', '-i', 'color=c=0xff4d6d:s=64x64', '-frames:v', '1', png]);
+
+  ffmpeg([
+    ...sine, ...mono, ...bitexact, '-c:a', 'libmp3lame', '-b:a', '32k', '-id3v2_version', '3',
+    ...meta({ title: 'Alpha', artist: 'Fixture Artist', album_artist: 'Fixture Artist', album: 'Fixture Album', track: '1' }),
+    join(out, 'tagged.mp3'),
+  ]);
+
+  ffmpeg([
+    ...sine, '-i', png, '-map', '0:a', '-map', '1:v', ...mono, ...bitexact,
+    '-c:a', 'flac', '-c:v', 'png', '-disposition:v', 'attached_pic',
+    '-metadata:s:v', 'comment=Cover (front)',
+    ...meta({
+      title: 'Beta', artist: 'Fixture Artist', album_artist: 'Fixture Artist', album: 'Fixture Album', track: '2',
+      REPLAYGAIN_TRACK_GAIN: '-6.50 dB', REPLAYGAIN_ALBUM_GAIN: '-7.25 dB',
+      REPLAYGAIN_TRACK_PEAK: '0.891250', REPLAYGAIN_ALBUM_PEAK: '0.977000',
+    }),
+    join(out, 'tagged.flac'),
+  ]);
+
+  ffmpeg([
+    ...sine, ...mono, ...bitexact, '-metadata:s:a:0', 'encoder=', '-c:a', 'libvorbis', '-q:a', '0',
+    join(out, 'notags.ogg'),
+  ]);
+
+  // ffmpeg writes non-ASCII ID3v2.3 text as UTF-16, so the Latin-1 tag is built by hand.
+  const plainMp3 = join(work, 'plain.mp3');
+  ffmpeg([...sine, ...mono, ...bitexact, '-c:a', 'libmp3lame', '-b:a', '32k', '-id3v2_version', '0', '-write_id3v1', '0', plainMp3]);
+  writeFileSync(join(out, 'latin1.mp3'), Buffer.concat([id3v23Latin1Title('Café'), readFileSync(plainMp3)]));
+
+  const opusArgs = hasEncoder('libopus') ? ['-c:a', 'libopus'] : ['-c:a', 'opus', '-strict', '-2'];
+  if (!hasEncoder('libopus')) console.warn('libopus missing: using the native ffmpeg opus encoder');
+  ffmpeg([...sine, ...mono, ...bitexact, ...opusArgs, '-b:a', '24k', ...meta({ title: 'Opus' }), join(out, 'opus.opus')]);
+  ffmpeg([...sine, ...mono, ...bitexact, '-c:a', 'wmav2', '-b:a', '32k', ...meta({ title: 'Wma' }), join(out, 'wma.wma')]);
+  ffmpeg([...sine, ...mono, ...bitexact, '-c:a', 'wavpack', ...meta({ title: 'WavPack' }), join(out, 'wv.wv')]);
+  ffmpeg([...sine, ...mono, ...bitexact, '-c:a', 'tta', join(out, 'tta.tta')]);
+  ffmpeg([...sine, ...mono, ...bitexact, '-c:a', 'aac', '-b:a', '32k', ...meta({ title: 'Aac' }), join(out, 'aac.m4a')]);
+
+  // A valid FLAC header followed by zeros: readable magic, unusable stream.
+  const validFlac = join(work, 'valid.flac');
+  ffmpeg([...sine, ...mono, ...bitexact, '-c:a', 'flac', validFlac]);
+  const corrupt = Buffer.alloc(4096);
+  readFileSync(validFlac).copy(corrupt, 0, 0, 200);
+  writeFileSync(join(out, 'corrupt.flac'), corrupt);
+
+  ffmpeg(['-f', 'lavfi', '-i', 'color=c=0x4da6ff:s=64x64', '-frames:v', '1', '-q:v', '5', join(out, 'cover/folder.jpg')]);
+  ffmpeg([
+    ...sine, ...mono, ...bitexact, '-c:a', 'libmp3lame', '-b:a', '32k', '-id3v2_version', '3',
+    ...meta({ title: 'Gamma', artist: 'Cover Artist', album: 'Cover Album', track: '1' }),
+    join(out, 'cover/track.mp3'),
+  ]);
+} finally {
+  rmSync(work, { recursive: true, force: true });
+}

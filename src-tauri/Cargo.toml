@@ -24,6 +24,12 @@ rusqlite = { version = "0.40.2", features = ["bundled"] }
 anyhow = "1.0.104"
 sha1 = "0.11.0"
 hex = "0.4.3"
+lofty = "0.25.4"
+walkdir = "2.5.0"
+rayon = "1.12.0"
+notify = "8.2.0"
+notify-debouncer-mini = "0.7.0"
+symphonia = { version = "0.6.1", default-features = false, features = ["mp3", "aac", "isomp4", "flac", "ogg", "vorbis", "wav", "pcm", "adpcm", "alac", "aiff", "mkv", "caf"] }
 
 [profile.release]
 opt-level = 3
@@ -35,3 +41,6 @@ strip = true
 # Audio decoders are hot loops; keep them fast in dev builds too.
 [profile.dev.package."*"]
 opt-level = 3
+
+[dev-dependencies]
+tempfile = "3.27.0"

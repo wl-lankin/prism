@@ -1,0 +1,636 @@
+use std::collections::{HashMap, HashSet};
+use std::fs::Metadata;
+use std::path::{Path, PathBuf};
+use std::sync::MutexGuard;
+use std::time::UNIX_EPOCH;
+
+use rayon::prelude::*;
+use rusqlite::{params, Connection};
+use serde::Serialize;
+use walkdir::WalkDir;
+
+use super::covers::{find_folder_cover, CoverStore};
+use super::model::{track_id, Track};
+use super::tags;
+use crate::db::Db;
+
+pub const AUDIO_EXTENSIONS: &[&str] = &[
+    "mp3", "m4a", "m4b", "aac", "alac", "flac", "wav", "aif", "aiff", "aifc", "ogg", "oga", "opus",
+    "wma", "ape", "wv", "mpc", "tta", "dsf", "dff", "mka", "webm", "caf",
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanProgress {
+    pub done: u32,
+    pub total: u32,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanReport {
+    pub added: u32,
+    pub updated: u32,
+    pub removed: u32,
+    pub unchanged: u32,
+    pub failed: Vec<(String, String)>,
+}
+
+/// Tracks are read and written in chunks of this size, one DB transaction each.
+const CHUNK: usize = 500;
+
+/// The key a folder is stored under in `folders.path` and `tracks.folder`.
+pub fn folder_key(folder: &Path) -> String {
+    folder.to_string_lossy().into_owned()
+}
+
+pub fn is_audio_file(path: &Path) -> bool {
+    path.extension()
+        .map(|ext| ext.to_string_lossy().to_lowercase())
+        .is_some_and(|ext| AUDIO_EXTENSIONS.contains(&ext.as_str()))
+}
+
+/// `(mtime in ms since the epoch, size in bytes)`: a file is unchanged when both match.
+pub fn file_stamp(meta: &Metadata) -> (i64, i64) {
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|age| age.as_millis() as i64)
+        .unwrap_or(0);
+    (mtime, meta.len() as i64)
+}
+
+pub(crate) fn lock(db: &Db) -> anyhow::Result<MutexGuard<'_, Connection>> {
+    db.0.lock()
+        .map_err(|_| anyhow::anyhow!("library database lock poisoned"))
+}
+
+struct Indexed {
+    path: Option<String>,
+    album_id: String,
+    mtime: Option<i64>,
+    size: Option<i64>,
+}
+
+struct Pending {
+    id: String,
+    path: PathBuf,
+    mtime: i64,
+    size: i64,
+}
+
+/// Indexes one library folder: new and changed files are read (in parallel), unchanged ones
+/// are skipped, vanished ones removed. A missing or unreadable folder is marked offline and
+/// its tracks are kept.
+pub fn scan_folder(
+    db: &Db,
+    covers: &CoverStore,
+    folder: &Path,
+    progress: impl Fn(ScanProgress),
+) -> anyhow::Result<ScanReport> {
+    let key = folder_key(folder);
+    let mut report = ScanReport::default();
+
+    if !folder.is_dir() || std::fs::read_dir(folder).is_err() {
+        let conn = lock(db)?;
+        set_online(&conn, &key, false)?;
+        return Ok(report);
+    }
+
+    let mut found: Vec<(PathBuf, i64, i64)> = Vec::new();
+    let mut unreadable_dirs: Vec<PathBuf> = Vec::new();
+    for entry in WalkDir::new(folder).follow_links(true) {
+        match entry {
+            Ok(entry) if entry.file_type().is_file() && is_audio_file(entry.path()) => {
+                match entry.metadata() {
+                    Ok(meta) => {
+                        let (mtime, size) = file_stamp(&meta);
+                        found.push((entry.into_path(), mtime, size));
+                    }
+                    Err(err) => report
+                        .failed
+                        .push((entry.path().display().to_string(), err.to_string())),
+                }
+            }
+            Ok(_) => {}
+            Err(err) => {
+                let path = err.path().map(Path::to_path_buf).unwrap_or_default();
+                if err.loop_ancestor().is_none() {
+                    unreadable_dirs.push(path.clone());
+                }
+                report
+                    .failed
+                    .push((path.display().to_string(), err.to_string()));
+            }
+        }
+    }
+
+    let indexed = load_indexed(db, &key)?;
+    let total = found.len() as u32;
+    let mut done = 0u32;
+    let mut seen: HashSet<String> = HashSet::with_capacity(found.len());
+    let mut pending: Vec<Pending> = Vec::new();
+    for (path, mtime, size) in found {
+        let id = track_id(&path);
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        match indexed.get(&id) {
+            Some(row) if row.mtime == Some(mtime) && row.size == Some(size) => {
+                report.unchanged += 1;
+                done += 1;
+            }
+            _ => pending.push(Pending {
+                id,
+                path,
+                mtime,
+                size,
+            }),
+        }
+    }
+    progress(ScanProgress { done, total });
+
+    let mut touched_albums: HashSet<String> = HashSet::new();
+    let mut folder_covers: HashMap<PathBuf, Option<String>> = HashMap::new();
+    for chunk in pending.chunks(CHUNK) {
+        let results: Vec<anyhow::Result<(Track, Option<String>)>> = chunk
+            .par_iter()
+            .map(|item| {
+                let mut meta = tags::read(&item.path)?;
+                // Cover order: embedded art first, then a cover file in the folder.
+                let embedded = meta
+                    .embedded_cover
+                    .take()
+                    .and_then(|bytes| covers.store_bytes(&bytes).ok());
+                Ok((meta.track, embedded))
+            })
+            .collect();
+
+        let mut conn = lock(db)?;
+        let tx = conn.transaction()?;
+        for (item, result) in chunk.iter().zip(results) {
+            let (mut track, embedded) = match result {
+                Ok(read) => read,
+                Err(err) => {
+                    report
+                        .failed
+                        .push((item.path.display().to_string(), format!("{err:#}")));
+                    continue;
+                }
+            };
+            track.cover_id =
+                embedded.or_else(|| folder_cover(covers, &mut folder_covers, &item.path));
+            if let Some(cover_id) = &track.cover_id {
+                register_cover(&tx, covers, cover_id)?;
+            }
+            upsert_track(&tx, &track, &key, item.mtime, item.size)?;
+            if let Some(previous) = indexed.get(&item.id) {
+                touched_albums.insert(previous.album_id.clone());
+                report.updated += 1;
+            } else {
+                report.added += 1;
+            }
+            touched_albums.insert(track.album_id);
+        }
+        tx.commit()?;
+        done += chunk.len() as u32;
+        progress(ScanProgress { done, total });
+    }
+
+    let mut conn = lock(db)?;
+    let tx = conn.transaction()?;
+    for (id, row) in &indexed {
+        if seen.contains(id) {
+            continue;
+        }
+        // Files below a directory we could not read are kept, not treated as deleted.
+        let below_unreadable = row.path.as_ref().is_some_and(|path| {
+            unreadable_dirs
+                .iter()
+                .any(|dir| Path::new(path).starts_with(dir))
+        });
+        if below_unreadable {
+            continue;
+        }
+        tx.execute("DELETE FROM tracks WHERE id = ?1", [id])?;
+        touched_albums.insert(row.album_id.clone());
+        report.removed += 1;
+    }
+    rebuild_albums(&tx, touched_albums.iter())?;
+    set_online(&tx, &key, true)?;
+    tx.commit()?;
+    Ok(report)
+}
+
+fn load_indexed(db: &Db, key: &str) -> anyhow::Result<HashMap<String, Indexed>> {
+    let conn = lock(db)?;
+    let mut stmt =
+        conn.prepare("SELECT id, path, album_id, mtime, size FROM tracks WHERE folder = ?1")?;
+    let rows = stmt.query_map([key], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            Indexed {
+                path: row.get(1)?,
+                album_id: row.get(2)?,
+                mtime: row.get(3)?,
+                size: row.get(4)?,
+            },
+        ))
+    })?;
+    Ok(rows.collect::<Result<_, _>>()?)
+}
+
+fn set_online(conn: &Connection, key: &str, online: bool) -> anyhow::Result<()> {
+    conn.execute(
+        "INSERT INTO folders (path, online) VALUES (?1, ?2)
+         ON CONFLICT(path) DO UPDATE SET online = excluded.online",
+        params![key, online as i64],
+    )?;
+    Ok(())
+}
+
+/// The cover file next to `track_path`, stored once per directory per scan.
+fn folder_cover(
+    covers: &CoverStore,
+    cache: &mut HashMap<PathBuf, Option<String>>,
+    track_path: &Path,
+) -> Option<String> {
+    let dir = track_path.parent()?.to_path_buf();
+    cache
+        .entry(dir)
+        .or_insert_with_key(|dir| {
+            let file = find_folder_cover(dir)?;
+            let bytes = std::fs::read(file).ok()?;
+            covers.store_bytes(&bytes).ok()
+        })
+        .clone()
+}
+
+fn register_cover(conn: &Connection, covers: &CoverStore, id: &str) -> anyhow::Result<()> {
+    let file = covers
+        .path(id)
+        .and_then(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| id.to_string());
+    conn.execute(
+        "INSERT INTO covers (id, file) VALUES (?1, ?2)
+         ON CONFLICT(id) DO UPDATE SET file = excluded.file",
+        params![id, file],
+    )?;
+    Ok(())
+}
+
+/// Upsert keyed on `id`. Never `INSERT OR REPLACE`: that bypasses the FTS delete trigger.
+fn upsert_track(
+    conn: &Connection,
+    track: &Track,
+    folder: &str,
+    mtime: i64,
+    size: i64,
+) -> anyhow::Result<()> {
+    conn.execute(
+        "INSERT INTO tracks (id, source, title, artist, album_artist, album, album_id, track_no,
+            disc_no, duration_ms, year, genre, format, sample_rate, bit_depth, bitrate_kbps,
+            cover_id, path, replay_gain_track_db, replay_gain_album_db, replay_gain_track_peak,
+            replay_gain_album_peak, folder, mtime, size)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18,
+            ?19, ?20, ?21, ?22, ?23, ?24, ?25)
+         ON CONFLICT(id) DO UPDATE SET
+            source = excluded.source, title = excluded.title, artist = excluded.artist,
+            album_artist = excluded.album_artist, album = excluded.album,
+            album_id = excluded.album_id, track_no = excluded.track_no,
+            disc_no = excluded.disc_no, duration_ms = excluded.duration_ms, year = excluded.year,
+            genre = excluded.genre, format = excluded.format, sample_rate = excluded.sample_rate,
+            bit_depth = excluded.bit_depth, bitrate_kbps = excluded.bitrate_kbps,
+            cover_id = excluded.cover_id, path = excluded.path,
+            replay_gain_track_db = excluded.replay_gain_track_db,
+            replay_gain_album_db = excluded.replay_gain_album_db,
+            replay_gain_track_peak = excluded.replay_gain_track_peak,
+            replay_gain_album_peak = excluded.replay_gain_album_peak,
+            folder = excluded.folder, mtime = excluded.mtime, size = excluded.size",
+        params![
+            track.id,
+            track.source.as_str(),
+            track.title,
+            track.artist,
+            track.album_artist,
+            track.album,
+            track.album_id,
+            track.track_no.map(i64::from),
+            track.disc_no.map(i64::from),
+            track.duration_ms as i64,
+            track.year,
+            track.genre,
+            track.format,
+            track.sample_rate.map(i64::from),
+            track.bit_depth.map(i64::from),
+            track.bitrate_kbps.map(i64::from),
+            track.cover_id,
+            track.path,
+            track.replay_gain_track_db.map(f64::from),
+            track.replay_gain_album_db.map(f64::from),
+            track.replay_gain_track_peak.map(f64::from),
+            track.replay_gain_album_peak.map(f64::from),
+            folder,
+            mtime,
+            size,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Recomputes the album rows for `album_ids` from their tracks, deleting empty albums.
+/// The album cover is the cover of its first track (disc, track number, path) that has one.
+pub(crate) fn rebuild_albums<'a>(
+    conn: &Connection,
+    album_ids: impl Iterator<Item = &'a String>,
+) -> anyhow::Result<()> {
+    let mut tracks = conn.prepare(
+        "SELECT album, album_artist, year, cover_id, duration_ms FROM tracks
+         WHERE album_id = ?1
+         ORDER BY disc_no IS NULL, disc_no, track_no IS NULL, track_no, path",
+    )?;
+    for album_id in album_ids {
+        let rows = tracks
+            .query_map([album_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<i32>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let Some((title, artist, _, _, _)) = rows.first() else {
+            conn.execute("DELETE FROM albums WHERE id = ?1", [album_id])?;
+            continue;
+        };
+        let year = rows.iter().find_map(|row| row.2);
+        let cover = rows.iter().find_map(|row| row.3.clone());
+        let duration: i64 = rows.iter().map(|row| row.4).sum();
+        conn.execute(
+            "INSERT INTO albums (id, source, title, artist, year, cover_id, track_count, duration_ms)
+             VALUES (?1, 'local', ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(id) DO UPDATE SET
+                source = excluded.source, title = excluded.title, artist = excluded.artist,
+                year = excluded.year, cover_id = excluded.cover_id,
+                track_count = excluded.track_count, duration_ms = excluded.duration_ms",
+            params![album_id, title, artist, year, cover, rows.len() as i64, duration],
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use std::path::PathBuf;
+    use std::time::Instant;
+
+    use rusqlite::params;
+    use sha1::{Digest, Sha1};
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::library::model::track_id;
+    use crate::library::tags::fixtures;
+
+    pub(crate) struct Harness {
+        pub db: Db,
+        pub covers: CoverStore,
+        _cover_dir: TempDir,
+    }
+
+    pub(crate) fn harness() -> Harness {
+        let cover_dir = tempfile::tempdir().unwrap();
+        Harness {
+            db: Db::open_in_memory().unwrap(),
+            covers: CoverStore::new(cover_dir.path().join("covers")),
+            _cover_dir: cover_dir,
+        }
+    }
+
+    impl Harness {
+        pub fn scan(&self, folder: &Path) -> ScanReport {
+            scan_folder(&self.db, &self.covers, folder, |_| {}).unwrap()
+        }
+
+        pub fn count(&self, sql: &str) -> i64 {
+            self.db
+                .0
+                .lock()
+                .unwrap()
+                .query_row(sql, [], |row| row.get(0))
+                .unwrap()
+        }
+
+        fn cover_of_track(&self, title: &str) -> Option<String> {
+            self.db
+                .0
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT cover_id FROM tracks WHERE title = ?1",
+                    [title],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        }
+    }
+
+    /// Copies the fixture tree into a fresh temp dir, optionally leaving some files out.
+    pub(crate) fn copy_fixtures(skip: &[&str]) -> TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        copy_dir(&fixtures(), dir.path(), skip);
+        dir
+    }
+
+    fn copy_dir(from: &Path, to: &Path, skip: &[&str]) {
+        std::fs::create_dir_all(to).unwrap();
+        for entry in std::fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            let name = entry.file_name();
+            if skip.contains(&name.to_string_lossy().as_ref()) {
+                continue;
+            }
+            let target = to.join(&name);
+            if entry.file_type().unwrap().is_dir() {
+                copy_dir(&entry.path(), &target, skip);
+            } else {
+                std::fs::copy(entry.path(), target).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn embedded_cover_preferred() {
+        let h = harness();
+        h.scan(&fixtures());
+        let cover: Option<String> =
+            h.db.0
+                .lock()
+                .unwrap()
+                .query_row(
+                    "SELECT cover_id FROM albums WHERE title = 'Fixture Album'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+        let cover = cover.expect("album cover");
+        let path = h.covers.path(&cover).expect("cover file");
+        assert!(path.exists());
+        assert_eq!(path.extension().unwrap(), "png");
+        assert_eq!(h.cover_of_track("Beta").as_deref(), Some(cover.as_str()));
+        assert_eq!(
+            h.count("SELECT COUNT(*) FROM covers WHERE id IN (SELECT cover_id FROM albums)"),
+            h.count("SELECT COUNT(DISTINCT cover_id) FROM albums WHERE cover_id IS NOT NULL")
+        );
+    }
+
+    #[test]
+    fn folder_cover_used() {
+        let h = harness();
+        h.scan(&fixtures());
+        let bytes = std::fs::read(fixtures().join("cover").join("folder.jpg")).unwrap();
+        let expected = hex::encode(Sha1::digest(&bytes));
+        assert_eq!(h.cover_of_track("Gamma"), Some(expected.clone()));
+        assert_eq!(
+            h.covers.path(&expected).unwrap().extension().unwrap(),
+            "jpg"
+        );
+    }
+
+    #[test]
+    fn corrupt_file_reported_not_fatal() {
+        let h = harness();
+        let report = h.scan(&fixtures());
+        let corrupt = fixtures().join("corrupt.flac");
+        let corrupt_id = track_id(&corrupt);
+        let failed = report
+            .failed
+            .iter()
+            .any(|(path, _)| path.ends_with("corrupt.flac"));
+        let indexed_empty = h.count(&format!(
+            "SELECT COUNT(*) FROM tracks WHERE id = '{corrupt_id}' AND duration_ms = 0"
+        )) == 1;
+        assert!(failed || indexed_empty, "{report:?}");
+        for title in ["Alpha", "Beta", "notags", "Caf\u{e9}", "Gamma"] {
+            assert_eq!(
+                h.count(&format!(
+                    "SELECT COUNT(*) FROM tracks WHERE title = '{title}'"
+                )),
+                1,
+                "{title}"
+            );
+        }
+        assert!(h.count("SELECT COUNT(*) FROM tracks") >= 10);
+    }
+
+    #[test]
+    fn offline_folder_keeps_tracks() {
+        let h = harness();
+        let dir = copy_fixtures(&[]);
+        let folder = dir.path().to_path_buf();
+        h.scan(&folder);
+        let before = h.count("SELECT COUNT(*) FROM tracks");
+        assert!(before >= 10);
+        assert_eq!(h.count("SELECT online FROM folders"), 1);
+        dir.close().unwrap();
+        let report = h.scan(&folder);
+        assert_eq!(report.removed, 0);
+        assert_eq!(h.count("SELECT COUNT(*) FROM tracks"), before);
+        assert_eq!(h.count("SELECT online FROM folders"), 0);
+    }
+
+    #[test]
+    fn rescan_skips_unchanged() {
+        let h = harness();
+        let dir = copy_fixtures(&["corrupt.flac"]);
+        let first = h.scan(dir.path());
+        assert!(first.added >= 10, "{first:?}");
+        let last = std::cell::Cell::new(None);
+        let second = scan_folder(&h.db, &h.covers, dir.path(), |p| last.set(Some(p))).unwrap();
+        let total = last.get().expect("progress reported").total;
+        assert_eq!(second.added, 0);
+        assert_eq!(second.updated, 0);
+        assert_eq!(second.removed, 0);
+        assert_eq!(second.unchanged, total);
+        assert_eq!(second.unchanged, first.added);
+    }
+
+    #[test]
+    fn rescan_detects_changes_and_removals() {
+        let h = harness();
+        let dir = copy_fixtures(&["corrupt.flac"]);
+        h.scan(dir.path());
+        std::fs::remove_file(dir.path().join("tagged.mp3")).unwrap();
+        let wv = dir.path().join("wv.wv");
+        let mut bytes = std::fs::read(&wv).unwrap();
+        bytes.extend_from_slice(&[0; 16]);
+        std::fs::write(&wv, bytes).unwrap();
+        let report = h.scan(dir.path());
+        assert_eq!(report.removed, 1);
+        assert_eq!(report.updated, 1);
+        assert_eq!(report.added, 0);
+        assert_eq!(
+            h.count("SELECT COUNT(*) FROM tracks WHERE title = 'Alpha'"),
+            0
+        );
+        assert_eq!(
+            h.count("SELECT track_count FROM albums WHERE title = 'Fixture Album'"),
+            1
+        );
+        assert_eq!(
+            h.count("SELECT COUNT(*) FROM tracks_fts WHERE tracks_fts MATCH 'alpha'"),
+            0
+        );
+    }
+
+    #[test]
+    fn rescan_2000_unchanged_under_1s() {
+        let h = harness();
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().to_path_buf();
+        let key = folder_key(&folder);
+        let files: Vec<PathBuf> = (0..2000)
+            .map(|i| {
+                let path = folder.join(format!("track-{i:04}.mp3"));
+                std::fs::write(&path, b"").unwrap();
+                path
+            })
+            .collect();
+        {
+            let mut conn = h.db.0.lock().unwrap();
+            let tx = conn.transaction().unwrap();
+            tx.execute("INSERT INTO folders (path, online) VALUES (?1, 1)", [&key])
+                .unwrap();
+            for (i, path) in files.iter().enumerate() {
+                let (mtime, size) = file_stamp(&std::fs::metadata(path).unwrap());
+                tx.execute(
+                    "INSERT INTO tracks (id, source, title, artist, album_artist, album, album_id,
+                        duration_ms, format, path, folder, mtime, size)
+                     VALUES (?1, 'local', ?2, 'A', 'A', 'B', 'local:b', 1000, 'mp3', ?3, ?4, ?5, ?6)",
+                    params![
+                        track_id(path),
+                        format!("Track {i}"),
+                        path.to_string_lossy(),
+                        key,
+                        mtime,
+                        size
+                    ],
+                )
+                .unwrap();
+            }
+            tx.commit().unwrap();
+        }
+        let started = Instant::now();
+        let report = h.scan(&folder);
+        let elapsed = started.elapsed();
+        assert_eq!(report.unchanged, 2000, "{report:?}");
+        assert_eq!(report.added + report.updated + report.removed, 0);
+        assert!(elapsed.as_millis() < 1000, "rescan took {elapsed:?}");
+    }
+}
