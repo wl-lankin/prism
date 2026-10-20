@@ -17,6 +17,24 @@ impl Queue {
         self.ids = ids;
     }
 
+    /// Adds `ids` at the end, keeping the position.
+    pub fn extend(&mut self, ids: Vec<String>) {
+        self.ids.extend(ids);
+    }
+
+    /// Moves to `index`. False (and no move) when it is out of range.
+    pub fn jump(&mut self, index: usize) -> bool {
+        if index >= self.ids.len() {
+            return false;
+        }
+        self.index = index;
+        true
+    }
+
+    pub fn ids(&self) -> &[String] {
+        &self.ids
+    }
+
     pub fn len(&self) -> usize {
         self.ids.len()
     }
@@ -109,6 +127,26 @@ mod tests {
         assert!(queue.back());
         assert!(!queue.back());
         assert_eq!(queue.current(), Some("a"));
+    }
+
+    #[test]
+    fn queue_extend_and_jump() {
+        let mut queue = queue(&["a", "b"], 1);
+        queue.extend(vec!["c".to_string(), "d".to_string()]);
+        assert_eq!(queue.ids(), ["a", "b", "c", "d"]);
+        assert_eq!(queue.index(), 1, "extending keeps the position");
+        assert_eq!(queue.next_index(), Some(2));
+        assert!(queue.jump(3));
+        assert_eq!(queue.current(), Some("d"));
+        assert!(!queue.jump(4), "out of range");
+        assert_eq!(queue.index(), 3, "a failed jump does not move");
+        assert!(queue.jump(0));
+        assert_eq!(queue.current(), Some("a"));
+
+        let mut empty = Queue::new();
+        assert!(!empty.jump(0));
+        empty.extend(vec!["x".to_string()]);
+        assert_eq!(empty.current(), Some("x"));
     }
 
     #[test]

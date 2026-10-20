@@ -362,6 +362,7 @@ mod tests {
             volume: 0.8,
             queue_index: 0,
             queue_length: 1,
+            queue_version: 0,
         }
     }
 

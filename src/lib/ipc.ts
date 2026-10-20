@@ -8,6 +8,7 @@ import type {
   Folder,
   PlayerError,
   PlayerState,
+  QueueItem,
   ScanProgress,
   ScanReport,
   SearchResult,
@@ -48,6 +49,13 @@ export const playerState = () => call<PlayerState>('player_state');
 /** Plays files (dropped onto the window) without indexing them. Folders and non-audio files
  *  are skipped. Resolves with how many files were queued; 0 leaves the player untouched. */
 export const playerPlayFiles = (paths: string[]) => call<number>('player_play_files', { paths });
+/** Adds tracks at the end of the queue; what plays now keeps playing. */
+export const playerAppend = (trackIds: string[]) => call<void>('player_append', { trackIds });
+/** Plays the queue entry at `index`; an index out of range is ignored. */
+export const playerJump = (index: number) => call<void>('player_jump', { index });
+/** Up to `limit` queue entries from `offset` (`limit` is capped at 1000). */
+export const playerQueueRange = (offset: number, limit: number) =>
+  call<QueueItem[]>('player_queue_range', { offset, limit });
 
 // Library commands.
 

@@ -26,6 +26,7 @@ const playing: PlayerState = {
   volume: 0.5,
   queueIndex: 2,
   queueLength: 4,
+  queueVersion: 3,
 };
 
 beforeEach(() => {
@@ -39,6 +40,7 @@ afterEach(() => vi.clearAllMocks());
 it('starts idle', () => {
   expect(player.status).toBe('idle');
   expect(player.track).toBeNull();
+  expect(player.queueVersion).toBe(0);
 });
 
 it('follows player://state events', async () => {
@@ -51,6 +53,7 @@ it('follows player://state events', async () => {
   expect(player.status).toBe('playing');
   expect(player.positionMs).toBe(1200);
   expect(player.queueIndex).toBe(2);
+  expect(player.queueVersion).toBe(3);
 
   stop();
   expect(unlisten).toHaveBeenCalled();

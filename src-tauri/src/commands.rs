@@ -14,7 +14,7 @@ use crate::library::query::{self, SearchResult};
 use crate::library::scan::{lock, ScanReport};
 use crate::library::watch::{FolderWatcher, WatchState};
 use crate::library::{normalize, tauri_emitter, Library};
-use crate::player::PlayerState;
+use crate::player::{PlayerState, QueueItem};
 use crate::settings::{Change, Settings};
 use crate::shell;
 use crate::AppState;
@@ -119,6 +119,30 @@ pub async fn player_play_files(app: AppHandle, paths: Vec<String>) -> Result<u32
 #[tauri::command]
 pub fn player_state(state: State<'_, AppState>) -> Result<PlayerState, String> {
     Ok(state.player.state())
+}
+
+/// Adds tracks at the end of the queue; what plays now keeps playing.
+#[tauri::command]
+pub fn player_append(state: State<'_, AppState>, track_ids: Vec<String>) -> Result<(), String> {
+    state.player.append(track_ids)
+}
+
+/// Plays the queue entry at `index`; an index out of range is ignored.
+#[tauri::command]
+pub fn player_jump(state: State<'_, AppState>, index: u32) -> Result<(), String> {
+    state.player.jump(index as usize)
+}
+
+/// A page of the queue. Resolving takes the library DB lock, so it runs off the async
+/// runtime's worker threads.
+#[tauri::command]
+pub async fn player_queue_range(
+    app: AppHandle,
+    offset: u32,
+    limit: u32,
+) -> Result<Vec<QueueItem>, String> {
+    let limit = limit.min(MAX_PAGE);
+    blocking(move || Ok(app.state::<AppState>().player.queue_range(offset, limit))).await
 }
 
 // Library

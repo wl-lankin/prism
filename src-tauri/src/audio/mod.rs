@@ -181,6 +181,14 @@ impl Playback {
         self.clear_buffers();
     }
 
+    /// Drops the current and next source but keeps what was already handed to the output,
+    /// so a previous track's tail plays out (after a pre-opened source failed).
+    pub fn drop_sources(&mut self) {
+        self.current = None;
+        self.next = None;
+        self.deferred_error = None;
+    }
+
     /// Like [`stop`](Self::stop), for quitting: waits up to `limit` in total for the decode
     /// threads to drop their sources, so FFmpeg children are killed before the process exits.
     /// A source stuck in a read longer than that is left to its thread.

@@ -91,6 +91,8 @@ export interface PlayerState {
   volume: number;
   queueIndex: number;
   queueLength: number;
+  /** Bumped whenever the queue's ids change (not when only the position moves). */
+  queueVersion: number;
 }
 
 export type LanguagePref = 'system' | 'en' | 'de';
@@ -114,6 +116,12 @@ export interface Settings {
   /** A global shortcut in Tauri's accelerator syntax. */
   miniShortcut: string;
   startWithSystem: boolean;
+}
+
+/** One entry of `player_queue_range`; `track` is null when the id no longer resolves. */
+export interface QueueItem {
+  index: number;
+  track: Track | null;
 }
 
 export interface PlayerError {

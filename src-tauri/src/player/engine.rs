@@ -38,6 +38,16 @@ pub struct PlayerState {
     pub volume: f32,
     pub queue_index: u32,
     pub queue_length: u32,
+    /// Bumped whenever the queue's ids change (not when only the position moves).
+    pub queue_version: u64,
+}
+
+/// One entry of `player_queue_range`. `track` is `None` when the id no longer resolves.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueItem {
+    pub index: u32,
+    pub track: Option<Track>,
 }
 
 /// Payload of `player://error`.
@@ -101,6 +111,11 @@ const BUSY_TICK: Duration = Duration::from_millis(10);
 const IDLE_TICK: Duration = Duration::from_millis(250);
 /// How long stopping the engine waits for the decode threads to drop their sources.
 const SHUTDOWN_WAIT: Duration = Duration::from_millis(200);
+/// After this many tracks in a row fail, the player gives up and goes idle.
+pub const MAX_FAILURES_IN_A_ROW: u32 = 10;
+/// The opener's workers: one per slot, so a slow pre-open never delays the track to play now.
+const OPENER_CURRENT_THREAD: &str = "prism-opener-current";
+const OPENER_NEXT_THREAD: &str = "prism-opener-next";
 
 impl PlayerState {
     fn idle(volume: f32) -> PlayerState {
@@ -112,6 +127,7 @@ impl PlayerState {
             volume,
             queue_index: 0,
             queue_length: 0,
+            queue_version: 0,
         }
     }
 }
@@ -129,6 +145,8 @@ pub fn default_opener() -> Opener {
 
 enum Command {
     Play(Vec<String>, usize),
+    Append(Vec<String>),
+    Jump(usize),
     Toggle,
     Next,
     Prev,
@@ -166,11 +184,74 @@ pub fn track_gain(track: &Track, mode: ReplayGain) -> f32 {
     }
 }
 
+/// Clones the value behind `lock`, even when a panicking holder poisoned it.
+fn read_lock<T: Clone>(lock: &Mutex<T>) -> T {
+    match lock.lock() {
+        Ok(value) => value.clone(),
+        Err(poisoned) => poisoned.into_inner().clone(),
+    }
+}
+
+fn write_lock<T>(lock: &Mutex<T>, value: T) {
+    match lock.lock() {
+        Ok(mut stored) => *stored = value,
+        Err(poisoned) => *poisoned.into_inner() = value,
+    }
+}
+
+/// A cheap, cloneable way to drive the player from other threads (Flow, tray, shortcuts,
+/// "Open with"). Like [`Player`], every method only sends a command or reads what the engine
+/// last published. It does not keep the engine alive: once the [`Player`] is dropped, sends
+/// fail with a message.
+#[derive(Clone)]
+pub struct PlayerHandle {
+    commands: Sender<Command>,
+    state: Arc<Mutex<PlayerState>>,
+    queue: Arc<Mutex<Arc<Vec<String>>>>,
+}
+
+impl PlayerHandle {
+    fn send(&self, command: Command) -> Result<(), String> {
+        self.commands
+            .send(command)
+            .map_err(|_| "The audio engine is not running.".to_string())
+    }
+
+    /// Replaces the queue with `ids` and starts playing at `start`.
+    pub fn play(&self, ids: Vec<String>, start: usize) -> Result<(), String> {
+        self.send(Command::Play(ids, start))
+    }
+
+    /// Adds `ids` at the end of the queue; what plays now keeps playing.
+    pub fn append(&self, ids: Vec<String>) -> Result<(), String> {
+        self.send(Command::Append(ids))
+    }
+
+    /// Plays the queue entry at `index`; an index out of range is ignored.
+    pub fn jump(&self, index: usize) -> Result<(), String> {
+        self.send(Command::Jump(index))
+    }
+
+    /// The latest state, as the engine published it.
+    pub fn state(&self) -> PlayerState {
+        read_lock(&self.state)
+    }
+
+    /// The queue's ids, as the engine published them.
+    pub fn queue_ids(&self) -> Vec<String> {
+        read_lock(&self.queue).as_ref().clone()
+    }
+
+    fn queue_snapshot(&self) -> Arc<Vec<String>> {
+        read_lock(&self.queue)
+    }
+}
+
 /// Handle to the engine thread. Every method only sends a command; none of them blocks on
 /// audio work. Dropping it stops the engine.
 pub struct Player {
-    commands: Sender<Command>,
-    state: Arc<Mutex<PlayerState>>,
+    handle: PlayerHandle,
+    resolver: Resolver,
     thread: Option<JoinHandle<()>>,
     /// The crossfade setting; kept for now, the engine does not blend tracks yet.
     crossfade: Mutex<(Crossfade, u32)>,
@@ -202,13 +283,21 @@ impl Player {
             ..options
         };
         let (commands, command_rx) = crossbeam_channel::unbounded();
-        let state = Arc::new(Mutex::new(PlayerState::idle(options.volume)));
-        let shared = Arc::clone(&state);
+        let handle = PlayerHandle {
+            commands,
+            state: Arc::new(Mutex::new(PlayerState::idle(options.volume))),
+            queue: Arc::new(Mutex::new(Arc::new(Vec::new()))),
+        };
+        let shared = Shared {
+            state: Arc::clone(&handle.state),
+            queue: Arc::clone(&handle.queue),
+        };
+        let engine_resolver = Arc::clone(&resolver);
         let thread = std::thread::Builder::new()
             .name("prism-player".into())
             .spawn(move || {
                 let run = catch_unwind(AssertUnwindSafe(|| {
-                    match Engine::new(factory, resolver, sink, opener, shared, options) {
+                    match Engine::new(factory, engine_resolver, sink, opener, shared, options) {
                         Ok(mut engine) => engine.run(command_rx),
                         Err(err) => eprintln!("the audio engine could not start: {err:#}"),
                     }
@@ -221,22 +310,55 @@ impl Player {
             .map_err(|err| eprintln!("starting the audio engine failed: {err}"))
             .ok();
         Player {
-            commands,
-            state,
+            handle,
+            resolver,
             thread,
             crossfade: Mutex::new((Crossfade::Off, 0)),
         }
     }
 
+    /// A cloneable handle for other threads.
+    pub fn handle(&self) -> PlayerHandle {
+        self.handle.clone()
+    }
+
     fn send(&self, command: Command) -> Result<(), String> {
-        self.commands
-            .send(command)
-            .map_err(|_| "The audio engine is not running.".to_string())
+        self.handle.send(command)
     }
 
     /// Replaces the queue with `ids` and starts playing at `start`.
     pub fn play(&self, ids: Vec<String>, start: usize) -> Result<(), String> {
-        self.send(Command::Play(ids, start))
+        self.handle.play(ids, start)
+    }
+
+    /// Adds `ids` at the end of the queue; what plays now keeps playing.
+    pub fn append(&self, ids: Vec<String>) -> Result<(), String> {
+        self.handle.append(ids)
+    }
+
+    /// Plays the queue entry at `index`; an index out of range is ignored.
+    pub fn jump(&self, index: usize) -> Result<(), String> {
+        self.handle.jump(index)
+    }
+
+    /// The queue's ids, as the engine published them.
+    pub fn queue_ids(&self) -> Vec<String> {
+        self.handle.queue_ids()
+    }
+
+    /// Up to `limit` queue entries from `offset`, resolved on the calling thread (the resolver
+    /// may wait on the library DB, so call it off the UI thread).
+    pub fn queue_range(&self, offset: u32, limit: u32) -> Vec<QueueItem> {
+        let ids = self.handle.queue_snapshot();
+        ids.iter()
+            .enumerate()
+            .skip(offset as usize)
+            .take(limit as usize)
+            .map(|(index, id)| QueueItem {
+                index: index as u32,
+                track: (self.resolver)(id),
+            })
+            .collect()
     }
 
     pub fn toggle(&self) -> Result<(), String> {
@@ -282,25 +404,19 @@ impl Player {
 
     /// Stores the crossfade mode and length (ms). Has no effect on playback yet.
     pub fn set_crossfade(&self, mode: Crossfade, ms: u32) -> Result<(), String> {
-        match self.crossfade.lock() {
-            Ok(mut stored) => *stored = (mode, ms),
-            Err(poisoned) => *poisoned.into_inner() = (mode, ms),
-        }
+        write_lock(&self.crossfade, (mode, ms));
         Ok(())
     }
 
     /// The latest state, as the engine published it.
     pub fn state(&self) -> PlayerState {
-        match self.state.lock() {
-            Ok(state) => state.clone(),
-            Err(poisoned) => poisoned.into_inner().clone(),
-        }
+        self.handle.state()
     }
 }
 
 impl Drop for Player {
     fn drop(&mut self) {
-        let _ = self.commands.send(Command::Shutdown);
+        let _ = self.handle.send(Command::Shutdown);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -342,10 +458,47 @@ fn resolve(resolver: &Resolver, id: &str) -> Result<Track, String> {
     }
 }
 
+/// The opener's job queues, one worker per slot: a slow pre-open of the next track never
+/// delays opening the track to play now (a manual next, a jump).
+struct Openers {
+    current: Sender<OpenJob>,
+    next: Sender<OpenJob>,
+}
+
+impl Openers {
+    fn spawn(
+        resolver: Resolver,
+        opener: Opener,
+        generation: Arc<AtomicU64>,
+        results: Sender<Opened>,
+    ) -> Openers {
+        Openers {
+            current: spawn_opener(
+                OPENER_CURRENT_THREAD,
+                Arc::clone(&resolver),
+                Arc::clone(&opener),
+                Arc::clone(&generation),
+                results.clone(),
+            ),
+            next: spawn_opener(OPENER_NEXT_THREAD, resolver, opener, generation, results),
+        }
+    }
+
+    fn send(&self, job: OpenJob) -> Result<(), String> {
+        let jobs = match job.slot {
+            Slot::Current => &self.current,
+            Slot::Next => &self.next,
+        };
+        jobs.send(job)
+            .map_err(|_| "the file opener is not running".to_string())
+    }
+}
+
 /// Resolves and opens tracks off the engine thread: the resolver can wait on the library DB
 /// and an open decodes the first packet (FFmpeg can take seconds). The engine thread never
 /// touches either. Jobs from an older generation are skipped.
 fn spawn_opener(
+    name: &str,
     resolver: Resolver,
     opener: Opener,
     generation: Arc<AtomicU64>,
@@ -353,7 +506,7 @@ fn spawn_opener(
 ) -> Sender<OpenJob> {
     let (jobs, job_rx) = crossbeam_channel::unbounded::<OpenJob>();
     let spawned = std::thread::Builder::new()
-        .name("prism-opener".into())
+        .name(name.into())
         .spawn(move || {
             for job in job_rx {
                 if job.generation != generation.load(Ordering::SeqCst) {
@@ -393,13 +546,21 @@ enum Preload {
     Failed(usize, String, String),
 }
 
+/// What the engine publishes for [`PlayerHandle`] readers.
+struct Shared {
+    state: Arc<Mutex<PlayerState>>,
+    queue: Arc<Mutex<Arc<Vec<String>>>>,
+}
+
 /// Lives on the engine thread and owns everything that is not `Send`.
 struct Engine {
     playback: Playback,
     queue: Queue,
+    /// Bumped whenever the queue's ids change.
+    queue_version: u64,
     sink: EventSink,
-    shared: Arc<Mutex<PlayerState>>,
-    jobs: Sender<OpenJob>,
+    shared: Shared,
+    openers: Openers,
     opened: Receiver<Opened>,
     generation: Arc<AtomicU64>,
     status: PlayerStatus,
@@ -420,10 +581,16 @@ struct Engine {
     preload: Preload,
     /// A gapless hand-over and the instant it becomes audible.
     handover: Option<(Instant, Track)>,
+    /// When the user paused; a pending hand-over's deadline moves by the paused time.
+    paused_at: Option<Instant>,
     /// The queue ran out; idle once the output has played everything.
     ending: bool,
+    /// Tracks that failed in a row since one was last heard.
+    failures: u32,
     dirty: bool,
     last_emit: Instant,
+    /// The last `player://state` sent; an unchanged snapshot is not sent again.
+    last_sent: Option<PlayerState>,
 }
 
 impl Engine {
@@ -432,7 +599,7 @@ impl Engine {
         resolver: Resolver,
         sink: EventSink,
         opener: Opener,
-        shared: Arc<Mutex<PlayerState>>,
+        shared: Shared,
         options: PlayerOptions,
     ) -> anyhow::Result<Engine> {
         let mut playback = Playback::new(factory, options.device.clone())?;
@@ -442,13 +609,14 @@ impl Engine {
         }
         let generation = Arc::new(AtomicU64::new(0));
         let (results, opened) = crossbeam_channel::unbounded();
-        let jobs = spawn_opener(resolver, opener, Arc::clone(&generation), results);
+        let openers = Openers::spawn(resolver, opener, Arc::clone(&generation), results);
         Ok(Engine {
             playback,
             queue: Queue::new(),
+            queue_version: 0,
             sink,
             shared,
-            jobs,
+            openers,
             opened,
             generation,
             status: PlayerStatus::Idle,
@@ -463,9 +631,12 @@ impl Engine {
             ready: None,
             preload: Preload::None,
             handover: None,
+            paused_at: None,
             ending: false,
+            failures: 0,
             dirty: true,
             last_emit: Instant::now(),
+            last_sent: None,
         })
     }
 
@@ -511,7 +682,16 @@ impl Engine {
         match command {
             Command::Play(ids, start) => {
                 self.queue.set(ids, start);
+                self.queue_changed();
+                self.failures = 0;
                 self.start_current(true);
+            }
+            Command::Append(ids) => self.append(ids),
+            Command::Jump(index) => {
+                if self.queue.jump(index) {
+                    self.failures = 0;
+                    self.start_current(true);
+                }
             }
             Command::Toggle => self.toggle(),
             Command::Next => {
@@ -554,15 +734,43 @@ impl Engine {
         }
     }
 
+    /// The queue's ids changed: bump the version and publish the ids for handle readers.
+    fn queue_changed(&mut self) {
+        self.queue_version += 1;
+        write_lock(&self.shared.queue, Arc::new(self.queue.ids().to_vec()));
+        self.dirty = true;
+    }
+
+    /// Adds `ids` at the end. Playback goes on; when only the last track's tail was left,
+    /// the first appended track follows it.
+    fn append(&mut self, ids: Vec<String>) {
+        if ids.is_empty() {
+            return;
+        }
+        self.queue.extend(ids);
+        self.queue_changed();
+        if self.ending && self.queue.advance() {
+            self.failures = 0;
+            self.start_current(false);
+        }
+    }
+
     fn toggle(&mut self) {
         match self.status {
             PlayerStatus::Playing => {
                 self.playback.set_paused(true);
                 self.status = PlayerStatus::Paused;
+                self.paused_at = Some(Instant::now());
             }
             PlayerStatus::Paused => {
                 self.playback.set_paused(false);
                 self.status = PlayerStatus::Playing;
+                // Nothing was heard while paused, so the hand-over is that much later.
+                if let Some(paused_at) = self.paused_at.take() {
+                    if let Some((at, _)) = self.handover.as_mut() {
+                        *at += paused_at.elapsed();
+                    }
+                }
             }
             PlayerStatus::Loading => self.start_paused = !self.start_paused,
             PlayerStatus::Idle => {
@@ -580,7 +788,11 @@ impl Engine {
 
     fn prev(&mut self) {
         self.settle_handover();
-        if self.seekable() && self.position_ms() > RESTART_AFTER_MS {
+        if self.ending {
+            // Only the last track's tail is left (it is no longer decoding, so it cannot be
+            // seeked): start it again.
+            self.start_current(true);
+        } else if self.seekable() && self.position_ms() > RESTART_AFTER_MS {
             self.seek(0);
         } else if self.queue.back() {
             self.start_current(true);
@@ -589,6 +801,7 @@ impl Engine {
         }
     }
 
+    /// A seek that changes nothing (not seekable, or to where it already is) is ignored.
     fn seek(&mut self, ms: u64) {
         if !self.seekable() {
             return;
@@ -596,6 +809,9 @@ impl Engine {
         self.settle_handover();
         let duration = self.current.as_ref().map_or(0, |track| track.duration_ms);
         let ms = if duration > 0 { ms.min(duration) } else { ms };
+        if ms == self.position_ms() {
+            return;
+        }
         if let Err(err) = self.playback.seek(ms) {
             self.fail_current(err);
         }
@@ -614,6 +830,7 @@ impl Engine {
         self.preload = Preload::None;
         self.ending = false;
         self.start_paused = false;
+        self.paused_at = None;
         self.dirty = true;
         let Some(id) = self.queue.current().map(str::to_string) else {
             self.finish(cut);
@@ -632,16 +849,19 @@ impl Engine {
             id: id.clone(),
             spec: self.playback.output_spec(),
         };
-        if self.jobs.send(job).is_err() {
-            self.error(&id, "the file opener is not running");
+        if let Err(message) = self.openers.send(job) {
+            self.error(&id, &message);
             // Every other track would fail the same way.
             self.finish(cut);
         }
     }
 
     /// Moves past a track that failed (or ended): the next one, or the end of the queue.
+    /// After [`MAX_FAILURES_IN_A_ROW`] failures the player gives up and goes idle.
     fn skip(&mut self, cut: bool) {
-        if self.queue.advance() {
+        if self.failures >= MAX_FAILURES_IN_A_ROW {
+            self.finish(cut);
+        } else if self.queue.advance() {
             self.start_current(cut);
         } else {
             self.finish(cut);
@@ -669,8 +889,10 @@ impl Engine {
         self.ready = None;
         self.preload = Preload::None;
         self.handover = None;
+        self.paused_at = None;
         self.ending = false;
         self.start_paused = false;
+        self.failures = 0;
         self.queue.rewind();
         self.dirty = true;
     }
@@ -810,9 +1032,9 @@ impl Engine {
             id: id.clone(),
             spec: self.playback.output_spec(),
         };
-        self.preload = match self.jobs.send(job) {
+        self.preload = match self.openers.send(job) {
             Ok(()) => Preload::Requested(index),
-            Err(_) => Preload::Failed(index, id, "the file opener is not running".into()),
+            Err(message) => Preload::Failed(index, id, message),
         };
     }
 
@@ -845,12 +1067,17 @@ impl Engine {
     /// A decode or seek error: report it and move on.
     fn fail_current(&mut self, err: anyhow::Error) {
         let id = self.current_id();
-        // A hand-over to the failing track was never heard.
-        self.handover = None;
+        // A hand-over to the failing track was never heard: the previous track's tail is
+        // still playing and is not cut.
+        let unheard = self.handover.take().is_some();
         self.error(&id, &format!("{err:#}"));
-        self.playback.stop();
         self.decoding = false;
-        self.skip(true);
+        if unheard {
+            self.playback.drop_sources();
+        } else {
+            self.playback.stop();
+        }
+        self.skip(!unheard);
     }
 
     fn current_id(&self) -> String {
@@ -870,15 +1097,27 @@ impl Engine {
     fn show(&mut self, track: Track) {
         self.shown = Some(track.clone());
         self.shown_index = self.queue.index();
+        self.failures = 0;
         self.dirty = true;
         (self.sink)(PlayerEvent::TrackChanged(track));
     }
 
+    /// Reports a track that could not be played. The one that makes it
+    /// [`MAX_FAILURES_IN_A_ROW`] is reported as that instead (the player then gives up), and
+    /// nothing after it is reported, so a dead queue does not flood the UI.
     fn error(&mut self, track_id: &str, message: &str) {
         self.dirty = true;
+        self.failures += 1;
+        let message = match self.failures {
+            n if n < MAX_FAILURES_IN_A_ROW => message.to_string(),
+            MAX_FAILURES_IN_A_ROW => {
+                format!("{MAX_FAILURES_IN_A_ROW} tracks in a row could not be played")
+            }
+            _ => return,
+        };
         (self.sink)(PlayerEvent::Error(PlayerError {
             track_id: track_id.to_string(),
-            message: message.to_string(),
+            message,
         }));
     }
 
@@ -910,11 +1149,13 @@ impl Engine {
             volume: self.volume,
             queue_index: self.shown_index as u32,
             queue_length: self.queue.len() as u32,
+            queue_version: self.queue_version,
         }
     }
 
-    /// When the state changed, or every [`STATE_INTERVAL`] while playing: updates the
-    /// shared state (what `player_state` returns) and emits it.
+    /// When something may have changed, or every [`STATE_INTERVAL`] while playing: updates
+    /// the shared state (what `player_state` returns) and emits it, unless it is the same as
+    /// the last one sent (the periodic update while playing is always sent).
     fn publish(&mut self) {
         let periodic =
             self.status == PlayerStatus::Playing && self.last_emit.elapsed() >= STATE_INTERVAL;
@@ -922,12 +1163,13 @@ impl Engine {
             return;
         }
         self.dirty = false;
-        self.last_emit = Instant::now();
         let state = self.snapshot();
-        match self.shared.lock() {
-            Ok(mut shared) => *shared = state.clone(),
-            Err(poisoned) => *poisoned.into_inner() = state.clone(),
+        write_lock(&self.shared.state, state.clone());
+        if !periodic && self.last_sent.as_ref() == Some(&state) {
+            return;
         }
+        self.last_emit = Instant::now();
+        self.last_sent = Some(state.clone());
         (self.sink)(PlayerEvent::State(state));
     }
 }
@@ -1651,11 +1893,13 @@ mod tests {
             volume: 0.5,
             queue_index: 1,
             queue_length: 2,
+            queue_version: 7,
         };
         let value = serde_json::to_value(&state).unwrap();
         assert_eq!(value["status"], "loading");
         assert_eq!(value["positionMs"], 5);
         assert_eq!(value["queueLength"], 2);
+        assert_eq!(value["queueVersion"], 7);
         let error = serde_json::to_value(PlayerError {
             track_id: "t".into(),
             message: "m".into(),
@@ -1674,6 +1918,204 @@ mod tests {
         wait_state(&h.player, |s| s.volume == 1.0);
         h.player.set_volume(-1.0).unwrap();
         wait_state(&h.player, |s| s.volume == 0.0);
+    }
+
+    /// An opener that plays [`SILENCE_MS`] of silence for every track.
+    fn silence_opener() -> Opener {
+        Arc::new(|_track: &Track, _spec: StreamSpec| {
+            Ok(Box::new(Silence {
+                frames_left: SILENCE_MS * 44_100 / 1000,
+            }) as Box<dyn AudioSource>)
+        })
+    }
+
+    /// Tracks `ids` that last [`SILENCE_MS`] (pair with [`silence_opener`]).
+    fn long_tracks(ids: &[&str]) -> Vec<Track> {
+        ids.iter()
+            .map(|id| {
+                let mut track = fixture_track(id, "tagged.flac");
+                track.duration_ms = SILENCE_MS;
+                track
+            })
+            .collect()
+    }
+
+    fn states(events: &[PlayerEvent]) -> Vec<&PlayerState> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                PlayerEvent::State(state) => Some(state),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn playing_track(state: &PlayerState, id: &str) -> bool {
+        state.status == PlayerStatus::Playing && state.track.as_ref().is_some_and(|t| t.id == id)
+    }
+
+    #[test]
+    fn append_keeps_playing_and_bumps_version() {
+        let h = harness(long_tracks(&["one", "two"]), 1.0, Some(silence_opener()));
+        h.player.play(ids(&["one"]), 0).unwrap();
+        let before = wait_state(&h.player, |s| playing_track(s, "one"));
+        assert_eq!(h.player.handle().queue_ids(), ids(&["one"]));
+
+        // Other threads (Flow, tray, shortcuts) use the handle.
+        let handle = h.player.handle();
+        std::thread::spawn(move || handle.append(ids(&["two"])).unwrap())
+            .join()
+            .unwrap();
+        let after = wait_state(&h.player, |s| s.queue_length == 2);
+        assert!(after.queue_version > before.queue_version);
+        assert!(playing_track(&after, "one"), "still playing: {after:#?}");
+        assert_eq!(after.queue_index, 0);
+        assert_eq!(h.player.handle().queue_ids(), ids(&["one", "two"]));
+        assert_eq!(h.player.handle().state(), h.player.state());
+
+        // Appending nothing changes nothing.
+        h.player.append(Vec::new()).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(h.player.state().queue_version, after.queue_version);
+    }
+
+    #[test]
+    fn jump_plays_that_index() {
+        let h = harness(long_tracks(&["a", "b", "c"]), 1.0, Some(silence_opener()));
+        h.player.play(ids(&["a", "b", "c"]), 0).unwrap();
+        let before = wait_state(&h.player, |s| playing_track(s, "a"));
+        h.player.handle().jump(2).unwrap();
+        let state = wait_state(&h.player, |s| playing_track(s, "c"));
+        assert_eq!(state.queue_index, 2);
+        assert_eq!(
+            state.queue_version, before.queue_version,
+            "the ids did not change"
+        );
+
+        // Out of range: ignored.
+        h.player.jump(7).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        let state = h.player.state();
+        assert!(playing_track(&state, "c"));
+        assert_eq!(state.queue_index, 2);
+    }
+
+    #[test]
+    fn queue_range_marks_missing_tracks() {
+        let h = harness(long_tracks(&["a", "b"]), 1.0, Some(silence_opener()));
+        h.player.play(ids(&["a", "gone", "b"]), 0).unwrap();
+        wait_state(&h.player, |s| s.queue_length == 3);
+        let items = h.player.queue_range(1, 10);
+        let summary: Vec<(u32, Option<String>)> = items
+            .iter()
+            .map(|item| (item.index, item.track.as_ref().map(|t| t.id.clone())))
+            .collect();
+        assert_eq!(
+            summary,
+            vec![(1, None), (2, Some("b".to_string()))],
+            "the range starts at the offset and marks ids that no longer resolve"
+        );
+        assert_eq!(h.player.queue_range(0, 1).len(), 1);
+        assert!(h.player.queue_range(3, 10).is_empty());
+        let value = serde_json::to_value(&items[1]).unwrap();
+        assert_eq!(value["index"], 2);
+        assert_eq!(value["track"]["id"], "b");
+    }
+
+    #[test]
+    fn slow_preload_does_not_delay_next() {
+        let mut tracks = long_tracks(&["a", "b", "c"]);
+        // "a" claims to be short, so "b" is pre-opened as soon as "a" plays.
+        tracks[0].duration_ms = 1_000;
+        let (preloading_tx, preloading) = crossbeam_channel::unbounded();
+        let opener: Opener = Arc::new(move |_track: &Track, _spec: StreamSpec| {
+            if std::thread::current().name() == Some(OPENER_NEXT_THREAD) {
+                let _ = preloading_tx.send(());
+                std::thread::sleep(Duration::from_secs(2));
+            }
+            Ok(Box::new(Silence {
+                frames_left: SILENCE_MS * 44_100 / 1000,
+            }) as Box<dyn AudioSource>)
+        });
+        let h = harness(tracks, 1.0, Some(opener));
+        h.player.play(ids(&["a", "b", "c"]), 0).unwrap();
+        preloading
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the next track is pre-opened");
+        let asked = Instant::now();
+        h.player.next().unwrap();
+        collect_until(&h.events, Duration::from_secs(5), |seen| {
+            states(seen).iter().any(|s| playing_track(s, "b"))
+        });
+        assert!(
+            asked.elapsed() < Duration::from_millis(500),
+            "next waited for the pre-open: {:?}",
+            asked.elapsed()
+        );
+    }
+
+    #[test]
+    fn dead_queue_reports_once() {
+        let h = harness(Vec::new(), FAST, None);
+        let missing: Vec<String> = (0..50).map(|n| format!("missing{n}")).collect();
+        h.player.play(missing, 0).unwrap();
+        let events = collect_until(&h.events, Duration::from_secs(10), |seen| {
+            let Some(last_error) = seen
+                .iter()
+                .rposition(|e| matches!(e, PlayerEvent::Error(_)))
+            else {
+                return false;
+            };
+            seen[last_error..]
+                .iter()
+                .any(|e| is_state(e, PlayerStatus::Idle))
+        });
+        let mut events = events;
+        std::thread::sleep(Duration::from_millis(300));
+        events.extend(h.events.try_iter());
+        let messages: Vec<String> = events
+            .iter()
+            .filter_map(|event| match event {
+                PlayerEvent::Error(error) => Some(error.message.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(messages.len() <= 10, "an error flood: {messages:#?}");
+        assert_eq!(
+            messages.last().map(String::as_str),
+            Some("10 tracks in a row could not be played")
+        );
+        assert_eq!(h.player.state().status, PlayerStatus::Idle);
+    }
+
+    #[test]
+    fn noop_seek_is_silent() {
+        let h = harness(long_tracks(&["a"]), FAST, Some(silence_opener()));
+        // Idle: nothing to seek.
+        h.player.seek(1_000).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        let idle: Vec<PlayerEvent> = h.events.try_iter().collect();
+        assert!(
+            states(&idle).iter().all(|s| s.status == PlayerStatus::Idle) && idle.len() <= 1,
+            "only the initial idle state: {idle:#?}"
+        );
+
+        h.player.play(ids(&["a"]), 0).unwrap();
+        wait_state(&h.player, |s| s.status == PlayerStatus::Playing);
+        h.player.toggle().unwrap();
+        wait_state(&h.player, |s| s.status == PlayerStatus::Paused);
+        h.player.seek(4_000).unwrap();
+        wait_state(&h.player, |s| s.position_ms == 4_000);
+        std::thread::sleep(Duration::from_millis(100));
+        h.events.try_iter().for_each(drop);
+
+        h.player.seek(4_000).unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        let later: Vec<PlayerEvent> = h.events.try_iter().collect();
+        assert!(
+            later.is_empty(),
+            "a seek to the same spot is silent: {later:#?}"
+        );
     }
 
     #[test]

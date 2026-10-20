@@ -3,7 +3,7 @@ import { expect, it, vi } from 'vitest';
 
 const invoke = vi.fn(async (cmd: string) => {
   if (cmd === 'player_state') {
-    return { status: 'idle', track: null, positionMs: 0, durationMs: 0, volume: 0.8, queueIndex: 0, queueLength: 0 };
+    return { status: 'idle', track: null, positionMs: 0, durationMs: 0, volume: 0.8, queueIndex: 0, queueLength: 0, queueVersion: 0 };
   }
   if (cmd === 'window_vibrancy') return false;
   return undefined;

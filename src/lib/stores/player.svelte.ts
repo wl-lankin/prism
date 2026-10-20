@@ -10,6 +10,7 @@ export const player: PlayerState = $state({
   volume: 0.8,
   queueIndex: 0,
   queueLength: 0,
+  queueVersion: 0,
 });
 
 /**
