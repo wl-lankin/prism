@@ -19,7 +19,8 @@ use crate::library::{normalize, tauri_emitter, Library};
 use crate::player::{PlayerState, QueueItem};
 use crate::settings::{Change, Settings};
 use crate::shell;
-use crate::shell::mini::{self, Anchor, MiniLayout};
+use crate::shell::mini::{self, MiniLayout};
+use crate::shell::tray::TrayLabels;
 use crate::AppState;
 
 /// Upper bound for `library_search` and `library_tracks_range` page sizes.
@@ -413,10 +414,11 @@ pub async fn audio_devices() -> Result<Vec<String>, String> {
 
 // Shell
 
-/// Shows the mini player (bottom-right, without taking focus), or hides it.
+/// Shows the mini player (bottom-right, or under the menu bar icon on macOS, without taking
+/// focus), or hides it.
 #[tauri::command]
 pub fn mini_toggle(app: AppHandle) -> Result<(), String> {
-    mini::toggle(&app, &Anchor::WorkAreaBottomRight).map_err(|err| err.to_string())
+    mini::toggle(&app, &mini::home_anchor(&app)).map_err(|err| err.to_string())
 }
 
 /// Where the player sits in the mini window (the Flow menu's room is above or below it).
@@ -431,16 +433,15 @@ pub fn mini_menu(app: AppHandle, open: bool) {
     mini::menu(&app, open);
 }
 
-/// Brings the main window up: shown, restored from the taskbar and focused.
+/// Brings the main window up (shown, restored from the taskbar and focused) and hides the
+/// mini player.
 #[tauri::command]
 pub fn main_show(app: AppHandle) -> Result<(), String> {
-    let window = app
-        .get_webview_window("main")
-        .ok_or("the main window is gone")?;
-    let fail = |err: tauri::Error| err.to_string();
-    window.show().map_err(fail)?;
-    if window.is_minimized().unwrap_or(false) {
-        window.unminimize().map_err(fail)?;
-    }
-    window.set_focus().map_err(fail)
+    shell::main_show(&app)
+}
+
+/// The tray menu's strings in the UI language, sent by the main window.
+#[tauri::command]
+pub fn tray_set_labels(app: AppHandle, labels: TrayLabels) {
+    shell::tray::set_labels(&app, &labels);
 }

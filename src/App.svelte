@@ -24,7 +24,7 @@
   import ViewHead from './lib/components/ViewHead.svelte';
   import { activateIdle, holdToOpen } from './lib/flow';
   import { t, tc, type Key } from './lib/i18n';
-  import { onNavGo, playerPlayFiles, playerToggle, startupNotice, windowVibrancy } from './lib/ipc';
+  import { onNavGo, playerPlayFiles, playerToggle, startupNotice, traySetLabels, windowVibrancy } from './lib/ipc';
   import { initFavorites } from './lib/stores/favorites.svelte';
   import { initLibrary, library } from './lib/stores/library.svelte';
   import { go, nav, overlays, type View } from './lib/stores/nav.svelte';
@@ -158,6 +158,17 @@
       gone = true;
       stop?.();
     };
+  });
+
+  // The tray menu speaks the UI language: reading `t()` here re-sends it on every change.
+  $effect(() => {
+    traySetLabels({
+      open: t('tray.open'),
+      playPause: t('tray.playPause'),
+      next: t('tray.next'),
+      previous: t('tray.previous'),
+      quit: t('tray.quit'),
+    }).catch(() => {});
   });
 
   // Files dropped onto the window play at once, without being indexed.

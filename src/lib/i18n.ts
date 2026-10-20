@@ -43,6 +43,11 @@ const en = {
   'transport.mute': 'Mute',
   'transport.unmute': 'Unmute',
 
+  'tray.open': 'Open Prism',
+  'tray.playPause': 'Play/Pause',
+  'tray.next': 'Next',
+  'tray.previous': 'Previous',
+  'tray.quit': 'Quit Prism',
   'mini.label': 'Mini player',
   'mini.open': 'Open Prism',
   'mini.openNowPlaying': 'Show what is playing in Prism',
@@ -268,6 +273,11 @@ const de: Record<Key, string> = {
   'transport.mute': 'Stumm',
   'transport.unmute': 'Ton an',
 
+  'tray.open': 'Prism öffnen',
+  'tray.playPause': 'Wiedergabe/Pause',
+  'tray.next': 'Weiter',
+  'tray.previous': 'Zurück',
+  'tray.quit': 'Prism beenden',
   'mini.label': 'Mini-Player',
   'mini.open': 'Prism öffnen',
   'mini.openNowPlaying': 'Laufenden Titel in Prism zeigen',

@@ -78,6 +78,23 @@ pub enum Anchor {
     BelowRect(PhysicalRect<i32, u32>),
 }
 
+/// Where the mini player goes: under the menu bar icon on macOS once its place is known (a
+/// tray click remembers it), the bottom-right corner otherwise.
+pub fn anchor_for(tray_rect: Option<PhysicalRect<i32, u32>>, menu_bar: bool) -> Anchor {
+    match tray_rect {
+        Some(rect) if menu_bar => Anchor::BelowRect(rect),
+        _ => Anchor::WorkAreaBottomRight,
+    }
+}
+
+/// The anchor for a toggle that does not come from the tray (the ring, the shortcut).
+pub fn home_anchor(app: &AppHandle) -> Anchor {
+    let rect = app
+        .try_state::<super::ShellState>()
+        .and_then(|state| state.tray_rect());
+    anchor_for(rect, cfg!(target_os = "macos"))
+}
+
 impl Anchor {
     /// The menu opens away from the screen edge the player docks to.
     fn room_above(&self) -> bool {
@@ -316,9 +333,27 @@ pub fn show(app: &AppHandle, anchor: &Anchor) -> tauri::Result<()> {
 
 pub fn hide(app: &AppHandle) -> tauri::Result<()> {
     match window(app) {
-        Some(window) => window.hide(),
+        Some(window) => hide_native(&window),
         None => Ok(()),
     }
+}
+
+/// Windows: `ShowWindow(SW_HIDE)` directly. The window was shown behind the runtime's back
+/// (`show_inactive`), so the runtime still takes it for hidden and `hide()` would change
+/// nothing (measured: the player stayed on screen).
+#[cfg(target_os = "windows")]
+fn hide_native(window: &WebviewWindow) -> tauri::Result<()> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
+
+    let hwnd = window.hwnd()?;
+    // SAFETY: `hwnd` is the live mini window.
+    unsafe { ShowWindow(hwnd.0 as _, SW_HIDE) };
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn hide_native(window: &WebviewWindow) -> tauri::Result<()> {
+    window.hide()
 }
 
 pub fn toggle(app: &AppHandle, anchor: &Anchor) -> tauri::Result<()> {
@@ -493,6 +528,28 @@ mod tests {
             dock_position(work_area, SIZE, &Anchor::BelowRect(icon(10)), 12),
             PosI { x: 12, y: 36 }
         );
+    }
+
+    #[test]
+    fn anchor_follows_the_menu_bar_icon_only_on_macos() {
+        let rect = PhysicalRect {
+            position: PhysicalPosition::new(700, 0),
+            size: PhysicalSize::new(24, 24),
+        };
+        assert!(matches!(
+            anchor_for(Some(rect), true),
+            Anchor::BelowRect(at) if at.position == rect.position && at.size == rect.size
+        ));
+        // No click yet: the corner.
+        assert!(matches!(
+            anchor_for(None, true),
+            Anchor::WorkAreaBottomRight
+        ));
+        // Windows always docks to the corner.
+        assert!(matches!(
+            anchor_for(Some(rect), false),
+            Anchor::WorkAreaBottomRight
+        ));
     }
 
     #[test]
