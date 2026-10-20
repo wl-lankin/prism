@@ -21,7 +21,8 @@
   import { notice, notify } from './lib/stores/notice.svelte';
   import { initPlayer, player } from './lib/stores/player.svelte';
 
-  const RING = 84;
+  /** The Flow ring sits inside the 84 px transport strip, centred with 8 px above and below. */
+  const RING = 68;
   const isMac = typeof navigator !== 'undefined' && /Mac/.test(navigator.platform || navigator.userAgent);
 
   let glass = $state(false);
@@ -223,11 +224,11 @@
     background: transparent;
   }
 
+  /* The app fills the whole window: no frame around it, so it never reads as a window
+     inside a window. The OS draws the window edge, corners and shadow. */
   .window {
-    --frame-bottom: 52px;
     position: fixed;
     inset: 0;
-    padding: 16px 16px var(--frame-bottom);
     background: var(--bg);
     user-select: none;
     -webkit-user-select: none;
@@ -243,13 +244,7 @@
     display: grid;
     grid-template-columns: 220px minmax(0, 1fr);
     grid-template-rows: minmax(0, 1fr) auto;
-    border-radius: var(--radius-l);
     background: var(--surface);
-    box-shadow:
-      inset 0 0 0 1px rgba(255, 255, 255, 0.06),
-      0 1px 0 rgba(255, 255, 255, 0.03),
-      0 24px 60px -18px rgba(0, 0, 0, 0.75),
-      0 8px 24px rgba(0, 0, 0, 0.35);
     overflow: hidden;
   }
 
@@ -391,22 +386,20 @@
   .ring-dock {
     position: absolute;
     left: 50%;
-    bottom: calc(var(--frame-bottom) - var(--ring) / 2);
+    /* Centred in the 84 px transport strip. */
+    bottom: calc((84px - var(--ring)) / 2);
     width: var(--ring);
     height: var(--ring);
     transform: translateX(-50%);
     z-index: 2;
     border-radius: 50%;
-    /* A notch of the frame around the ring, so it reads as set into the card's edge. */
-    box-shadow: 0 0 0 6px var(--bg);
-    background: var(--bg);
   }
 
-  /* Always in the DOM as a live region; only its text changes. It floats above the seek
-     rail (the strip is 84 px, the ring's upper half 42 px of it). */
+  /* Always in the DOM as a live region; only its text changes. It floats just above the
+     seek rail (the ring's top is 8 px below the strip's top edge). */
   .notice {
     position: absolute;
-    bottom: calc(100% + 42px + 14px);
+    bottom: calc(100% + 8px + 12px);
     left: 50%;
     transform: translate(-50%, 4px);
     pointer-events: none;
