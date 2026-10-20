@@ -100,6 +100,30 @@ it('opens above the point anchored by its bottom edge, capped to the room above'
   target.remove();
 });
 
+it('opens below a point near the top when the whole menu does not fit above', async () => {
+  // jsdom has no layout: the menu is 124 px tall, less while its max-height caps it.
+  const natural = 124;
+  const rect = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+    const cap = parseFloat(this.style.maxHeight);
+    const height = Number.isNaN(cap) ? natural : Math.min(natural, cap);
+    return { x: 0, y: 0, left: 0, top: 0, right: 300, bottom: height, width: 300, height, toJSON() {} } as DOMRect;
+  });
+  const target = document.createElement('div');
+  document.body.append(target);
+  const menu = mount(FlowMenu, { target, props: { x: 66, y: 60, onclose: () => {} } });
+  flushSync();
+  const box = target.querySelector<HTMLElement>('[role="menu"]')!;
+  await vi.waitFor(() => {
+    flushSync();
+    expect(box.style.top).toBe(`${60 + 8}px`);
+  });
+  expect(box.style.bottom).toBe('');
+  expect(box.style.maxHeight).toBe(`${window.innerHeight - 60 - 16}px`);
+  unmount(menu);
+  target.remove();
+  rect.mockRestore();
+});
+
 it('gives focus back to the opener and closes when focus leaves', async () => {
   const ring = document.createElement('button');
   const elsewhere = document.createElement('button');

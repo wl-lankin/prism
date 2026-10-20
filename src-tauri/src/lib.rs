@@ -110,6 +110,10 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
     let config_dir = dirs.config;
     let settings = Arc::new(SettingsStore::load(&config_dir.join("settings.json")));
     let initial = settings.get();
+    // Hidden until the user asks for it.
+    if let Err(err) = shell::mini::create(app.handle(), initial.mini_on_top) {
+        eprintln!("creating the mini player failed: {err}");
+    }
 
     let (db, notice) = match open_or_quarantine(&data_dir.join("library.db"))
         .map_err(|err| err.context(DataDir(data_dir.clone())))?
@@ -239,6 +243,8 @@ pub fn run() {
         .on_window_event(|window, event| {
             if window.label() == "main" {
                 window::on_main_event(window, event);
+            } else if window.label() == shell::mini::MINI_LABEL {
+                shell::mini::on_event(window, event);
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -282,6 +288,10 @@ pub fn run() {
             commands::settings_get,
             commands::settings_set,
             commands::audio_devices,
+            commands::mini_toggle,
+            commands::mini_layout,
+            commands::mini_menu,
+            commands::main_show,
             window::window_vibrancy,
             startup::startup_notice,
         ])

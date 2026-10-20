@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { emitTo, listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type {
   Album,
   Artist,
@@ -126,6 +126,34 @@ export const windowVibrancy = () => call<boolean>('window_vibrancy');
 /** The one-time startup notice (a quarantined library file name), cleared once read. */
 export const startupNotice = () => call<string | null>('startup_notice');
 
+// Mini player and main window.
+
+/** The mini player's window label; `main.ts` mounts the mini player for it. */
+export const MINI_LABEL = 'mini';
+
+/** Where the player sits in the mini window: `top` logical px down (the Flow menu's room
+ *  is above it when that is not 0). */
+export interface MiniLayout {
+  top: number;
+}
+
+/** Shows the mini player bottom-right without taking focus, or hides it. */
+export const miniToggle = () => call<void>('mini_toggle');
+export const miniLayout = () => call<MiniLayout>('mini_layout');
+/** The mini player's Flow menu opened or closed (the window's shape follows). */
+export const miniMenu = (open: boolean) => call<void>('mini_menu', { open });
+/** Shows, restores and focuses the main window. */
+export const mainShow = () => call<void>('main_show');
+
+/** A place for the main window to go to (`nav://go`), sent from the mini player. */
+export interface NavTarget {
+  view: 'nowplaying';
+  param?: string;
+}
+
+/** Tells the main window to show `target`. */
+export const navGoMain = (target: NavTarget) => emitTo('main', 'nav://go', target);
+
 // Events.
 
 export const onPlayerState = (cb: (state: PlayerState) => void): Promise<UnlistenFn> =>
@@ -140,5 +168,9 @@ export const onFavoritesChanged = (cb: () => void): Promise<UnlistenFn> =>
   listen('favorites://changed', () => cb());
 export const onPlaylistsChanged = (cb: () => void): Promise<UnlistenFn> =>
   listen('playlists://changed', () => cb());
-export const onScanProgress = (cb: (progress: ScanProgress) => void): Promise<UnlistenFn> =>
+export const onNavGo = (cb: (target: NavTarget) => void): Promise<UnlistenFn> =>
+  listen<NavTarget>('nav://go', (event) => cb(event.payload));
+export const onMiniLayout = (cb: (layout: MiniLayout) => void): Promise<UnlistenFn> =>
+  listen<MiniLayout>('mini://layout', (event) => cb(event.payload));
+export const onScanProgress =(cb: (progress: ScanProgress) => void): Promise<UnlistenFn> =>
   listen<ScanProgress>('library://scan-progress', (event) => cb(event.payload));

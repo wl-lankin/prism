@@ -43,6 +43,13 @@ const en = {
   'transport.mute': 'Mute',
   'transport.unmute': 'Unmute',
 
+  'mini.label': 'Mini player',
+  'mini.open': 'Open Prism',
+  'mini.openNowPlaying': 'Show what is playing in Prism',
+  'mini.idleTitle': 'Ready when you are',
+  'mini.idleHint': 'Flow mixes your favorites from every source',
+  'mini.emptyLibrary': 'Your library is empty. Open Prism to add a music folder.',
+
   'flow.failed': 'Playback could not start: {message}',
   'flow.noFavorites': 'No favorites yet, so Flow plays your whole library.',
   'flow.menu': 'Start a Flow',
@@ -260,6 +267,13 @@ const de: Record<Key, string> = {
   'transport.volume': 'Lautstärke',
   'transport.mute': 'Stumm',
   'transport.unmute': 'Ton an',
+
+  'mini.label': 'Mini-Player',
+  'mini.open': 'Prism öffnen',
+  'mini.openNowPlaying': 'Laufenden Titel in Prism zeigen',
+  'mini.idleTitle': 'Bereit, wenn du es bist',
+  'mini.idleHint': 'Flow mischt deine Favoriten aus allen Quellen',
+  'mini.emptyLibrary': 'Deine Mediathek ist leer. Öffne Prism, um einen Musikordner hinzuzufügen.',
 
   'flow.failed': 'Wiedergabe konnte nicht starten: {message}',
   'flow.noFavorites': 'Noch keine Favoriten, daher spielt Flow deine ganze Mediathek.',

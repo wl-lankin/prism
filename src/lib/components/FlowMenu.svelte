@@ -18,7 +18,16 @@
     y,
     onclose,
     onpick,
-  }: { x: number; y: number; onclose: () => void; onpick?: (variant: FlowVariant) => void } = $props();
+    filterable = true,
+  }: {
+    x: number;
+    y: number;
+    onclose: () => void;
+    onpick?: (variant: FlowVariant) => void;
+    /** False where the window never takes keyboard focus (the mini player): the genre list
+     *  then has no filter field, which could not be typed into. */
+    filterable?: boolean;
+  } = $props();
 
   const MARGIN = 8;
 
@@ -44,11 +53,16 @@
   const playing = $derived(player.status === 'idle' ? null : player.flow);
 
   /** Centred on the point, above it when it fits there or has more room than below; never
-   *  past the window's edges (a short window caps the height and the genre list scrolls). */
+   *  past the window's edges (a short window caps the height and the genre list scrolls).
+   *  The decision uses the menu's full height: the cap from the last placement (or the 0 it
+   *  starts with) is lifted while measuring, or a menu would never flip below the point. */
   async function place() {
     await tick();
     if (!menu) return;
+    const cap = menu.style.maxHeight;
+    menu.style.maxHeight = 'none';
     const { width, height } = menu.getBoundingClientRect();
+    menu.style.maxHeight = cap;
     const above = y - 2 * MARGIN;
     const below = window.innerHeight - y - 2 * MARGIN;
     if (height <= above || above >= below) {
@@ -225,16 +239,20 @@
       <button type="button" class="back" aria-label={t('flow.back')} onclick={back}>
         <Icon name="back" size={16} />
       </button>
-      <input
-        bind:this={filterInput}
-        bind:value={filter}
-        class="filter"
-        type="text"
-        spellcheck="false"
-        autocomplete="off"
-        placeholder={t('flow.genreFilter')}
-        aria-label={t('flow.genreFilter')}
-      />
+      {#if filterable}
+        <input
+          bind:this={filterInput}
+          bind:value={filter}
+          class="filter"
+          type="text"
+          spellcheck="false"
+          autocomplete="off"
+          placeholder={t('flow.genreFilter')}
+          aria-label={t('flow.genreFilter')}
+        />
+      {:else}
+        <span class="heading">{t('flow.fromGenre')}</span>
+      {/if}
     </div>
     <div class="genres">
       {#if genres === null}
@@ -411,6 +429,15 @@
     color: var(--text);
     font: inherit;
     font-size: 13px;
+  }
+
+  .heading {
+    flex: 1;
+    min-width: 0;
+    padding: 0 6px;
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--text-dim);
   }
 
   .filter:focus {

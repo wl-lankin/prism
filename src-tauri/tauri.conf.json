@@ -31,6 +31,14 @@
       "csp": {
         "default-src": "'self'",
         "img-src": "'self' data: prism: http://prism.localhost",
+        "connect-src": "'self' ipc: http://ipc.localhost prism: http://prism.localhost",
+        "media-src": "'self' prism: http://prism.localhost",
+        "style-src": "'self' 'unsafe-inline'",
+        "script-src": "'self'"
+      },
+      "devCsp": {
+        "default-src": "'self'",
+        "img-src": "'self' data: prism: http://prism.localhost",
         "connect-src": "'self' ipc: http://ipc.localhost prism: http://prism.localhost ws://localhost:1441",
         "media-src": "'self' prism: http://prism.localhost",
         "style-src": "'self' 'unsafe-inline'",

@@ -37,6 +37,8 @@ pub struct MiniShape {
     pub bezel: f64,
     pub corner: f64,
     pub glow: f64,
+    /// Extra window height beside the player that the Flow menu opens into.
+    pub menu_room: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
@@ -677,8 +679,15 @@ mod tests {
                 ring: 76.0,
                 bezel: 6.0,
                 corner: 18.0,
-                glow: 22.0
+                glow: 22.0,
+                menu_room: 300.0
             }
         );
+        // The mini ring and its glow fit between the window's left edge and the card, and
+        // between the card's middle and the window's bottom edge.
+        let mini = parsed.mini;
+        let reach = mini.ring / 2.0 + mini.bezel + mini.glow;
+        assert!(reach <= mini.pad_left);
+        assert!(reach <= mini.pad_y + mini.height / 2.0);
     }
 }
