@@ -1,10 +1,10 @@
 <script lang="ts">
   import { open } from '@tauri-apps/plugin-dialog';
-  import logoUrl from '../../../assets/logo.svg';
   import { lang, t } from '../i18n';
   import { libraryAddFolder } from '../ipc';
   import { library, reloadLibrary } from '../stores/library.svelte';
   import Icon from './Icon.svelte';
+  import PrismIllustration from './PrismIllustration.svelte';
 
   /** Shown while the library has no tracks: one action, adding a music folder, and the scan
    *  progress right under it. */
@@ -39,8 +39,8 @@
 
 <div class="empty">
   <div class="panel">
-    <div class="mark" aria-hidden="true">
-      <img src={logoUrl} alt="" width="56" height="56" draggable="false" />
+    <div class="mark">
+      <PrismIllustration width={200} />
     </div>
     <h1>{t('library.emptyTitle')}</h1>
     <p class="lead">{t('library.emptyLead')}</p>
@@ -86,27 +86,7 @@
 
   /* The logo sits on a soft pool of the spectrum, the one bit of color on this screen. */
   .mark {
-    position: relative;
-    margin-bottom: 26px;
-  }
-
-  .mark::before {
-    content: '';
-    position: absolute;
-    inset: -18px;
-    border-radius: 50%;
-    background: conic-gradient(var(--spec-1), var(--spec-2), var(--spec-3), var(--spec-4), var(--spec-1));
-    filter: blur(26px);
-    opacity: 0.32;
-  }
-
-  .mark img {
-    position: relative;
-    display: block;
-    border-radius: 14px;
-    box-shadow:
-      0 0 0 1px rgba(255, 255, 255, 0.1),
-      0 12px 30px rgba(0, 0, 0, 0.5);
+    margin-bottom: 30px;
   }
 
   h1 {
