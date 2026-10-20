@@ -745,6 +745,11 @@ impl Engine {
     /// While a crossfade is configured, every source is decoded further ahead (its end must
     /// be decoded with more than the fade still to play) and the next track opens earlier.
     fn crossfade_changed(&mut self) {
+        // A next track skipped under the old settings is requested again (once per change;
+        // it is skipped again when the fade still does not apply).
+        if matches!(self.preload, Preload::Skipped) {
+            self.preload = Preload::None;
+        }
         let fade_ms = self.fade_ms();
         let target = if fade_ms > 0 {
             READ_AHEAD_MS.max(fade_ms.saturating_add(1_000))
@@ -879,10 +884,9 @@ impl Engine {
             Command::SetGapless(gapless) => {
                 self.gapless = gapless;
                 // A crossfade still needs the track opened early; without one, a track
-                // opened early is dropped and opens again once this one ends.
-                if !gapless {
-                    self.crossfade_changed();
-                }
+                // opened early is dropped and opens again once this one ends. Turned on, a
+                // skipped next track is opened again for a gapless hand-over.
+                self.crossfade_changed();
             }
             Command::UpdateTrack(track) => {
                 let track = *track;
@@ -935,6 +939,10 @@ impl Engine {
         let first = self.queue.len();
         self.queue.extend(ids);
         self.queue_changed();
+        if matches!(self.preload, Preload::Skipped) {
+            // The next track may be another one now: decide for it again.
+            self.preload = Preload::None;
+        }
         if self.ending && self.queue.jump(first) {
             self.failures = 0;
             self.start_current(false);
@@ -2841,6 +2849,58 @@ mod tests {
             2 * 2 * 88_200,
             "both tones whole, nothing blended"
         );
+        assert!(played
+            .iter()
+            .all(|s| (*s - TONE_A).abs() < 1e-6 || (*s - TONE_C).abs() < 1e-6));
+    }
+
+    #[test]
+    fn gapless_on_after_a_skipped_preload_hands_over_without_a_gap() {
+        let mut a = album_track("a", "x", 1);
+        a.duration_ms = 2_000;
+        let mut c = album_track("c", "x", 2);
+        c.duration_ms = 2_000;
+        let tracks = [a, c];
+        let resolver: Resolver =
+            Arc::new(move |id: &str| tracks.iter().find(|track| track.id == id).cloned());
+        let (preloaded_tx, preloaded) = crossbeam_channel::unbounded();
+        let tones = tone_opener(vec![("a", TONE_A, 2_000), ("c", TONE_C, 2_000)]);
+        let opener: Opener = Arc::new(move |track: &Track, spec: StreamSpec| {
+            let source = tones(track, spec);
+            if std::thread::current().name() == Some(OPENER_NEXT_THREAD) {
+                let _ = preloaded_tx.send(());
+            }
+            source
+        });
+        let options = PlayerOptions {
+            gapless: false,
+            ..crossfade_always(1_000)
+        };
+        let h = harness_full(resolver, 2.0, Some(opener), options);
+        h.player.play(ids(&["a", "c"]), 0).unwrap();
+        // The fade opens "c" early; the same-album change does not fade, so it is skipped.
+        preloaded
+            .recv_timeout(Duration::from_secs(5))
+            .expect("c is pre-opened for the fade");
+        std::thread::sleep(Duration::from_millis(50));
+        h.player.set_gapless(true).unwrap();
+        preloaded
+            .recv_timeout(Duration::from_secs(5))
+            .expect("c is opened again for the gapless hand-over");
+        let events = collect_until(&h.events, Duration::from_secs(10), back_to_idle);
+        assert_eq!(changes(&events), ids(&["a", "c"]));
+        let first = events
+            .iter()
+            .position(|e| matches!(e, PlayerEvent::TrackChanged(_)))
+            .unwrap();
+        assert!(
+            !events[first..]
+                .iter()
+                .any(|e| is_state(e, PlayerStatus::Loading)),
+            "c was handed over gaplessly, not loaded after a ended: {events:#?}"
+        );
+        let played = h.played.lock().unwrap().clone();
+        assert_eq!(played.len(), 2 * 2 * 88_200, "both tones whole");
         assert!(played
             .iter()
             .all(|s| (*s - TONE_A).abs() < 1e-6 || (*s - TONE_C).abs() < 1e-6));
