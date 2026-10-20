@@ -4,7 +4,8 @@
 //! settings is kept as `settings.json.bad` and the defaults are used instead.
 
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
@@ -29,6 +30,23 @@ pub enum ReplayGain {
     Album,
 }
 
+/// When tracks blend into each other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Crossfade {
+    Off,
+    /// Only where the album does not flow on by itself.
+    #[default]
+    Flow,
+    Always,
+}
+
+/// The crossfade length range in milliseconds.
+pub const CROSSFADE_MS_RANGE: std::ops::RangeInclusive<u32> = 1000..=8000;
+
+/// How long the volume has to stay put before it is written to disk.
+const VOLUME_WRITE_DELAY: Duration = Duration::from_millis(400);
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
@@ -40,6 +58,16 @@ pub struct Settings {
     /// Open the next track early so it starts without a gap.
     pub gapless: bool,
     pub replay_gain: ReplayGain,
+    pub crossfade: Crossfade,
+    /// 1000..=8000
+    pub crossfade_ms: u32,
+    /// Look up missing covers online.
+    pub cover_lookup: bool,
+    /// Keep the mini player above other windows.
+    pub mini_on_top: bool,
+    /// Global shortcut that shows the mini player.
+    pub mini_shortcut: String,
+    pub start_with_system: bool,
 }
 
 impl Default for Settings {
@@ -50,6 +78,12 @@ impl Default for Settings {
             output_device: None,
             gapless: true,
             replay_gain: ReplayGain::Off,
+            crossfade: Crossfade::Flow,
+            crossfade_ms: 4000,
+            cover_lookup: true,
+            mini_on_top: false,
+            mini_shortcut: "CommandOrControl+Alt+P".to_string(),
+            start_with_system: false,
         }
     }
 }
@@ -62,6 +96,12 @@ impl Settings {
         } else {
             Settings::default().volume
         };
+        self.crossfade_ms = self
+            .crossfade_ms
+            .clamp(*CROSSFADE_MS_RANGE.start(), *CROSSFADE_MS_RANGE.end());
+        if self.mini_shortcut.trim().is_empty() {
+            self.mini_shortcut = Settings::default().mini_shortcut;
+        }
         if self
             .output_device
             .as_deref()
@@ -73,16 +113,22 @@ impl Settings {
     }
 }
 
-/// A setting the player has to follow.
+/// A setting the player or the shell (tray, windows, shortcuts) has to follow.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Change {
     Volume(f32),
     OutputDevice(Option<String>),
     Gapless(bool),
     ReplayGain(ReplayGain),
+    Crossfade(Crossfade, u32),
+    CoverLookup(bool),
+    MiniOnTop(bool),
+    MiniShortcut(String),
+    StartWithSystem(bool),
 }
 
-/// The player-relevant differences from `before` to `after` (the language is the UI's).
+/// The differences from `before` to `after` that something has to follow (the language is
+/// the UI's).
 pub fn changes(before: &Settings, after: &Settings) -> Vec<Change> {
     let mut changes = Vec::new();
     if after.volume != before.volume {
@@ -97,16 +143,48 @@ pub fn changes(before: &Settings, after: &Settings) -> Vec<Change> {
     if after.replay_gain != before.replay_gain {
         changes.push(Change::ReplayGain(after.replay_gain));
     }
+    if after.crossfade != before.crossfade || after.crossfade_ms != before.crossfade_ms {
+        changes.push(Change::Crossfade(after.crossfade, after.crossfade_ms));
+    }
+    if after.cover_lookup != before.cover_lookup {
+        changes.push(Change::CoverLookup(after.cover_lookup));
+    }
+    if after.mini_on_top != before.mini_on_top {
+        changes.push(Change::MiniOnTop(after.mini_on_top));
+    }
+    if after.mini_shortcut != before.mini_shortcut {
+        changes.push(Change::MiniShortcut(after.mini_shortcut.clone()));
+    }
+    if after.start_with_system != before.start_with_system {
+        changes.push(Change::StartWithSystem(after.start_with_system));
+    }
     changes
 }
 
 /// The settings file and the values in it.
 pub struct SettingsStore {
     path: PathBuf,
-    current: Mutex<Settings>,
+    current: Arc<Mutex<Settings>>,
     /// Set when an existing file could not be read and could not be moved aside either:
     /// saving would overwrite it, so changes are refused.
     blocked: Option<String>,
+    volume_write: Arc<Mutex<VolumeWrite>>,
+}
+
+/// A remembered volume that is not on disk yet.
+#[derive(Default)]
+struct VolumeWrite {
+    /// When the helper thread writes it; `None` when nothing is waiting.
+    due: Option<Instant>,
+    thread_running: bool,
+}
+
+/// Locks, also after another thread panicked while holding the lock.
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
 }
 
 impl SettingsStore {
@@ -142,8 +220,9 @@ impl SettingsStore {
         };
         SettingsStore {
             path: path.to_path_buf(),
-            current: Mutex::new(current),
+            current: Arc::new(Mutex::new(current)),
             blocked,
+            volume_write: Arc::new(Mutex::new(VolumeWrite::default())),
         }
     }
 
@@ -187,10 +266,83 @@ impl SettingsStore {
             .context("invalid setting")?
             .sanitized();
         save(&self.path, &next)?;
+        // The file now holds everything, a remembered volume included.
+        lock(&self.volume_write).due = None;
         let changed = changes(&current, &next);
         *current = next.clone();
         apply(&changed);
         Ok(next)
+    }
+
+    /// Keeps `v` as the volume (clamped) and writes it to disk once it has stayed put for
+    /// 400 ms, on a helper thread (a slider drag sends many values). Call
+    /// [`SettingsStore::flush`] before the process ends to write a volume that is still
+    /// waiting.
+    pub fn remember_volume(&self, v: f32) {
+        if self.blocked.is_some() || !v.is_finite() {
+            return;
+        }
+        let volume = v.clamp(0.0, 1.0);
+        let mut current = lock(&self.current);
+        let mut pending = lock(&self.volume_write);
+        if current.volume == volume && pending.due.is_none() {
+            return;
+        }
+        current.volume = volume;
+        pending.due = Some(Instant::now() + VOLUME_WRITE_DELAY);
+        if pending.thread_running {
+            return;
+        }
+        pending.thread_running = true;
+        let path = self.path.clone();
+        let shared = Arc::clone(&self.current);
+        let volume_write = Arc::clone(&self.volume_write);
+        let spawned = std::thread::Builder::new()
+            .name("prism-settings".into())
+            .spawn(move || write_when_due(&path, &shared, &volume_write));
+        if let Err(err) = spawned {
+            eprintln!("starting the settings writer failed: {err}");
+            pending.thread_running = false;
+        }
+    }
+
+    /// Writes a remembered volume that is still waiting, now.
+    pub fn flush(&self) {
+        write_pending(&self.path, &self.current, &self.volume_write);
+    }
+}
+
+/// Saves the settings if a remembered volume is waiting. Takes the settings lock first, like
+/// `update`, so the two never interleave.
+fn write_pending(path: &Path, current: &Mutex<Settings>, volume_write: &Mutex<VolumeWrite>) {
+    let current = lock(current);
+    let mut pending = lock(volume_write);
+    if pending.due.take().is_none() {
+        return;
+    }
+    if let Err(err) = save(path, &current) {
+        eprintln!("saving the volume failed: {err:#}");
+    }
+}
+
+/// The helper thread: waits until the remembered volume is due, writes it, and ends once
+/// nothing is waiting.
+fn write_when_due(path: &Path, current: &Mutex<Settings>, volume_write: &Mutex<VolumeWrite>) {
+    loop {
+        let wait = {
+            let mut pending = lock(volume_write);
+            match pending.due {
+                None => {
+                    pending.thread_running = false;
+                    return;
+                }
+                Some(due) => due.checked_duration_since(Instant::now()),
+            }
+        };
+        match wait {
+            Some(wait) => std::thread::sleep(wait),
+            None => write_pending(path, current, volume_write),
+        }
     }
 }
 
@@ -231,6 +383,13 @@ mod tests {
         );
         assert_eq!(store.get().volume, 0.8);
         assert!(store.get().gapless);
+        let defaults = store.get();
+        assert_eq!(defaults.crossfade, Crossfade::Flow);
+        assert_eq!(defaults.crossfade_ms, 4000);
+        assert!(defaults.cover_lookup);
+        assert!(!defaults.mini_on_top);
+        assert_eq!(defaults.mini_shortcut, "CommandOrControl+Alt+P");
+        assert!(!defaults.start_with_system);
 
         let saved = store
             .set(json!({ "volume": 0.5, "replayGain": "album", "outputDevice": "Speakers" }))
@@ -373,6 +532,93 @@ mod tests {
         assert_eq!(std::fs::read(bad.join("marker")).unwrap(), b"keep");
         store.set(json!({ "gapless": false })).unwrap();
         assert!(path.is_file());
+    }
+
+    #[test]
+    fn crossfade_ms_is_clamped() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SettingsStore::load(&dir.path().join("settings.json"));
+        let ms = |value: u32| {
+            store
+                .set(json!({ "crossfadeMs": value }))
+                .unwrap()
+                .crossfade_ms
+        };
+        assert_eq!(ms(10), 1000);
+        assert_eq!(ms(60000), 8000);
+        assert_eq!(ms(2500), 2500);
+    }
+
+    #[test]
+    fn old_file_without_new_keys_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(
+            &path,
+            br#"{ "language": "de", "volume": 0.3, "outputDevice": "USB DAC", "gapless": false, "replayGain": "track" }"#,
+        )
+        .unwrap();
+        let settings = SettingsStore::load(&path).get();
+        assert_eq!(settings.language, Language::De);
+        assert_eq!(settings.volume, 0.3);
+        assert_eq!(settings.output_device.as_deref(), Some("USB DAC"));
+        assert!(!settings.gapless);
+        assert_eq!(settings.replay_gain, ReplayGain::Track);
+        let defaults = Settings::default();
+        assert_eq!(settings.crossfade, defaults.crossfade);
+        assert_eq!(settings.crossfade_ms, defaults.crossfade_ms);
+        assert_eq!(settings.cover_lookup, defaults.cover_lookup);
+        assert_eq!(settings.mini_on_top, defaults.mini_on_top);
+        assert_eq!(settings.mini_shortcut, defaults.mini_shortcut);
+        assert_eq!(settings.start_with_system, defaults.start_with_system);
+    }
+
+    #[test]
+    fn remembered_volume_is_flushed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let store = SettingsStore::load(&path);
+        store.remember_volume(0.3);
+        assert_eq!(store.get().volume, 0.3, "kept in memory at once");
+        store.flush();
+        assert_eq!(SettingsStore::load(&path).get().volume, 0.3);
+    }
+
+    #[test]
+    fn remembered_volume_is_written_after_the_delay() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let store = SettingsStore::load(&path);
+        store.remember_volume(0.2);
+        store.remember_volume(0.6);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !path.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(SettingsStore::load(&path).get().volume, 0.6);
+    }
+
+    #[test]
+    fn changes_lists_the_shell_settings() {
+        let before = Settings::default();
+        let after = Settings {
+            crossfade_ms: 2000,
+            cover_lookup: false,
+            mini_on_top: true,
+            mini_shortcut: "Ctrl+Shift+M".into(),
+            start_with_system: true,
+            ..Settings::default()
+        };
+        assert_eq!(
+            changes(&before, &after),
+            vec![
+                Change::Crossfade(Crossfade::Flow, 2000),
+                Change::CoverLookup(false),
+                Change::MiniOnTop(true),
+                Change::MiniShortcut("Ctrl+Shift+M".into()),
+                Change::StartWithSystem(true),
+            ]
+        );
     }
 
     #[test]

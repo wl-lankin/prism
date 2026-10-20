@@ -15,6 +15,7 @@ use crate::library::watch::{FolderWatcher, WatchState};
 use crate::library::{normalize, tauri_emitter, Library};
 use crate::player::PlayerState;
 use crate::settings::{Change, Settings};
+use crate::shell;
 use crate::AppState;
 
 /// Upper bound for `library_search` and `library_tracks_range` page sizes.
@@ -98,6 +99,7 @@ pub fn player_seek(state: State<'_, AppState>, ms: u64) -> Result<(), String> {
 
 #[tauri::command]
 pub fn player_set_volume(state: State<'_, AppState>, v: f32) -> Result<(), String> {
+    state.settings.remember_volume(v);
     state.player.set_volume(v)
 }
 
@@ -213,7 +215,8 @@ pub fn settings_get(state: State<'_, AppState>) -> Result<Settings, String> {
     Ok(state.settings.get())
 }
 
-/// Merges `patch` into the settings, saves them and applies what changed to the player.
+/// Merges `patch` into the settings, saves them and applies what changed to the player (or,
+/// for the shell settings, to `shell::apply_setting`).
 /// The player commands are sent while the settings are locked, so concurrent calls (a
 /// debounced volume save during a device pick) reach the player once each and in order.
 #[tauri::command]
@@ -227,6 +230,8 @@ pub async fn settings_set(app: AppHandle, patch: serde_json::Value) -> Result<Se
                     Change::OutputDevice(device) => state.player.set_device(device.clone()),
                     Change::Gapless(gapless) => state.player.set_gapless(*gapless),
                     Change::ReplayGain(mode) => state.player.set_replay_gain(*mode),
+                    Change::Crossfade(mode, ms) => state.player.set_crossfade(*mode, *ms),
+                    other => shell::apply_setting(&app, other),
                 };
                 if let Err(err) = sent {
                     eprintln!("applying a setting failed: {err}");

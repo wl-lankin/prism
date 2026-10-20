@@ -86,6 +86,7 @@ export interface PlayerState {
 
 export type LanguagePref = 'system' | 'en' | 'de';
 export type ReplayGainMode = 'off' | 'track' | 'album';
+export type CrossfadeMode = 'off' | 'flow' | 'always';
 
 /** `<appConfig>/settings.json`, as `settings_get` / `settings_set` return it. */
 export interface Settings {
@@ -96,6 +97,14 @@ export interface Settings {
   outputDevice: string | null;
   gapless: boolean;
   replayGain: ReplayGainMode;
+  crossfade: CrossfadeMode;
+  /** 1000..8000 */
+  crossfadeMs: number;
+  coverLookup: boolean;
+  miniOnTop: boolean;
+  /** A global shortcut in Tauri's accelerator syntax. */
+  miniShortcut: string;
+  startWithSystem: boolean;
 }
 
 export interface PlayerError {

@@ -6,6 +6,7 @@ pub mod media_controls;
 pub mod player;
 pub mod protocol;
 pub mod settings;
+pub mod shell;
 pub mod startup;
 pub mod tools;
 pub mod window;
@@ -200,8 +201,15 @@ pub fn run() {
             window::window_vibrancy,
             startup::startup_notice,
         ])
-        .run(tauri::generate_context!())
-        .unwrap_or_else(|err| fail_with(&anyhow::Error::new(err)));
+        .build(tauri::generate_context!())
+        .unwrap_or_else(|err| fail_with(&anyhow::Error::new(err)))
+        .run(|app, event| {
+            if let tauri::RunEvent::Exit = event {
+                if let Some(state) = app.try_state::<AppState>() {
+                    state.settings.flush();
+                }
+            }
+        });
 }
 
 #[cfg(test)]

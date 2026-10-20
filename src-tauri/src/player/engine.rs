@@ -16,7 +16,7 @@ use crate::audio::{
     open_source_with, AudioSource, Input, OutputFactory, Playback, PumpStatus, StreamSpec,
 };
 use crate::library::model::Track;
-use crate::settings::ReplayGain;
+use crate::settings::{Crossfade, ReplayGain};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -170,6 +170,8 @@ pub struct Player {
     commands: Sender<Command>,
     state: Arc<Mutex<PlayerState>>,
     thread: Option<JoinHandle<()>>,
+    /// The crossfade setting; kept for now, the engine does not blend tracks yet.
+    crossfade: Mutex<(Crossfade, u32)>,
 }
 
 impl Player {
@@ -220,6 +222,7 @@ impl Player {
             commands,
             state,
             thread,
+            crossfade: Mutex::new((Crossfade::Off, 0)),
         }
     }
 
@@ -273,6 +276,15 @@ impl Player {
     /// Applies at once to the playing track and the pre-opened next one.
     pub fn set_replay_gain(&self, mode: ReplayGain) -> Result<(), String> {
         self.send(Command::SetReplayGain(mode))
+    }
+
+    /// Stores the crossfade mode and length (ms). Has no effect on playback yet.
+    pub fn set_crossfade(&self, mode: Crossfade, ms: u32) -> Result<(), String> {
+        match self.crossfade.lock() {
+            Ok(mut stored) => *stored = (mode, ms),
+            Err(poisoned) => *poisoned.into_inner() = (mode, ms),
+        }
+        Ok(())
     }
 
     /// The latest state, as the engine published it.
