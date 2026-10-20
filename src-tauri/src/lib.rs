@@ -153,6 +153,9 @@ pub fn run() {
             commands::settings_set,
             commands::audio_devices,
             window::window_vibrancy,
+            spike::spike_open_ytm,
+            spike::spike_open_google_signin,
+            spike::spike_ytm_probe,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Prism");
