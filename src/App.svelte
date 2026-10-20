@@ -13,6 +13,7 @@
   import SearchPalette from './lib/components/SearchPalette.svelte';
   import Settings from './lib/components/Settings.svelte';
   import Sidebar from './lib/components/Sidebar.svelte';
+  import ResizeBand from './lib/components/ResizeBand.svelte';
   import SongList from './lib/components/SongList.svelte';
   import TitleBar from './lib/components/TitleBar.svelte';
   import TransportStrip from './lib/components/TransportStrip.svelte';
@@ -26,10 +27,25 @@
   import { notice, notify } from './lib/stores/notice.svelte';
   import { initPlayer, player } from './lib/stores/player.svelte';
   import { initSettings } from './lib/stores/settings.svelte';
+  import { initWindow, windowState } from './lib/stores/window.svelte';
+  import shape from './lib/window-shape.json';
 
-  /** The Flow ring hangs half out below the app's bottom edge, into the transparent strip
-   *  at the bottom of the window. */
-  const RING = 96;
+  /** The window's shape, shared with the backend's click-through region. The Flow ring hangs
+   *  half out below the card's bottom edge, into the transparent strip at the bottom of the
+   *  window. A maximized window has no strip: the ring, smaller, sits inside the transport. */
+  const MAIN = shape.main;
+  /** The transport strip's height (`TransportStrip`). */
+  const TRANSPORT = 84;
+  /** The notice floats this far above the card's bottom edge, clear of the seek rail. */
+  const NOTICE_LIFT = TRANSPORT + 20;
+
+  const maximized = $derived(windowState.maximized);
+  const ring = $derived(maximized ? MAIN.ringMaximized : MAIN.ring);
+  const strip = $derived(maximized ? 0 : MAIN.strip);
+  /** The ring dock's bottom, measured from the window's bottom edge. */
+  const dockBottom = $derived(maximized ? (TRANSPORT - ring) / 2 : MAIN.ringRoom);
+  /** The dock's top above the card's bottom edge, for the notice above it. */
+  const dockTop = $derived(maximized ? dockBottom + ring : ring / 2);
   const isMac = typeof navigator !== 'undefined' && /Mac/.test(navigator.platform || navigator.userAgent);
 
   let glass = $state(false);
@@ -63,6 +79,22 @@
     initFavorites()
       .then((cleanup) => (gone ? cleanup() : (stop = cleanup)))
       .catch((err) => console.error('loading the favorites failed', err));
+    return () => {
+      gone = true;
+      stop?.();
+    };
+  });
+
+  $effect(() => {
+    let stop: (() => void) | undefined;
+    let gone = false;
+    try {
+      initWindow()
+        .then((unlisten) => (gone ? unlisten() : (stop = unlisten)))
+        .catch(() => {});
+    } catch {
+      // Not inside Tauri (tests).
+    }
     return () => {
       gone = true;
       stop?.();
@@ -169,11 +201,20 @@
   <ViewHead title={t('nav.albums')} meta={tc('view.count.albums', library.albums?.length ?? 0)} />
 {/snippet}
 
-<div class="window" class:glass data-tauri-drag-region style="--ring-size:{RING}px">
+<div
+  class="window"
+  class:glass
+  class:maximized
+  data-tauri-drag-region
+  style="--strip:{strip}px;--corner:{maximized ? 0 : MAIN.corner}px"
+>
   <!-- First in the DOM so the main control comes early in the tab order; placed by CSS. -->
-  <div class="ring-dock" style="--ring:{RING}px">
+  <div
+    class="ring-dock"
+    style="--ring:{ring}px;--bezel:{MAIN.bezel}px;--dock-bottom:{dockBottom}px;--notice-lift:{NOTICE_LIFT - dockTop}px"
+  >
     <div class="notice" class:shown={notice.text} role="status" aria-live="polite">{notice.text ?? ''}</div>
-    <FlowRing {mode} {progress} size={RING} onactivate={activate} />
+    <FlowRing {mode} {progress} size={ring} onactivate={activate} />
   </div>
 
   <div class="card">
@@ -232,8 +273,11 @@
     </main>
 
     <div class="transport">
-      <TransportStrip ringGap={RING + 44} />
+      <TransportStrip ringGap={ring + 44} ringInside={maximized} />
     </div>
+
+    <!-- The strip below the card is click-through, so the card's bottom edge resizes. -->
+    <ResizeBand gap={ring + 2 * MAIN.bezel} />
 
     {#if dragging}
       <div class="drop" aria-hidden="true">
@@ -267,15 +311,15 @@
   }
 
   /* The app card fills the window's width and top; there is no frame around it, so it never
-     reads as a window inside a window. Below the card a transparent strip lets the Flow ring
-     hang half out of the card's bottom edge; it is half a ring high plus room for the ring's
-     bezel and glow, so nothing is cut off at the window edge. */
+     reads as a window inside a window. Below the card a transparent strip (`--strip`, from
+     window-shape.json) lets the Flow ring hang half out of the card's bottom edge; it is half
+     a ring high plus room for the ring's bezel and glow, so nothing is cut off at the window
+     edge. The backend makes the strip click-through beside the ring. A maximized window has
+     no strip and square corners. */
   .window {
-    --ring-room: 48px;
-    --frame-bottom: calc(var(--ring-size) / 2 + var(--ring-room));
     position: fixed;
     inset: 0;
-    padding-bottom: var(--frame-bottom);
+    padding-bottom: var(--strip);
     background: transparent;
     user-select: none;
     -webkit-user-select: none;
@@ -289,7 +333,7 @@
     grid-template-rows: minmax(0, 1fr) auto;
     /* The window has no OS frame or shadow (that would paint the transparent strip), so the
        card draws its own rounded corners and edge. */
-    border-radius: var(--radius-l);
+    border-radius: var(--corner);
     background: var(--surface);
     box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.07);
     overflow: hidden;
@@ -434,23 +478,24 @@
     position: absolute;
     left: 50%;
     /* Centred on the card's bottom edge: the upper half sits in the transport strip, the
-       lower half hangs out of the app into the transparent strip below. */
-    bottom: var(--ring-room);
+       lower half hangs out of the app into the transparent strip below. Maximized, it is
+       centred in the transport strip instead. */
+    bottom: var(--dock-bottom);
     width: var(--ring);
     height: var(--ring);
     transform: translateX(-50%);
     z-index: 3;
     border-radius: 50%;
     /* A dark bezel, so the ring reads as set into the card's edge. */
-    box-shadow: 0 0 0 6px var(--bg);
+    box-shadow: 0 0 0 var(--bezel) var(--bg);
     background: var(--bg);
   }
 
   /* Always in the DOM as a live region; only its text changes. It floats above the seek
-     rail (the strip is 84 px, the ring's upper half 42 px of it). */
+     rail, at the same height whether the ring hangs out or sits inside the strip. */
   .notice {
     position: absolute;
-    bottom: calc(100% + 42px + 14px);
+    bottom: calc(100% + var(--notice-lift));
     left: 50%;
     transform: translate(-50%, 4px);
     pointer-events: none;

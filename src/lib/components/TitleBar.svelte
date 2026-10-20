@@ -2,37 +2,15 @@
   import type { Snippet } from 'svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { t } from '../i18n';
+  import { windowState } from '../stores/window.svelte';
   import Icon from './Icon.svelte';
 
   /** The drag strip at the top of the content column, with min / max / close on the right.
    *  `children` renders on the left (view title, search) and stays clickable. */
   let { children }: { children?: Snippet } = $props();
 
-  let maximized = $state(false);
-
-  $effect(() => {
-    let stop: (() => void) | undefined;
-    let gone = false;
-    try {
-      const win = getCurrentWindow();
-      const sync = () =>
-        win
-          .isMaximized()
-          .then((value) => (maximized = value))
-          .catch(() => {});
-      sync();
-      win
-        .onResized(sync)
-        .then((unlisten) => (gone ? unlisten() : (stop = unlisten)))
-        .catch(() => {});
-    } catch {
-      // Not inside Tauri (tests): the controls render but do nothing.
-    }
-    return () => {
-      gone = true;
-      stop?.();
-    };
-  });
+  /** Followed by the shared window store, which `App` starts. */
+  const maximized = $derived(windowState.maximized);
 
   function act(action: 'minimize' | 'toggleMaximize' | 'close') {
     try {

@@ -2,10 +2,13 @@
 //! hangs half out below the card's bottom edge into the transparent strip under it. Nothing
 //! of the system may show in that strip or around the card: no glass material (Mica, macOS
 //! vibrancy), no window shadow (config), and on Windows 11 no DWM border, rounded system
-//! corners or backdrop.
+//! corners or backdrop. Clicks on the strip beside the ring go through to what is behind the
+//! window (`shell::shape`).
 
 use tauri::window::Color;
-use tauri::{Manager, State};
+use tauri::{Manager, State, WindowEvent};
+
+use crate::shell::shape;
 
 /// Whether the main window got a native glass material. Always false now; kept so the
 /// frontend can ask, and so a material can return later without an IPC change.
@@ -62,8 +65,35 @@ pub fn setup(app: &tauri::App) {
         if let Err(err) = window.set_background_color(Some(Color(0, 0, 0, 0))) {
             eprintln!("clearing the window background failed: {err}");
         }
+        shape::reshape_main(&window);
     }
     app.manage(Vibrancy(false));
+}
+
+/// Keeps the main window's click-through shape in step with its size, scale and state
+/// (a maximized window has no strip, so no shape). Focus also re-applies it, which restarts
+/// the macOS cursor tracker after the window was hidden; moves refresh the tracker's cached
+/// position.
+pub fn on_main_event(window: &tauri::Window, event: &WindowEvent) {
+    let (reshape, moved) = match event {
+        WindowEvent::Resized(_) => (true, false),
+        WindowEvent::ScaleFactorChanged { .. } => (true, true),
+        WindowEvent::Moved(_) => (false, true),
+        WindowEvent::Focused(focused) => (cfg!(target_os = "macos") && *focused, false),
+        _ => (false, false),
+    };
+    if !reshape && !moved {
+        return;
+    }
+    let Some(window) = window.get_webview_window(window.label()) else {
+        return;
+    };
+    if moved {
+        shape::moved(&window);
+    }
+    if reshape {
+        shape::reshape_main(&window);
+    }
 }
 
 /// True when the window has a glass material, so the page may paint a translucent frame.

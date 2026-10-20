@@ -1,5 +1,7 @@
 //! The shell around the player: tray, mini player, shortcuts and autostart.
 
+pub mod shape;
+
 use tauri::AppHandle;
 
 use crate::settings::Change;

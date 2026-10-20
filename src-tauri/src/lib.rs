@@ -184,6 +184,11 @@ pub fn run() {
             Ok(()) => Ok(()),
             Err(err) => fail_with(&err),
         })
+        .on_window_event(|window, event| {
+            if window.label() == "main" {
+                window::on_main_event(window, event);
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             commands::player_play,
             commands::player_toggle,

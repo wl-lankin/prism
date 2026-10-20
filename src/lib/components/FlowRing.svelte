@@ -138,7 +138,10 @@
     border-radius: 50%;
   }
 
-  /* The spectrum, blurred, under everything: the ring's light on the window. */
+  /* The spectrum, blurred, under everything: the ring's light on the window. Its reach
+     (blur, inset, offset) sets the `glow` values in window-shape.json: the transparent
+     window's click-through shape keeps that much room around the ring, so measure the glow
+     again and update the JSON when changing it. */
   .glow {
     inset: 10%;
     background: conic-gradient(from var(--spin), var(--c1), var(--c2), var(--c3), var(--c4), var(--c1));

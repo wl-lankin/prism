@@ -1,0 +1,4 @@
+{
+  "main": { "strip": 96, "ring": 96, "ringRoom": 48, "bezel": 6, "corner": 16, "glow": 36, "ringMaximized": 72 },
+  "mini": { "padLeft": 66, "padY": 22, "width": 310, "height": 92, "ring": 76, "bezel": 6, "corner": 18, "glow": 22 }
+}

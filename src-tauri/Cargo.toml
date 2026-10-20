@@ -37,12 +37,12 @@ rtrb = "0.4.0"
 rubato = "5.0.1"
 crossbeam-channel = "0.5.17"
 souvlaki = "0.8.3"
-window-vibrancy = "0.8.1"
 rand = "0.9"
 
 [target.'cfg(windows)'.dependencies]
-# DWM attributes for the transparent main window (no border, no rounded system corners, no backdrop).
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Graphics_Dwm"] }
+# DWM attributes for the transparent main window (no border, no rounded system corners, no
+# backdrop) and GDI for its window region (the click-through strip).
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi"] }
 
 [profile.release]
 opt-level = 3
