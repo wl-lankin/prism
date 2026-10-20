@@ -38,6 +38,10 @@ crossbeam-channel = "0.5.17"
 souvlaki = "0.8.3"
 window-vibrancy = "0.8.1"
 
+[target.'cfg(windows)'.dependencies]
+# DWM attributes for the transparent main window (no border, no rounded system corners, no backdrop).
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm"] }
+
 [profile.release]
 opt-level = 3
 lto = true
