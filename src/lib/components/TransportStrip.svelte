@@ -2,6 +2,7 @@
   import { formatDuration, qualityLabel } from '../format';
   import { t } from '../i18n';
   import { playerNext, playerPrev, playerSeek, playerSetVolume } from '../ipc';
+  import { back, go, nav } from '../stores/nav.svelte';
   import { player } from '../stores/player.svelte';
   import Cover from './Cover.svelte';
   import Heart from './Heart.svelte';
@@ -33,6 +34,14 @@
     playerSetVolume(v).catch(report('setting the volume'));
   }
 
+  /** The cover and title open Now Playing; on it, they go back to where you were. */
+  const openLabel = $derived(nav.view === 'nowplaying' ? t('nowPlaying.close') : t('nowPlaying.open'));
+
+  function toggleNowPlaying() {
+    if (nav.view === 'nowplaying') back();
+    else go('nowplaying');
+  }
+
   function toggleMute() {
     if (muted) setVolume(lastVolume > 0.001 ? lastVolume : 0.5);
     else {
@@ -62,13 +71,20 @@
   </div>
 
   <div class="now">
-    <Cover coverId={track?.coverId ?? null} size={48} alt="" />
+    {#if idle}
+      <Cover coverId={track?.coverId ?? null} size={48} alt="" />
+    {:else}
+      <!-- The title below is the keyboard stop; the cover is the same target for the pointer. -->
+      <button type="button" class="open cover" tabindex="-1" aria-label={openLabel} title={openLabel} onclick={toggleNowPlaying}>
+        <Cover coverId={track?.coverId ?? null} size={48} alt="" />
+      </button>
+    {/if}
     <div class="meta">
       {#if idle}
         <div class="title">{t('transport.idleTitle')}</div>
         <div class="sub">{t('transport.idleHint')}</div>
       {:else if track}
-        <div class="title" title={track.title}>{track.title}</div>
+        <button type="button" class="open title" title={openLabel} aria-pressed={nav.view === 'nowplaying'} onclick={toggleNowPlaying}>{track.title}</button>
         <div class="sub" title={track.artist}>
           {player.status === 'loading' ? t('transport.loading') : track.artist}
         </div>
@@ -151,6 +167,47 @@
     font-size: 13.5px;
     font-weight: 600;
     letter-spacing: -0.005em;
+  }
+
+  .open {
+    padding: 0;
+    border: 0;
+    background: none;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+  }
+
+  .open.title {
+    display: block;
+    max-width: 100%;
+    text-align: left;
+    font-size: 13.5px;
+    font-weight: 600;
+    text-decoration: underline;
+    text-decoration-color: transparent;
+    text-underline-offset: 3px;
+    transition: text-decoration-color var(--dur) ease-out;
+  }
+
+  .open.title:hover {
+    text-decoration-color: rgba(243, 243, 245, 0.4);
+  }
+
+  .open.cover {
+    flex: none;
+    border-radius: var(--radius-s);
+    transition: transform var(--dur) ease-out;
+  }
+
+  .open.cover:hover {
+    transform: scale(1.04);
+  }
+
+  .open:focus-visible {
+    outline: 2px solid var(--spec-4);
+    outline-offset: 2px;
+    border-radius: 4px;
   }
 
   .sub {

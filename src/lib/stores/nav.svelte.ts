@@ -7,6 +7,7 @@ export type View =
   | 'songs'
   | 'album'
   | 'artist'
+  | 'nowplaying'
   | 'settings';
 
 export interface Nav {

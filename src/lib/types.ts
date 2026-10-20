@@ -93,7 +93,11 @@ export interface PlayerState {
   queueLength: number;
   /** Bumped whenever the queue's ids change (not when only the position moves). */
   queueVersion: number;
+  /** The Flow variant while the queue is a Flow session; null or absent outside Flow. */
+  flow?: FlowVariant | null;
 }
+
+export type FlowVariant = { kind: 'favorites' } | { kind: 'library' } | { kind: 'genre'; genre: string };
 
 export type LanguagePref = 'system' | 'en' | 'de';
 export type ReplayGainMode = 'off' | 'track' | 'album';

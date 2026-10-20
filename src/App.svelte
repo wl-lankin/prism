@@ -9,6 +9,7 @@
   import FavoritesView from './lib/components/FavoritesView.svelte';
   import FlowRing, { type RingMode } from './lib/components/FlowRing.svelte';
   import Icon from './lib/components/Icon.svelte';
+  import NowPlaying from './lib/components/NowPlaying.svelte';
   import SearchPalette from './lib/components/SearchPalette.svelte';
   import Settings from './lib/components/Settings.svelte';
   import Sidebar from './lib/components/Sidebar.svelte';
@@ -157,6 +158,7 @@
     songs: 'nav.songs',
     album: 'nav.albums',
     artist: 'nav.artists',
+    nowplaying: 'nowPlaying.title',
     settings: 'nav.settings',
   };
 </script>
@@ -215,6 +217,8 @@
               <Settings />
             {:else if nav.view === 'favorites'}
               <FavoritesView />
+            {:else if nav.view === 'nowplaying'}
+              <NowPlaying />
             {:else}
               <!-- Playlists arrive in a later version. -->
               <div class="placeholder">
