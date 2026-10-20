@@ -33,6 +33,19 @@
     { label: 'source.youtube', dot: 'var(--src-youtube)', soon: true },
     { label: 'source.radio', dot: 'var(--src-radio)', soon: true },
   ];
+
+  /** The "Coming soon" pill floats beside the hovered or keyboard-focused disabled entry. It
+   *  lives outside the scrolling list, whose overflow and fade mask would cut it off. */
+  let pill = $state({ shown: false, delayed: false, x: 0, y: 0 });
+
+  function showPill(event: Event, delayed: boolean) {
+    const box = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    pill = { shown: true, delayed, x: box.right + 8, y: box.top + box.height / 2 };
+  }
+
+  function hidePill() {
+    pill.shown = false;
+  }
 </script>
 
 {#snippet entry(item: Item)}
@@ -46,6 +59,12 @@
       aria-current={active ? 'page' : undefined}
       aria-disabled={item.soon ? 'true' : undefined}
       onclick={() => item.view && !item.soon && go(item.view)}
+      onpointerenter={item.soon ? (event) => showPill(event, true) : undefined}
+      onpointerleave={item.soon ? hidePill : undefined}
+      onfocus={item.soon
+        ? (event) => (event.currentTarget as HTMLElement).matches(':focus-visible') && showPill(event, false)
+        : undefined}
+      onblur={item.soon ? hidePill : undefined}
     >
       {#if item.icon}
         <Icon name={item.icon} size={18} />
@@ -54,8 +73,8 @@
       {/if}
       <span class="label">{t(item.label)}</span>
       {#if item.soon}
-        <!-- Always in the accessible name; shown on hover and keyboard focus. -->
-        <span class="tip">{t('nav.comingSoon')}</span>
+        <!-- Always in the accessible name; the visible pill is the floating .soon-tip. -->
+        <span class="sr-only">{t('nav.comingSoon')}</span>
       {/if}
     </button>
   </li>
@@ -69,7 +88,7 @@
     </button>
   </div>
 
-  <div class="scroll">
+  <div class="scroll" onscroll={hidePill}>
     <ul>
       {#each top as item (item.label)}{@render entry(item)}{/each}
     </ul>
@@ -88,6 +107,14 @@
   <ul class="foot">
     {@render entry({ label: 'nav.settings', icon: 'settings', view: 'settings', match: ['settings'] })}
   </ul>
+
+  <span
+    class="soon-tip"
+    class:shown={pill.shown}
+    class:delayed={pill.delayed}
+    style="left:{pill.x}px; top:{pill.y}px"
+    aria-hidden="true">{t('nav.comingSoon')}</span
+  >
 </nav>
 
 <style>
@@ -182,6 +209,8 @@
     margin: 0;
     padding: 0;
     display: grid;
+    /* Without it the column grows to the entries' unwrapped width and overflows the list. */
+    grid-template-columns: minmax(0, 1fr);
     gap: 1px;
   }
 
@@ -260,11 +289,22 @@
     box-shadow: none;
   }
 
-  /* "Coming soon": a pill at the end of a disabled entry. It lives inside the entry, so the
-     scrolling list never clips it, and it is part of the accessible name even while hidden. */
-  .tip {
-    margin-left: auto;
-    flex: none;
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  /* "Coming soon": a pill right beside a disabled entry, over the main area. Fixed, outside
+     the scrolling list, so neither its overflow nor its fade mask cuts the label off. */
+  .soon-tip {
+    position: fixed;
+    z-index: 4;
     padding: 3px 7px;
     border-radius: 6px;
     background: var(--raised);
@@ -274,19 +314,18 @@
     white-space: nowrap;
     pointer-events: none;
     opacity: 0;
-    transform: translateX(-4px);
+    transform: translate(-4px, -50%);
     transition:
       opacity var(--dur) ease-out,
       transform var(--dur) ease-out;
   }
 
-  .item.soon:hover .tip,
-  .item.soon:focus-visible .tip {
+  .soon-tip.shown {
     opacity: 1;
-    transform: none;
+    transform: translate(0, -50%);
   }
 
-  .item.soon:hover .tip {
+  .soon-tip.shown.delayed {
     transition-delay: 250ms;
   }
 

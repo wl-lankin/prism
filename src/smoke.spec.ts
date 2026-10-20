@@ -51,6 +51,29 @@ it('puts the ring first in the tab order and names disabled entries', () => {
   unmount(app);
 });
 
+it('shows the coming-soon pill outside the clipping sidebar list on hover', () => {
+  setLang('de');
+  const target = document.createElement('div');
+  const app = mount(App, { target });
+  flushSync();
+  const navidrome = [...target.querySelectorAll<HTMLElement>('.item')].find((b) => b.textContent?.includes('Navidrome'));
+  expect(navidrome?.textContent).toContain('Kommt bald');
+  const pill = target.querySelector('.soon-tip');
+  expect(pill).not.toBeNull();
+  expect(pill?.closest('.scroll')).toBeNull();
+  expect(pill?.getAttribute('aria-hidden')).toBe('true');
+  expect(pill?.classList.contains('shown')).toBe(false);
+  navidrome?.dispatchEvent(new PointerEvent('pointerenter'));
+  flushSync();
+  expect(pill?.classList.contains('shown')).toBe(true);
+  expect(pill?.textContent).toBe('Kommt bald');
+  navidrome?.dispatchEvent(new PointerEvent('pointerleave'));
+  flushSync();
+  expect(pill?.classList.contains('shown')).toBe(false);
+  unmount(app);
+  setLang('en');
+});
+
 it('switches the strings with the language', async () => {
   setLang('de');
   const target = document.createElement('div');
