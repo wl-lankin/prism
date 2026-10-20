@@ -296,6 +296,33 @@ it('asks for a failed song page again while it is in view', async () => {
   }
 });
 
+it('stops asking for a failing song page after three attempts', async () => {
+  const impl = invoke.getMockImplementation()!;
+  invoke.mockImplementation(async (cmd, args) => {
+    if (cmd === 'library_tracks_range') throw new Error('busy');
+    return impl(cmd, args);
+  });
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  try {
+    library.trackCount = 50;
+    library.version++;
+    const app = mount(SongList, { target });
+    await frame();
+    await settle();
+    for (let i = 0; i < 5; i++) {
+      vi.advanceTimersByTime(1500);
+      await settle();
+      await frame();
+      await settle();
+    }
+    expect(invoke.mock.calls.filter(([cmd]) => cmd === 'library_tracks_range')).toHaveLength(3);
+    unmount(app);
+  } finally {
+    vi.useRealTimers();
+    invoke.mockImplementation(impl);
+  }
+});
+
 it('renders a favorite heart as pressed and toggles it on click', async () => {
   const { default: Heart } = await import('./Heart.svelte');
   const { favorites } = await import('../stores/favorites.svelte');
@@ -479,6 +506,19 @@ describe('Track menu', () => {
     unmount(app);
   });
 
+  it('closes when Tab leaves the new playlist name field', async () => {
+    const { app, onclose } = await trackMenu();
+    item('Add to playlist')!.click();
+    flushSync();
+    item('New playlist...')!.click();
+    flushSync();
+    const input = target.querySelector<HTMLInputElement>('.menu input')!;
+    key(input, 'Tab');
+    expect(onclose).toHaveBeenCalled();
+    expect(invoke).not.toHaveBeenCalledWith('playlist_create', expect.anything());
+    unmount(app);
+  });
+
   it('offers the favorite, album and artist only where they apply', async () => {
     const { favorites } = await import('../stores/favorites.svelte');
     favorites.tracks.clear();
@@ -567,12 +607,61 @@ describe('Playlist view', () => {
     key(list, 'ArrowDown');
     list.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', altKey: true, bubbles: true }));
     flushSync();
-    expect(invoke).toHaveBeenCalledWith('playlist_move', { id: 1, from: 0, to: 1 });
     expect(list.getAttribute('aria-activedescendant')).toBe('pl-row-1');
     key(list, 'Delete');
     await settle();
+    expect(invoke).toHaveBeenCalledWith('playlist_move', { id: 1, from: 0, to: 1 });
     expect(invoke).toHaveBeenCalledWith('playlist_remove', { id: 1, positions: [1] });
     unmount(app);
+  });
+
+  it('sends quick moves one after the other and ignores a refetch that lands in between', async () => {
+    const { playlists } = await import('../stores/playlists.svelte');
+    const impl = invoke.getMockImplementation()!;
+    const held: (() => void)[] = [];
+    invoke.mockImplementation((cmd, args) => {
+      if (cmd === 'playlist_move') return new Promise((resolve) => held.push(() => resolve(undefined)));
+      return impl(cmd, args);
+    });
+    try {
+      const { app, list } = await playlistView();
+      const titles = () => [...list.querySelectorAll('[role="option"] .title')].map((el) => el.textContent);
+      const altDown = () =>
+        list.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', altKey: true, bubbles: true }));
+      key(list, 'ArrowDown');
+      altDown();
+      await settle();
+      const moves = () => invoke.mock.calls.filter(([cmd]) => cmd === 'playlist_move');
+      expect(moves()).toEqual([['playlist_move', { id: 1, from: 0, to: 1 }]]);
+
+      // The backend announces a change while the first move is still on its way: the list it
+      // serves (the old order) must not replace the order shown.
+      playlists.version++;
+      await settle();
+      expect(titles()).toEqual(['Not in your library', 'Song 1', 'Song 3']);
+
+      altDown();
+      await settle();
+      expect(titles()).toEqual(['Not in your library', 'Song 3', 'Song 1']);
+      // The second move waits for the first, and is computed against the list after it.
+      expect(moves()).toHaveLength(1);
+      held.shift()!();
+      await settle();
+      expect(moves()).toEqual([
+        ['playlist_move', { id: 1, from: 0, to: 1 }],
+        ['playlist_move', { id: 1, from: 1, to: 2 }],
+      ]);
+      expect(titles()).toEqual(['Not in your library', 'Song 3', 'Song 1']);
+
+      // Once the queue drains, the entries are fetched once more.
+      const fetches = invoke.mock.calls.filter(([cmd]) => cmd === 'playlist_entries').length;
+      held.shift()!();
+      await settle();
+      expect(invoke.mock.calls.filter(([cmd]) => cmd === 'playlist_entries')).toHaveLength(fetches + 1);
+      unmount(app);
+    } finally {
+      invoke.mockImplementation(impl);
+    }
   });
 
   it('plays from a double-clicked row, skipping missing entries', async () => {
@@ -580,6 +669,20 @@ describe('Playlist view', () => {
     target.querySelectorAll('[role="option"]')[2].dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
     await settle();
     expect(invoke).toHaveBeenCalledWith('player_play', { trackIds: ['local:t1', 'local:t3'], startIndex: 1 });
+    unmount(app);
+  });
+
+  it('does nothing on a double-click or Enter on a missing row', async () => {
+    const { app, list } = await playlistView();
+    invoke.mockClear();
+    const missing = target.querySelectorAll('[role="option"]')[1];
+    missing.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    missing.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    flushSync();
+    key(list, 'Enter');
+    await settle();
+    expect(invoke).not.toHaveBeenCalledWith('playlist_entries', expect.anything());
+    expect(invoke).not.toHaveBeenCalledWith('player_play', expect.anything());
     unmount(app);
   });
 });

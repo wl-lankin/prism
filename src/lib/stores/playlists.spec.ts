@@ -63,6 +63,12 @@ it('starts at the next playable entry when the chosen one is missing', async () 
   expect(invoke).toHaveBeenCalledWith('player_play', { trackIds: ['t1', 't3', 't4'], startIndex: 1 });
 });
 
+it('plays nothing when no playable entry comes at or after the given position', async () => {
+  invoke.mockImplementation(async (cmd: string) => (cmd === 'playlist_entries' ? entries('t1', 't2', null) : undefined));
+  await playPlaylist(4, 2);
+  expect(invoke).not.toHaveBeenCalledWith('player_play', expect.anything());
+});
+
 it('plays nothing and says so when no entry has a track', async () => {
   invoke.mockImplementation(async (cmd: string) => (cmd === 'playlist_entries' ? entries(null, null) : undefined));
   await playPlaylist(4);

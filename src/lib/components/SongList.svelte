@@ -36,11 +36,16 @@
   /** Bumped when a page arrives, so the rows re-read the cache. */
   let loaded = $state(0);
   /** Bumped a moment after a page failed: the pages in view are asked for again, so a failed
-   *  page comes back without the list having to scroll first. */
+   *  page comes back without the list having to scroll first. A page is tried at most
+   *  `MAX_ATTEMPTS` times; when the range changes, its count starts over. */
   let retry = $state(0);
   const RETRY_MS = 1500;
+  const MAX_ATTEMPTS = 3;
   let retryTimer: ReturnType<typeof setTimeout> | undefined;
   $effect(() => () => clearTimeout(retryTimer));
+  /** Failed attempts per `${version}:${page}`, for the range they were made in. */
+  const failures = new Map<string, number>();
+  let failuresRange = '';
 
   let menu = $state<TrackMenuState | null>(null);
 
@@ -57,10 +62,16 @@
    *  so a fast scroll does not ask for every page it crosses. */
   function ensure() {
     const version = library.version;
+    const now = `${version}:${range.start}:${range.end}`;
+    if (now !== failuresRange) {
+      failuresRange = now;
+      failures.clear();
+    }
     const needed = pagesFor(range.start, range.end, PAGE);
     for (const page of needed) {
       const key = `${version}:${page}`;
       if (pages.get(page)?.version === version || pending.has(key)) continue;
+      if ((failures.get(key) ?? 0) >= MAX_ATTEMPTS) continue;
       pending.add(key);
       libraryTracksRange(page * PAGE, PAGE)
         .then((tracks) => {
@@ -72,8 +83,12 @@
         })
         .catch((err) => {
           console.error('loading songs failed', err);
-          clearTimeout(retryTimer);
-          retryTimer = setTimeout(() => retry++, RETRY_MS);
+          const attempts = (failures.get(key) ?? 0) + 1;
+          failures.set(key, attempts);
+          if (attempts < MAX_ATTEMPTS) {
+            clearTimeout(retryTimer);
+            retryTimer = setTimeout(() => retry++, RETRY_MS);
+          }
         })
         .finally(() => pending.delete(key));
     }

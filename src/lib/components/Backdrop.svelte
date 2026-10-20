@@ -1,21 +1,41 @@
 <script lang="ts">
-  /** A cover, tiny and blurred far past recognition, tinting the top of a view. The square
-   *  source fills a small box with the header's own aspect (`background-size: cover`), which is
-   *  scaled up past the header's width and height: it covers the header at any width, and far
-   *  fewer pixels are blurred than in a full-size image. */
-  let { src, height = 520, spread = 1.3 }: { src: string; height?: number; spread?: number } = $props();
+  /** A cover, tiny and blurred far past recognition, tinting a view. The square source fills a
+   *  small box with the backdrop's own aspect (`background-size: cover`), which is scaled up past
+   *  the backdrop's width and height: it covers the area at any size, and far fewer pixels are
+   *  blurred than in a full-size image. A new source fades in. */
+  let {
+    src,
+    height,
+    spread = 1.3,
+  }: {
+    src: string;
+    /** A header band of this height at the top; without it the backdrop fills its parent. */
+    height?: number;
+    spread?: number;
+  } = $props();
 
   /** The small box's width before scaling. */
   const PX = 64;
   let width = $state(1000);
-  const boxHeight = $derived((PX * height) / Math.max(1, width));
+  let measured = $state(520);
+  const area = $derived(height ?? measured);
+  const boxHeight = $derived((PX * area) / Math.max(1, width));
 </script>
 
-<div class="backdrop" aria-hidden="true" style="height:{height}px" bind:clientWidth={width}>
-  <div
-    class="image"
-    style="background-image:url('{src}'); height:{boxHeight}px; margin-top:{-boxHeight / 2}px; --k:{(width * spread) / PX}"
-  ></div>
+<div
+  class="backdrop"
+  class:full={height === undefined}
+  aria-hidden="true"
+  style:height={height === undefined ? null : `${height}px`}
+  bind:clientWidth={width}
+  bind:clientHeight={measured}
+>
+  {#key src}
+    <div
+      class="image"
+      style="background-image:url('{src}'); height:{boxHeight}px; margin-top:{-boxHeight / 2}px; --k:{(width * spread) / PX}"
+    ></div>
+  {/key}
 </div>
 
 <style>
@@ -34,6 +54,18 @@
     );
   }
 
+  /* Behind a whole view: it never fades out completely. */
+  .backdrop.full {
+    inset: 0;
+    mask-image: linear-gradient(
+      to bottom,
+      rgba(0, 0, 0, 0.3) 0,
+      #000 90px,
+      rgba(0, 0, 0, 0.6) 62%,
+      rgba(0, 0, 0, 0.18) 100%
+    );
+  }
+
   .image {
     position: absolute;
     left: 50%;
@@ -47,6 +79,11 @@
     filter: blur(4px) saturate(1.35);
     opacity: 0.55;
     animation: fade var(--dur-l) ease-out;
+  }
+
+  .full .image {
+    filter: blur(4px) saturate(1.4);
+    opacity: 0.5;
   }
 
   @keyframes fade {

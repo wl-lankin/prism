@@ -47,9 +47,12 @@
     void library.version;
     void refresh;
     let gone = false;
+    const asked = changes;
     playlistEntries(id)
       .then((list) => {
-        if (gone) return;
+        // A change made since the request (or still on its way) would be undone by this
+        // list; the queue refetches once it has drained.
+        if (gone || pending > 0 || asked !== changes) return;
         entries = list ?? [];
         failed = null;
       })
@@ -144,16 +147,32 @@
 
   // Playing
 
+  /** Plays from row `i`; a dimmed row (not in the library) does nothing. */
   function play(i: number) {
     const entry = entries?.[i];
-    if (entry) void playPlaylist(playlistId, entry.position);
+    if (entry?.track) void playPlaylist(playlistId, entry.position);
   }
 
-  // Changing the order and removing. Both show at once; a refusal refetches the entries.
+  // Changing the order and removing. Both show at once and go to the backend one after the
+  // other, each computed against the list as the ones before it left it. While any is on its
+  // way, fetched lists are ignored; once the queue has drained the entries are fetched once.
 
-  function changeFailed(err: unknown) {
-    notify(t('playlist.changeFailed', { message: String(err) }));
-    refresh++;
+  /** Changes sent or waiting. */
+  let pending = 0;
+  /** Bumped by every change, so a fetch started before it is recognized as stale. */
+  let changes = 0;
+  let queue: Promise<void> = Promise.resolve();
+
+  function enqueue(send: () => Promise<void>) {
+    pending++;
+    changes++;
+    queue = queue
+      .then(send)
+      .catch((err) => notify(t('playlist.changeFailed', { message: String(err) })))
+      .finally(() => {
+        pending--;
+        if (pending === 0) refresh++;
+      });
   }
 
   function move(from: number, to: number) {
@@ -163,7 +182,8 @@
     next.splice(to, 0, moved);
     entries = next.map((entry, position) => ({ ...entry, position }));
     selected = to;
-    playlistMove(playlistId, from, to).catch(changeFailed);
+    const id = playlistId;
+    enqueue(() => playlistMove(id, from, to));
   }
 
   function removeAt(i: number) {
@@ -171,7 +191,8 @@
     if (!entries || !entry) return;
     entries = entries.filter((_, k) => k !== i).map((e, position) => ({ ...e, position }));
     if (selected >= entries.length) selected = entries.length - 1;
-    playlistRemove(playlistId, [entry.position]).catch(changeFailed);
+    const id = playlistId;
+    enqueue(() => playlistRemove(id, [entry.position]));
   }
 
   // The list: selection, keys, menu.
@@ -325,7 +346,7 @@
 
 <div class="scroll" bind:this={scroller}>
   {#if backdrop}
-    <Backdrop src={backdrop} />
+    <Backdrop src={backdrop} height={520} />
   {/if}
 
   <div class="inner">
@@ -593,12 +614,16 @@
     line-height: 1.04;
   }
 
+  /* Both are exactly one line box per line (1.04em): the title does not move when it turns
+     into the field, and neither does the meta line under it. */
   h1 {
+    display: flex;
     text-wrap: balance;
   }
 
   .rename {
-    display: inline-flex;
+    display: flex;
+    line-height: inherit;
     align-items: flex-end;
     gap: 12px;
     max-width: 100%;
@@ -644,10 +669,12 @@
   .title-input {
     display: block;
     width: 100%;
-    box-sizing: border-box;
-    padding: 0 0 2px;
+    height: 1.04em;
+    box-sizing: content-box;
+    padding: 0;
     border: 0;
-    border-bottom: 2px solid color-mix(in srgb, var(--spec-4) 70%, transparent);
+    /* The underline is a shadow, so it adds no height. */
+    box-shadow: 0 2px 0 color-mix(in srgb, var(--spec-4) 70%, transparent);
     border-radius: 0;
     background: transparent;
     color: var(--text);

@@ -249,7 +249,8 @@
           <kbd>{isMac ? 'Cmd K' : 'Ctrl K'}</kbd>
         </button>
       </TitleBar>
-      <section class="content">
+      <!-- data-menu-bounds: context menus stay inside it, clear of the transport and the ring. -->
+      <section class="content" data-menu-bounds>
         {#key `${nav.view}:${nav.param ?? ''}`}
           <div class="view">
             {#if libraryView(nav.view) && library.trackCount === null && library.error}

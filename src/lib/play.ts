@@ -35,7 +35,8 @@ export async function playAlbum(albumId: string, options: { trackId?: string; sh
 
 /** Plays a playlist from the entry at `fromPosition` (the first one by default). Entries whose
  *  track is not in the index are skipped; when the chosen entry is one of them, playback
- *  starts at the next playable entry. `shuffled` plays every playable entry in random order. */
+ *  starts at the next playable entry, and with none after it nothing plays. `shuffled` plays
+ *  every playable entry in random order. */
 export async function playPlaylist(
   id: number,
   fromPosition = 0,
@@ -54,7 +55,8 @@ export async function playPlaylist(
       return;
     }
     if (options.shuffled) return playIds(shuffle(ids), 0);
-    return playIds(ids, Math.max(0, start));
+    if (start < 0) return;
+    return playIds(ids, start);
   } catch (err) {
     failed(err);
   }

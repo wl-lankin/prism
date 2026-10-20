@@ -112,7 +112,7 @@
 
 <div class="scroll">
   {#if backdrop}
-    <Backdrop src={backdrop} />
+    <Backdrop src={backdrop} height={520} />
   {/if}
 
   <div class="inner">

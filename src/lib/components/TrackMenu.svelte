@@ -13,15 +13,11 @@
   /** Keeps menus off the window edges and out of the transparent strip below the card. */
   const EDGE = 8;
 
-  /** The area a menu must stay inside: the views' area (clear of the transport strip and the
-   *  Flow ring), else the app card, else the window. */
+  /** The area a menu must stay inside: the element App marks with `data-menu-bounds` (the
+   *  views' area, clear of the transport strip and the Flow ring), else the window. */
   function bounds(): { left: number; top: number; right: number; bottom: number } {
-    const content = document.querySelector('.content')?.getBoundingClientRect();
-    const card = document.querySelector('.card')?.getBoundingClientRect();
-    if (content && card && content.height > 0 && card.width > 0) {
-      return { left: card.left, top: card.top, right: card.right, bottom: content.bottom };
-    }
-    if (card && card.width > 0 && card.height > 0) return card;
+    const area = document.querySelector('[data-menu-bounds]')?.getBoundingClientRect();
+    if (area && area.width > 0 && area.height > 0) return area;
     return { left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight };
   }
 </script>
@@ -152,6 +148,8 @@
   }
 
   function oninputkey(event: KeyboardEvent) {
+    // Tab leaves the field like any menu item: the menu's own handler closes the menu.
+    if (event.key === 'Tab') return;
     // Typing stays in the field; only Enter and Esc act.
     event.stopPropagation();
     if (event.key === 'Enter') {
