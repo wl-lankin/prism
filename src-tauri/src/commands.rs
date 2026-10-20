@@ -112,11 +112,13 @@ pub fn player_state(state: State<'_, AppState>) -> Result<PlayerState, String> {
 pub async fn library_add_folder(app: AppHandle, path: String) -> Result<ScanReport, String> {
     let folder = folder_path(&path)?;
     let library = library(&app);
-    let emit_app = app.clone();
-    let scanned = folder.clone();
-    let report = blocking(move || library.add_folder(&scanned, &tauri_emitter(emit_app))).await?;
-    with_watcher(&app, |watcher| watcher.watch(&folder));
-    Ok(report)
+    // Watcher calls touch the file system too, so they run in the blocking task as well.
+    blocking(move || {
+        let report = library.add_folder(&folder, &tauri_emitter(app.clone()))?;
+        with_watcher(&app, |watcher| watcher.watch(&folder));
+        Ok(report)
+    })
+    .await
 }
 
 /// Stops watching a folder and forgets it and its tracks.
@@ -124,11 +126,12 @@ pub async fn library_add_folder(app: AppHandle, path: String) -> Result<ScanRepo
 pub async fn library_remove_folder(app: AppHandle, path: String) -> Result<(), String> {
     let folder = folder_path(&path)?;
     let library = library(&app);
-    let emit_app = app.clone();
-    let removed = folder.clone();
-    blocking(move || library.remove_folder(&removed, &tauri_emitter(emit_app))).await?;
-    with_watcher(&app, |watcher| watcher.unwatch(&folder));
-    Ok(())
+    blocking(move || {
+        library.remove_folder(&folder, &tauri_emitter(app.clone()))?;
+        with_watcher(&app, |watcher| watcher.unwatch(&folder));
+        Ok(())
+    })
+    .await
 }
 
 #[tauri::command]

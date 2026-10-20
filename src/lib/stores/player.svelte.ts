@@ -12,8 +12,14 @@ export const player: PlayerState = $state({
   queueLength: 0,
 });
 
+/**
+ * Copies a new state in. The track object is only replaced when the track changes, so
+ * readers of `player.track` do not re-run on every 250 ms position update.
+ */
 function apply(state: PlayerState) {
-  Object.assign(player, state);
+  const { track, ...rest } = state;
+  Object.assign(player, rest);
+  if (track?.id !== player.track?.id) player.track = track;
 }
 
 /**

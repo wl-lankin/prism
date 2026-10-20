@@ -219,11 +219,13 @@ enum Slot {
     Next,
 }
 
+/// Open the queue entry `id`. The opener thread resolves it (the resolver takes the
+/// library DB lock, which a scan can hold for a while) and opens the file.
 struct OpenJob {
     generation: u64,
     slot: Slot,
     index: usize,
-    track: Track,
+    id: String,
     spec: StreamSpec,
 }
 
@@ -231,13 +233,24 @@ struct Opened {
     generation: u64,
     slot: Slot,
     index: usize,
-    track: Track,
-    result: Result<Box<dyn AudioSource>, String>,
+    id: String,
+    result: Result<(Track, Box<dyn AudioSource>), String>,
 }
 
-/// Opens sources off the engine thread (an open decodes the first packet; FFmpeg can take
-/// seconds). Jobs from an older generation are skipped.
+/// Looks `id` up and checks that it can be played.
+fn resolve(resolver: &Resolver, id: &str) -> Result<Track, String> {
+    match resolver(id) {
+        Some(track) if track.path.is_some() => Ok(track),
+        Some(_) => Err("This track has no file to play.".to_string()),
+        None => Err("This track is no longer in the library.".to_string()),
+    }
+}
+
+/// Resolves and opens tracks off the engine thread: the resolver can wait on the library DB
+/// and an open decodes the first packet (FFmpeg can take seconds). The engine thread never
+/// touches either. Jobs from an older generation are skipped.
 fn spawn_opener(
+    resolver: Resolver,
     opener: Opener,
     generation: Arc<AtomicU64>,
     results: Sender<Opened>,
@@ -250,14 +263,17 @@ fn spawn_opener(
                 if job.generation != generation.load(Ordering::SeqCst) {
                     continue;
                 }
-                let result = catch_unwind(AssertUnwindSafe(|| opener(&job.track, job.spec)))
-                    .unwrap_or_else(|_| Err(anyhow::anyhow!("opening the file crashed")))
-                    .map_err(|err| format!("{err:#}"));
+                let result = catch_unwind(AssertUnwindSafe(|| {
+                    let track = resolve(&resolver, &job.id)?;
+                    let source = opener(&track, job.spec).map_err(|err| format!("{err:#}"))?;
+                    Ok((track, source))
+                }))
+                .unwrap_or_else(|_| Err("opening the file crashed".to_string()));
                 let opened = Opened {
                     generation: job.generation,
                     slot: job.slot,
                     index: job.index,
-                    track: job.track,
+                    id: job.id,
                     result,
                 };
                 if results.send(opened).is_err() {
@@ -285,7 +301,6 @@ enum Preload {
 struct Engine {
     playback: Playback,
     queue: Queue,
-    resolver: Resolver,
     sink: EventSink,
     shared: Arc<Mutex<PlayerState>>,
     jobs: Sender<OpenJob>,
@@ -328,11 +343,10 @@ impl Engine {
         }
         let generation = Arc::new(AtomicU64::new(0));
         let (results, opened) = crossbeam_channel::unbounded();
-        let jobs = spawn_opener(opener, Arc::clone(&generation), results);
+        let jobs = spawn_opener(resolver, opener, Arc::clone(&generation), results);
         Ok(Engine {
             playback,
             queue: Queue::new(),
-            resolver,
             sink,
             shared,
             jobs,
@@ -392,11 +406,13 @@ impl Engine {
                 self.start_current(true);
             }
             Command::Toggle => self.toggle(),
+            // Nothing to skip while idle: play/toggle start the queue.
+            Command::Next | Command::Prev if self.status == PlayerStatus::Idle => {}
             Command::Next => {
                 self.settle_handover();
                 if self.queue.advance() {
                     self.start_current(true);
-                } else if self.status != PlayerStatus::Idle {
+                } else {
                     self.go_idle();
                 }
             }
@@ -457,9 +473,9 @@ impl Engine {
         }
     }
 
-    /// Starts loading the queue's current track; tracks that cannot be resolved are
-    /// reported and skipped. `cut` stops what is playing now; otherwise the previous
-    /// track's tail plays out first.
+    /// Starts loading the queue's current track (resolved and opened on the opener thread;
+    /// a failure is reported and skipped when the result comes back). `cut` stops what is
+    /// playing now; otherwise the previous track's tail plays out first.
     fn start_current(&mut self, cut: bool) {
         self.settle_handover();
         if cut {
@@ -471,37 +487,27 @@ impl Engine {
         self.ending = false;
         self.start_paused = false;
         self.dirty = true;
-        loop {
-            let Some(id) = self.queue.current().map(str::to_string) else {
-                self.finish(cut);
-                return;
-            };
-            let failure = match self.resolve(&id) {
-                Ok(track) => {
-                    let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
-                    self.current = Some(track.clone());
-                    self.shown = Some(track.clone());
-                    self.shown_index = self.queue.index();
-                    self.status = PlayerStatus::Loading;
-                    let job = OpenJob {
-                        generation,
-                        slot: Slot::Current,
-                        index: self.queue.index(),
-                        track,
-                        spec: self.playback.output_spec(),
-                    };
-                    match self.jobs.send(job) {
-                        Ok(()) => return,
-                        Err(_) => "the file opener is not running".to_string(),
-                    }
-                }
-                Err(message) => message,
-            };
-            self.error(&id, &failure);
-            if !self.queue.advance() {
-                self.finish(cut);
-                return;
-            }
+        let Some(id) = self.queue.current().map(str::to_string) else {
+            self.finish(cut);
+            return;
+        };
+        let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        // The track is known once the opener has resolved it.
+        self.current = None;
+        self.shown = None;
+        self.shown_index = self.queue.index();
+        self.status = PlayerStatus::Loading;
+        let job = OpenJob {
+            generation,
+            slot: Slot::Current,
+            index: self.queue.index(),
+            id: id.clone(),
+            spec: self.playback.output_spec(),
+        };
+        if self.jobs.send(job).is_err() {
+            self.error(&id, "the file opener is not running");
+            // Every other track would fail the same way.
+            self.finish(cut);
         }
     }
 
@@ -541,14 +547,6 @@ impl Engine {
         self.dirty = true;
     }
 
-    fn resolve(&self, id: &str) -> Result<Track, String> {
-        match (self.resolver)(id) {
-            Some(track) if track.path.is_some() => Ok(track),
-            Some(_) => Err("This track has no file to play.".to_string()),
-            None => Err("This track is no longer in the library.".to_string()),
-        }
-    }
-
     fn on_opened(&mut self, opened: Opened) {
         if opened.generation != self.generation.load(Ordering::SeqCst) {
             return;
@@ -559,9 +557,14 @@ impl Engine {
                     return;
                 }
                 match opened.result {
-                    Ok(source) => self.ready = Some(source),
+                    Ok((track, source)) => {
+                        self.current = Some(track.clone());
+                        self.shown = Some(track);
+                        self.dirty = true;
+                        self.ready = Some(source);
+                    }
                     Err(message) => {
-                        self.error(&opened.track.id, &message);
+                        self.error(&opened.id, &message);
                         self.skip(false);
                     }
                 }
@@ -571,20 +574,23 @@ impl Engine {
                     return;
                 }
                 self.preload = match opened.result {
-                    Ok(source) => {
+                    Ok((track, source)) => {
                         self.playback.queue_next(Some(source));
-                        Preload::Ready(Box::new(opened.track))
+                        Preload::Ready(Box::new(track))
                     }
-                    Err(message) => Preload::Failed(opened.index, opened.track.id, message),
+                    Err(message) => Preload::Failed(opened.index, opened.id, message),
                 };
             }
         }
     }
 
     fn tick(&mut self) {
-        if let Some((at, _)) = &self.handover {
-            if Instant::now() >= *at {
-                self.settle_handover();
+        // While paused nothing is heard, so a pending hand-over waits.
+        if self.status != PlayerStatus::Paused {
+            if let Some((at, _)) = &self.handover {
+                if Instant::now() >= *at {
+                    self.settle_handover();
+                }
             }
         }
         if self.ready.is_some() && self.playback.is_drained() {
@@ -659,21 +665,16 @@ impl Engine {
         let Some(id) = self.queue.get(index).map(str::to_string) else {
             return;
         };
-        self.preload = match self.resolve(&id) {
-            Ok(next) => {
-                let job = OpenJob {
-                    generation: self.generation.load(Ordering::SeqCst),
-                    slot: Slot::Next,
-                    index,
-                    track: next,
-                    spec: self.playback.output_spec(),
-                };
-                match self.jobs.send(job) {
-                    Ok(()) => Preload::Requested(index),
-                    Err(_) => Preload::Failed(index, id, "the file opener is not running".into()),
-                }
-            }
-            Err(message) => Preload::Failed(index, id, message),
+        let job = OpenJob {
+            generation: self.generation.load(Ordering::SeqCst),
+            slot: Slot::Next,
+            index,
+            id: id.clone(),
+            spec: self.playback.output_spec(),
+        };
+        self.preload = match self.jobs.send(job) {
+            Ok(()) => Preload::Requested(index),
+            Err(_) => Preload::Failed(index, id, "the file opener is not running".into()),
         };
     }
 
@@ -774,21 +775,22 @@ impl Engine {
         }
     }
 
-    /// Updates the shared state and emits it when it changed, or every
-    /// [`STATE_INTERVAL`] while playing.
+    /// When the state changed, or every [`STATE_INTERVAL`] while playing: updates the
+    /// shared state (what `player_state` returns) and emits it.
     fn publish(&mut self) {
+        let periodic =
+            self.status == PlayerStatus::Playing && self.last_emit.elapsed() >= STATE_INTERVAL;
+        if !self.dirty && !periodic {
+            return;
+        }
+        self.dirty = false;
+        self.last_emit = Instant::now();
         let state = self.snapshot();
         match self.shared.lock() {
             Ok(mut shared) => *shared = state.clone(),
             Err(poisoned) => *poisoned.into_inner() = state.clone(),
         }
-        let periodic =
-            self.status == PlayerStatus::Playing && self.last_emit.elapsed() >= STATE_INTERVAL;
-        if self.dirty || periodic {
-            self.dirty = false;
-            self.last_emit = Instant::now();
-            (self.sink)(PlayerEvent::State(state));
-        }
+        (self.sink)(PlayerEvent::State(state));
     }
 }
 
@@ -1114,8 +1116,74 @@ mod tests {
 
         // Within the first 3 s, prev goes to the previous track.
         h.player.prev().unwrap();
-        let state = wait_state(&h.player, |s| s.queue_index == 0);
+        let state = wait_state(&h.player, |s| s.queue_index == 0 && s.track.is_some());
         assert_eq!(state.track.unwrap().id, "long1");
+    }
+
+    #[test]
+    fn next_and_prev_do_nothing_while_idle() {
+        let h = harness(
+            vec![
+                fixture_track("a", "gap_a.wav"),
+                fixture_track("b", "gap_b.wav"),
+            ],
+            FAST,
+            None,
+        );
+        h.player.play(ids(&["a", "b"]), 0).unwrap();
+        collect_until(&h.events, Duration::from_secs(10), back_to_idle);
+        h.player.next().unwrap();
+        h.player.prev().unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        let later: Vec<PlayerEvent> = h.events.try_iter().collect();
+        assert!(
+            later.iter().all(|e| is_state(e, PlayerStatus::Idle)),
+            "{later:#?}"
+        );
+        assert_eq!(h.player.state().status, PlayerStatus::Idle);
+    }
+
+    #[test]
+    fn slow_resolver_does_not_starve_the_output() {
+        let mut long = fixture_track("long", "tagged.flac");
+        long.duration_ms = SILENCE_MS;
+        let mut slow = fixture_track("slow", "tagged.flac");
+        slow.duration_ms = SILENCE_MS;
+        let tracks = [long, slow];
+        let (started_tx, started_rx) = crossbeam_channel::unbounded();
+        // Looking up "slow" holds the (library DB) lock for 500 ms, as a scan chunk would.
+        let resolver: Resolver = Arc::new(move |id: &str| {
+            if id == "slow" {
+                let _ = started_tx.send(());
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            tracks.iter().find(|track| track.id == id).cloned()
+        });
+        let opener: Opener = Arc::new(|_track: &Track, _spec: StreamSpec| {
+            Ok(Box::new(Silence {
+                frames_left: SILENCE_MS * 44_100 / 1000,
+            }) as Box<dyn AudioSource>)
+        });
+        let played = Arc::new(Mutex::new(Vec::new()));
+        // 5x: the pre-open of "slow" starts 1 s in, with 1 s of "long" left to play.
+        let factory = Arc::new(InstantFactory {
+            speed: 5.0,
+            played: Arc::clone(&played),
+        });
+        let player = Player::spawn_with(factory, resolver, Arc::new(|_| {}), opener);
+        player.play(ids(&["long", "slow"]), 0).unwrap();
+
+        started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the next track is resolved");
+        let before = played.lock().unwrap().len();
+        std::thread::sleep(Duration::from_millis(300));
+        let after = played.lock().unwrap().len();
+        // 300 ms at 5x is 1.5 s of audio; require at least a third of it.
+        assert!(
+            after - before > 44_100,
+            "the output was starved while the resolver blocked: {before} -> {after}"
+        );
     }
 
     #[test]

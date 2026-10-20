@@ -56,6 +56,24 @@ it('follows player://state events', async () => {
   expect(unlisten).toHaveBeenCalled();
 });
 
+it('keeps the track object while only the position moves', async () => {
+  invoke.mockResolvedValue(playing);
+  const stop = await initPlayer();
+  const emit = (payload: PlayerState) =>
+    listeners.get('player://state')!({ event: 'player://state', id: 1, payload });
+  const track = { id: 'local:1', title: 'One' } as PlayerState['track'];
+  emit({ ...playing, track });
+  const first = player.track;
+  emit({ ...playing, track: { ...track!, title: 'One' }, positionMs: 1450 });
+  expect(player.positionMs).toBe(1450);
+  expect(player.track).toBe(first);
+  emit({ ...playing, track: { ...track!, id: 'local:2', title: 'Two' } });
+  expect(player.track?.title).toBe('Two');
+  emit({ ...playing, track: null, status: 'idle' });
+  expect(player.track).toBeNull();
+  stop();
+});
+
 it('an event that arrives before the first player_state wins', async () => {
   let resolve!: (state: PlayerState) => void;
   invoke.mockReturnValue(new Promise<PlayerState>((r) => (resolve = r)));
