@@ -20,7 +20,9 @@ export const player: PlayerState = $state({
 function apply(state: PlayerState) {
   const { track, ...rest } = state;
   Object.assign(player, rest);
-  if (track?.id !== player.track?.id) player.track = track;
+  if (track?.id !== player.track?.id || track?.coverId !== player.track?.coverId) {
+    player.track = track;
+  }
 }
 
 /**

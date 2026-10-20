@@ -1,6 +1,7 @@
 pub mod covers;
 pub mod favorites;
 pub mod history;
+pub mod lookup;
 pub mod model;
 pub mod playlists;
 pub mod query;
@@ -14,7 +15,7 @@ use std::sync::{Arc, Mutex};
 
 use rusqlite::OptionalExtension;
 use serde::Serialize;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::db::Db;
 use covers::CoverStore;
@@ -278,7 +279,13 @@ fn comparable(path: &Path) -> PathBuf {
 pub fn tauri_emitter(app: AppHandle) -> impl Fn(LibraryEvent) {
     move |event| {
         let result = match &event {
-            LibraryEvent::Changed => app.emit(EVENT_CHANGED, ()),
+            LibraryEvent::Changed => {
+                // New or changed albums may need a cover lookup.
+                if let Some(state) = app.try_state::<crate::AppState>() {
+                    state.lookup.kick();
+                }
+                app.emit(EVENT_CHANGED, ())
+            }
             LibraryEvent::ScanProgress(progress) => app.emit(EVENT_SCAN_PROGRESS, progress),
         };
         if let Err(err) = result {

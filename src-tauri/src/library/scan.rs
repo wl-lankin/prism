@@ -524,7 +524,18 @@ pub(crate) fn rebuild_albums<'a>(
             continue;
         };
         let year = rows.iter().find_map(|row| row.2);
-        let cover = rows.iter().find_map(|row| row.3.clone());
+        // No track has a cover: keep the one an online lookup found.
+        let cover = match rows.iter().find_map(|row| row.3.clone()) {
+            Some(cover) => Some(cover),
+            None => conn
+                .query_row(
+                    "SELECT cover_id FROM cover_lookups WHERE album_id = ?1 AND status = 'found'",
+                    [album_id],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .optional()?
+                .flatten(),
+        };
         let duration: i64 = rows.iter().map(|row| row.4).sum();
         conn.execute(
             "INSERT INTO albums (id, source, title, artist, year, cover_id, track_count, duration_ms)

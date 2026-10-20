@@ -42,6 +42,8 @@ pub struct AppState {
     pub settings: Arc<SettingsStore>,
     /// Limits and coalesces cover resizes.
     pub thumbs: Arc<thumbs::ResizeGate>,
+    /// Online cover lookup for albums without a cover.
+    pub lookup: library::lookup::LookupWorker,
 }
 
 /// Resolves queue entries against the library database.
@@ -145,7 +147,22 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
             replay_gain: initial.replay_gain,
         },
     );
+    let lookup = library::lookup::LookupWorker::spawn(
+        Arc::clone(&library.db),
+        Arc::clone(&library.covers),
+        Arc::new(library::lookup::MusicBrainz::new()?),
+        Arc::new(std::sync::atomic::AtomicBool::new(initial.cover_lookup)),
+        {
+            let handle = handle.clone();
+            Arc::new(move || {
+                if let Err(err) = tauri::Emitter::emit(&handle, library::EVENT_CHANGED, ()) {
+                    eprintln!("emitting the cover change failed: {err}");
+                }
+            })
+        },
+    );
     app.manage(AppState {
+        lookup,
         library: Arc::clone(&library),
         player,
         dropped,
@@ -158,9 +175,12 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
 
     // Catch up on changes made while Prism was closed; unchanged files are skipped quickly.
     std::thread::spawn(move || {
-        let emit = tauri_emitter(handle);
+        let emit = tauri_emitter(handle.clone());
         if let Err(err) = library.rescan_all(&emit) {
             eprintln!("startup rescan failed: {err:#}");
+        }
+        if let Some(state) = handle.try_state::<AppState>() {
+            state.lookup.kick();
         }
     });
     Ok(())
