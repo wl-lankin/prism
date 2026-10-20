@@ -1,17 +1,16 @@
 //! Throwaway YouTube Music sign-in spike. Never merged.
 
-use std::sync::Mutex;
 use std::time::Duration;
 
-use tauri::{AppHandle, Manager, State, Url, WebviewUrl, WebviewWindowBuilder};
-
-#[derive(Default)]
-pub struct ProbeResult(pub Mutex<Option<String>>);
+use tauri::{AppHandle, Manager, Url, WebviewUrl, WebviewWindowBuilder};
 
 const YTM: &str = "https://music.youtube.com";
 const SIGNIN: &str = "https://accounts.google.com/ServiceLogin?continue=https://music.youtube.com";
 
 fn open(app: &AppHandle, label: &str, url: &str) -> Result<String, String> {
+    if !cfg!(debug_assertions) {
+        return Err("dev only".into());
+    }
     if let Some(w) = app.get_webview_window(label) {
         let _ = w.set_focus();
         return Ok(format!("{label} already open"));
@@ -43,12 +42,6 @@ pub async fn spike_open_google_signin(app: AppHandle) -> Result<String, String> 
     open(&app, "ytm-signin", SIGNIN)
 }
 
-/// Called by the injected script when IPC works on the remote page.
-#[tauri::command]
-pub fn spike_probe_report(state: State<'_, ProbeResult>, json: String) {
-    *state.0.lock().unwrap() = Some(json);
-}
-
 const PROBE_JS: &str = r#"
 (function () {
   var md = navigator.mediaSession && navigator.mediaSession.metadata;
@@ -64,42 +57,31 @@ const PROBE_JS: &str = r#"
     playPauseButton: !!pp, playPauseTitle: pp ? (pp.getAttribute('title') || pp.getAttribute('aria-label')) : null,
     nextButton: !!nx,
     videoPresent: !!document.querySelector('video'),
-    videoPaused: document.querySelector('video') ? document.querySelector('video').paused : null,
-    hasTauriIpc: !!(window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke)
+    videoPaused: document.querySelector('video') ? document.querySelector('video').paused : null
   };
   var json = JSON.stringify(out);
-  var sent = false;
-  try {
-    if (out.hasTauriIpc) {
-      window.__TAURI_INTERNALS__.invoke('spike_probe_report', { json: json });
-      sent = true;
-    }
-  } catch (e) {}
-  if (!sent) { window.__prismProbe = json; }
-  window.__prismProbeIpc = sent;
+  history.replaceState(null, '', location.pathname + location.search + '#prismprobe=' + encodeURIComponent(json));
 })();
 "#;
 
 #[tauri::command]
-pub async fn spike_ytm_probe(app: AppHandle, state: State<'_, ProbeResult>) -> Result<String, String> {
+pub async fn spike_ytm_probe(app: AppHandle) -> Result<String, String> {
+    if !cfg!(debug_assertions) {
+        return Err("dev only".into());
+    }
     let w = app.get_webview_window("ytm").ok_or("ytm window is not open")?;
-    *state.0.lock().unwrap() = None;
     w.eval(PROBE_JS).map_err(|e| e.to_string())?;
     for _ in 0..30 {
-        tokio_sleep().await;
-        if let Some(j) = state.0.lock().unwrap().take() {
-            return Ok(j);
+        std::thread::sleep(Duration::from_millis(100));
+        if let Ok(u) = w.url() {
+            if let Some(f) = u.fragment().and_then(|f| f.strip_prefix("prismprobe=")) {
+                let decoded: String = tauri::Url::parse(&format!("http://x/?v={f}"))
+                    .ok()
+                    .and_then(|x| x.query_pairs().next().map(|(_, v)| v.into_owned()))
+                    .unwrap_or_else(|| f.to_string());
+                return Ok(decoded);
+            }
         }
     }
-    Err("no report via IPC within 3s (remote IPC probably blocked)".into())
-}
-
-async fn tokio_sleep() {
-    let (tx, rx) = std::sync::mpsc::channel::<()>();
-    std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(100));
-        let _ = tx.send(());
-    });
-    // Poll without blocking the async runtime for long.
-    let _ = tauri::async_runtime::spawn_blocking(move || rx.recv()).await;
+    Err("probe result not found in the URL fragment within 3s".into())
 }

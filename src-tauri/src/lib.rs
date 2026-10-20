@@ -125,7 +125,6 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
 
 pub fn run() {
     tauri::Builder::default()
-        .manage(spike::ProbeResult::default())
         .register_asynchronous_uri_scheme_protocol("prism", protocol::register)
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
