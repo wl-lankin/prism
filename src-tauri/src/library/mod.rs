@@ -1,5 +1,6 @@
 pub mod covers;
 pub mod model;
+pub mod query;
 pub mod scan;
 pub mod tags;
 pub mod watch;
@@ -74,6 +75,7 @@ impl Library {
         if !path.is_dir() {
             anyhow::bail!("{} is not a folder", path.display());
         }
+        self.check_not_nested(&path)?;
         lock(&self.db)?.execute(
             "INSERT INTO folders (path, online) VALUES (?1, 1) ON CONFLICT(path) DO NOTHING",
             [folder_key(&path)],
@@ -148,6 +150,32 @@ impl Library {
         scan::is_registered(&*lock(&self.db)?, &key)
     }
 
+    /// Library folders may not overlap: every track must belong to exactly one folder.
+    fn check_not_nested(&self, path: &Path) -> anyhow::Result<()> {
+        let new = comparable(path);
+        for existing in self.folders()? {
+            let old = comparable(&existing);
+            if new == old {
+                anyhow::bail!("{} is already in your library", path.display());
+            }
+            if new.starts_with(&old) {
+                anyhow::bail!(
+                    "{} is inside the library folder {}; it is already part of your library",
+                    path.display(),
+                    existing.display()
+                );
+            }
+            if old.starts_with(&new) {
+                anyhow::bail!(
+                    "{} contains the library folder {}; remove that folder first, then add this one",
+                    path.display(),
+                    existing.display()
+                );
+            }
+        }
+        Ok(())
+    }
+
     fn online(&self, key: &str) -> anyhow::Result<Option<bool>> {
         let conn = lock(&self.db)?;
         let online = conn
@@ -176,8 +204,19 @@ fn poisoned() -> anyhow::Error {
 }
 
 /// The one spelling a folder is stored under: absolute, as `std::path::absolute` gives it.
-fn normalize(path: &Path) -> anyhow::Result<PathBuf> {
+pub fn normalize(path: &Path) -> anyhow::Result<PathBuf> {
     Ok(std::path::absolute(path)?)
+}
+
+/// A folder path for overlap checks: links resolved, and case folded where the file system
+/// usually ignores case (Windows, macOS).
+fn comparable(path: &Path) -> PathBuf {
+    let resolved = watch::canonicalize_lossy(path);
+    if cfg!(any(windows, target_os = "macos")) {
+        PathBuf::from(resolved.to_string_lossy().to_lowercase())
+    } else {
+        resolved
+    }
 }
 
 /// Emits library events to the webview as `library://changed` and `library://scan-progress`.
@@ -322,6 +361,49 @@ mod tests {
         assert_eq!(count(&library, "SELECT COUNT(*) FROM folders"), 0);
         assert_eq!(count(&library, "SELECT COUNT(*) FROM tracks"), 0);
         assert_eq!(count(&library, "SELECT COUNT(*) FROM albums"), 0);
+    }
+
+    #[test]
+    fn add_folder_refuses_nested_roots() {
+        let (library, _covers) = library();
+        let root = tempfile::tempdir().unwrap();
+        let music = root.path().join("music");
+        let inner = music.join("rock");
+        std::fs::create_dir_all(&inner).unwrap();
+        library.add_folder(&music, &|_| {}).unwrap();
+
+        let inside = library.add_folder(&inner, &|_| {}).unwrap_err();
+        assert!(
+            format!("{inside:#}").contains("inside the library folder"),
+            "{inside:#}"
+        );
+        let outer = library.add_folder(root.path(), &|_| {}).unwrap_err();
+        assert!(
+            format!("{outer:#}").contains("contains the library folder"),
+            "{outer:#}"
+        );
+        let again = library.add_folder(&music, &|_| {}).unwrap_err();
+        assert!(
+            format!("{again:#}").contains("already in your library"),
+            "{again:#}"
+        );
+        // A sibling whose name merely starts the same way is fine.
+        let sibling = root.path().join("music2");
+        std::fs::create_dir(&sibling).unwrap();
+        library.add_folder(&sibling, &|_| {}).unwrap();
+        assert_eq!(library.folders().unwrap(), vec![music, sibling]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn nested_check_ignores_case_on_windows() {
+        let (library, _covers) = library();
+        let root = tempfile::tempdir().unwrap();
+        let music = root.path().join("Music");
+        std::fs::create_dir_all(music.join("Rock")).unwrap();
+        library.add_folder(&music, &|_| {}).unwrap();
+        let upper = PathBuf::from(music.to_string_lossy().to_uppercase()).join("ROCK");
+        assert!(library.add_folder(&upper, &|_| {}).is_err());
     }
 
     #[test]

@@ -75,6 +75,15 @@ pub struct Artist {
     pub cover_id: Option<String>,
 }
 
+/// A library folder as `library_folders` reports it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Folder {
+    pub path: String,
+    pub online: bool,
+    pub track_count: u32,
+}
+
 fn sha1_hex(input: &str) -> String {
     let mut hasher = Sha1::new();
     hasher.update(input.as_bytes());
