@@ -143,6 +143,8 @@ fn playback_for(state: &PlayerState) -> MediaPlayback {
 #[derive(Default)]
 struct Pushed {
     track_id: Option<String>,
+    /// The cover of `track_id` as sent; a lookup can add one to the playing track.
+    cover_id: Option<String>,
     status: Option<PlayerStatus>,
     position_ms: u64,
     at: Option<Instant>,
@@ -150,14 +152,19 @@ struct Pushed {
 
 type CoverFor = Box<dyn Fn(&Track) -> Option<PathBuf>>;
 
+/// The OS metadata is out of date: another track, or the same one with another cover.
+fn metadata_stale(pushed: &Pushed, track: Option<&Track>) -> bool {
+    track.map(|t| t.id.as_str()) != pushed.track_id.as_deref()
+        || track.is_some_and(|t| t.cover_id != pushed.cover_id)
+}
+
 fn push(
     controls: &mut MediaControls,
     pushed: &mut Pushed,
     state: &PlayerState,
     cover_for: &CoverFor,
 ) {
-    let track_id = state.track.as_ref().map(|track| track.id.as_str());
-    let track_changed = track_id != pushed.track_id.as_deref();
+    let track_changed = metadata_stale(pushed, state.track.as_ref());
     let status_changed = Some(state.status) != pushed.status;
     let position_due = match state.status {
         PlayerStatus::Playing => pushed.at.is_none_or(|at| at.elapsed() >= POSITION_INTERVAL),
@@ -174,11 +181,17 @@ fn push(
                 let metadata = to_metadata(track, cover.as_deref());
                 match controls.set_metadata(metadata.as_metadata()) {
                     // Remembered only on success, so a failed update is retried.
-                    Ok(()) => pushed.track_id = Some(track.id.clone()),
+                    Ok(()) => {
+                        pushed.track_id = Some(track.id.clone());
+                        pushed.cover_id = track.cover_id.clone();
+                    }
                     Err(err) => eprintln!("updating the media metadata failed: {err:?}"),
                 }
             }
-            None => pushed.track_id = None,
+            None => {
+                pushed.track_id = None;
+                pushed.cover_id = None;
+            }
         }
     }
     if let Err(err) = controls.set_playback(playback_for(state)) {
@@ -351,6 +364,33 @@ mod tests {
             replay_gain_track_peak: None,
             replay_gain_album_peak: None,
         }
+    }
+
+    #[test]
+    fn metadata_is_stale_for_another_track_or_another_cover() {
+        let mut pushed = Pushed::default();
+        let playing = track();
+        assert!(metadata_stale(&pushed, Some(&playing)), "nothing sent yet");
+        assert!(!metadata_stale(&pushed, None));
+
+        pushed.track_id = Some(playing.id.clone());
+        pushed.cover_id = playing.cover_id.clone();
+        assert!(!metadata_stale(&pushed, Some(&playing)));
+
+        let mut other = track();
+        other.id = "t2".into();
+        assert!(metadata_stale(&pushed, Some(&other)));
+
+        let mut covered = track();
+        covered.cover_id = Some("found-online".into());
+        assert!(
+            metadata_stale(&pushed, Some(&covered)),
+            "a new cover re-pushes"
+        );
+        covered.cover_id = None;
+        assert!(metadata_stale(&pushed, Some(&covered)));
+
+        assert!(metadata_stale(&pushed, None), "track gone");
     }
 
     fn state(status: PlayerStatus, position_ms: u64) -> PlayerState {
