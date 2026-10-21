@@ -1,0 +1,49 @@
+{
+  "subsonic-response": {
+    "status": "ok",
+    "version": "1.16.1",
+    "type": "navidrome",
+    "serverVersion": "0.58.0 (fake)",
+    "openSubsonic": true,
+    "albumList2": {
+      "album": [
+        {
+          "id": "al-1",
+          "name": "Demo Album 1",
+          "artist": "Demo Artist 1",
+          "artistId": "ar-1",
+          "coverArt": "al-1_abc",
+          "songCount": 2,
+          "duration": 421,
+          "playCount": 3,
+          "created": "2025-12-01T10:00:00Z",
+          "year": 2004,
+          "genre": "Rock",
+          "isDir": false,
+          "isVideo": false,
+          "artists": [{ "id": "ar-1", "name": "Demo Artist 1" }],
+          "displayArtist": "Demo Artist 1"
+        },
+        {
+          "id": "al-2",
+          "name": "Demo Album 2",
+          "artist": "Demo Artist 2",
+          "artistId": "ar-2",
+          "coverArt": "al-2_def",
+          "songCount": 1,
+          "duration": 199,
+          "created": "2025-12-02T10:00:00Z",
+          "starred": "2026-01-01T12:00:00Z",
+          "year": 2011,
+          "genre": "Jazz"
+        },
+        {
+          "id": "al-3",
+          "name": "Untitled Demo",
+          "songCount": 0,
+          "duration": 0
+        }
+      ]
+    }
+  }
+}

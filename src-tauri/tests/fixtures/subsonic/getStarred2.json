@@ -1,0 +1,41 @@
+{
+  "subsonic-response": {
+    "status": "ok",
+    "version": "1.16.1",
+    "type": "navidrome",
+    "serverVersion": "0.58.0 (fake)",
+    "openSubsonic": true,
+    "starred2": {
+      "artist": [
+        { "id": "ar-3", "name": "Sample Band", "albumCount": 1, "starred": "2026-01-01T12:00:00Z" }
+      ],
+      "album": [
+        {
+          "id": "al-2",
+          "name": "Demo Album 2",
+          "artist": "Demo Artist 2",
+          "artistId": "ar-2",
+          "coverArt": "al-2_def",
+          "songCount": 1,
+          "duration": 199,
+          "starred": "2026-01-01T12:00:00Z",
+          "year": 2011
+        }
+      ],
+      "song": [
+        {
+          "id": "tr-2",
+          "title": "Demo Song 2",
+          "album": "Demo Album 1",
+          "artist": "Demo Artist 1",
+          "albumId": "al-1",
+          "artistId": "ar-1",
+          "coverArt": "al-1_abc",
+          "duration": 199,
+          "suffix": "flac",
+          "starred": "2026-01-01T12:00:00Z"
+        }
+      ]
+    }
+  }
+}

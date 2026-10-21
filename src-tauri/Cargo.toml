@@ -41,7 +41,8 @@ rubato = "5.0.1"
 crossbeam-channel = "0.5.17"
 souvlaki = "0.8.3"
 rand = "0.9"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "json"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "rustls-tls-native-roots", "json", "gzip"] }
+md-5 = "0.11"
 
 [target.'cfg(windows)'.dependencies]
 # DWM attributes for the transparent main window (no border, no rounded system corners, no
@@ -71,3 +72,4 @@ opt-level = 3
 
 [dev-dependencies]
 tempfile = "3.27.0"
+flate2 = "1"
