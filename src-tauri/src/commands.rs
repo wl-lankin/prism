@@ -507,8 +507,8 @@ pub fn mini_menu(app: AppHandle, open: bool) {
     mini::menu(&app, open);
 }
 
-/// Brings the main window up (shown, restored from the taskbar and focused) and hides the
-/// mini player.
+/// Brings the main window up (shown with its taskbar button, restored and focused) and hides
+/// the mini player.
 #[tauri::command]
 pub fn main_show(app: AppHandle) -> Result<(), String> {
     shell::main_show(&app)

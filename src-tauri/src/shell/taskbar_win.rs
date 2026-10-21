@@ -1,11 +1,10 @@
 //! Windows: the main window's taskbar button and its thumbnail toolbar.
 //!
-//! Closing the main window only minimizes it (`shell::on_main_close`), so Prism keeps one
-//! taskbar button. A click on that button sends `WM_SYSCOMMAND` + `SC_RESTORE`; while the
-//! main window counts as closed this subclass swallows it and toggles the mini player at the
-//! bottom right instead (`shell::on_taskbar_restore`). The thumbnail preview carries previous,
-//! play/pause and next (`ITaskbarList3::ThumbBarAddButtons`), added once the taskbar announces
-//! the button (`TaskbarButtonCreated`, sent again after Explorer restarts).
+//! Closing the main window hides it (`shell::close_main`), and its taskbar button goes with
+//! it; `shell::main_show` brings both back. While the window is open, the thumbnail preview
+//! carries previous, play/pause and next (`ITaskbarList3::ThumbBarAddButtons`), added each
+//! time the taskbar announces the button (`TaskbarButtonCreated`: at the first show, again
+//! after every hide and show, and after Explorer restarts).
 //!
 //! The macOS counterpart is the Dock: `RunEvent::Reopen` shows the main window (`lib.rs`), and
 //! macOS has no thumbnail toolbar.
@@ -22,9 +21,7 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::HICON;
 
-use super::mini::{self, Anchor};
 use super::tray::TrayLabels;
-use super::{on_taskbar_restore, RestoreAction, ShellState};
 use crate::AppState;
 
 /// The thumbnail toolbar's buttons, by their command id.
@@ -177,8 +174,9 @@ impl ThumbBar {
         ]
     }
 
-    /// Adds the buttons; a window can add them only once per taskbar, so a repeated call
-    /// (the button existed already at startup) updates them instead.
+    /// Adds the buttons. Every new taskbar button (after a hide and show of the window, or an
+    /// Explorer restart) takes them anew; a button can take them only once, so a repeated
+    /// call for the same button (it existed already at startup) updates them instead.
     fn add(&self) {
         let buttons = self.buttons();
         // SAFETY: `hwnd` is the live main window; the buttons are copied by the call.
@@ -301,18 +299,6 @@ fn run(action: ThumbAction) {
     }
 }
 
-/// A `WM_SIZE` means the main window is back on screen (no longer closed) only when it is
-/// neither minimized nor hidden.
-fn back_on_screen(minimized: bool, visible: bool) -> bool {
-    !minimized && visible
-}
-
-fn main_closed() -> bool {
-    APP.get()
-        .and_then(|app| app.try_state::<ShellState>())
-        .is_some_and(|state| state.is_main_closed())
-}
-
 unsafe extern "system" fn proc(
     hwnd: windows_sys::Win32::Foundation::HWND,
     message: u32,
@@ -322,37 +308,9 @@ unsafe extern "system" fn proc(
     _data: usize,
 ) -> isize {
     use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass};
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        IsWindowVisible, SC_RESTORE, SIZE_MINIMIZED, WM_COMMAND, WM_NCDESTROY, WM_SIZE,
-        WM_SYSCOMMAND,
-    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{WM_COMMAND, WM_NCDESTROY};
 
     match message {
-        WM_SYSCOMMAND if (wparam & 0xFFF0) == SC_RESTORE as usize => {
-            if on_taskbar_restore(main_closed()) == RestoreAction::ToggleMini {
-                if let Some(app) = APP.get() {
-                    // Later, outside this window procedure: the toggle moves and shows a window.
-                    let handle = app.clone();
-                    let _ = app.run_on_main_thread(move || {
-                        if let Err(err) = mini::toggle(&handle, &Anchor::WorkAreaBottomRight) {
-                            eprintln!("toggling the mini player failed: {err}");
-                        }
-                    });
-                }
-                return 0;
-            }
-        }
-        // Back on screen by any way (restored or maximized): no longer closed. A size change
-        // of a hidden window (a layout while closed) is not.
-        WM_SIZE => {
-            // SAFETY: `hwnd` is the live window this message was sent to.
-            let visible = unsafe { IsWindowVisible(hwnd) } != 0;
-            if back_on_screen(wparam == SIZE_MINIMIZED as usize, visible) {
-                if let Some(state) = APP.get().and_then(|app| app.try_state::<ShellState>()) {
-                    state.set_main_closed(false);
-                }
-            }
-        }
         WM_COMMAND => {
             if let Some(action) = thumb_action(wparam) {
                 run(action);
@@ -405,14 +363,6 @@ mod tests {
         for ico in [ICON_PREVIOUS, ICON_PLAY, ICON_PAUSE, ICON_NEXT] {
             assert!(!load_icon(ico).0.is_null());
         }
-    }
-
-    #[test]
-    fn only_a_visible_unminimized_size_reopens_main() {
-        assert!(back_on_screen(false, true));
-        assert!(!back_on_screen(true, true), "minimized");
-        assert!(!back_on_screen(false, false), "resized while hidden");
-        assert!(!back_on_screen(true, false));
     }
 
     #[test]

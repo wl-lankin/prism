@@ -23,9 +23,12 @@ pub const MAIN_LABEL: &str = "main";
 /// The shell's own state (managed).
 #[derive(Default)]
 pub struct ShellState {
-    /// The user closed the main window: on Windows it is minimized and its taskbar button
-    /// toggles the mini player; on macOS it is hidden. Cleared by `main_show`.
+    /// The user closed the main window: it is hidden, with no taskbar button (Windows) and
+    /// only the Dock icon (macOS). Cleared by `main_show`.
     pub main_closed: AtomicBool,
+    /// Prism is on its way out (`RunEvent::ExitRequested`): a close of the main window then
+    /// brings no mini player up.
+    pub quitting: AtomicBool,
     /// The menu bar icon's place from its last click (macOS), where the mini player hangs.
     pub last_tray_rect: Mutex<Option<PhysicalRect<i32, u32>>>,
 }
@@ -37,6 +40,14 @@ impl ShellState {
 
     pub fn set_main_closed(&self, closed: bool) {
         self.main_closed.store(closed, Ordering::Release);
+    }
+
+    pub fn is_quitting(&self) -> bool {
+        self.quitting.load(Ordering::Acquire)
+    }
+
+    pub fn set_quitting(&self) {
+        self.quitting.store(true, Ordering::Release);
     }
 
     pub fn tray_rect(&self) -> Option<PhysicalRect<i32, u32>> {
@@ -54,54 +65,46 @@ impl ShellState {
     }
 }
 
-/// What closing the main window does.
+/// What closing the main window does. On every platform the window is hidden (on Windows its
+/// taskbar button goes with it) and Prism keeps running in the tray.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CloseAction {
-    /// Windows: minimize and remember it as closed, so the app keeps its single taskbar
-    /// button and a click on it toggles the mini player.
-    MinimizeAndMarkClosed,
-    /// macOS: hide the window; the Dock icon and the menu bar icon stay.
+    /// The user closed the open window: the mini player takes its place (shown without
+    /// activation). The close is the user action, so the player still never appears on its own.
+    HideAndShowMini,
+    /// Prism is quitting, or the window was not open (a start at sign-in leaves it closed):
+    /// only hidden, the mini player stays away.
     Hide,
 }
 
-pub fn on_main_close(windows: bool) -> CloseAction {
-    if windows {
-        CloseAction::MinimizeAndMarkClosed
-    } else {
+pub fn on_main_close(quitting: bool, already_closed: bool) -> CloseAction {
+    if quitting || already_closed {
         CloseAction::Hide
-    }
-}
-
-/// What a click on the taskbar button (`SC_RESTORE`) does.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RestoreAction {
-    /// The window was only minimized: it comes back.
-    RestoreMain,
-    /// The window was closed: the mini player shows or hides instead.
-    ToggleMini,
-}
-
-pub fn on_taskbar_restore(main_closed: bool) -> RestoreAction {
-    if main_closed {
-        RestoreAction::ToggleMini
     } else {
-        RestoreAction::RestoreMain
+        CloseAction::HideAndShowMini
     }
 }
 
-/// `WindowEvent::CloseRequested` on the main window (already prevented): Prism keeps running
-/// with the mini player, the tray and (Windows) the taskbar button.
+/// `WindowEvent::CloseRequested` on the main window (already prevented): the window steps
+/// aside (`on_main_close`); the tray icon and the global shortcut toggle the mini player, and
+/// `main_show` brings the window back.
 pub fn close_main(window: &tauri::Window) {
-    // Marked first, so a taskbar click right after the minimize already toggles.
-    if let Some(state) = window.app_handle().try_state::<ShellState>() {
-        state.set_main_closed(true);
-    }
-    let done = match on_main_close(cfg!(target_os = "windows")) {
-        CloseAction::MinimizeAndMarkClosed => window.minimize(),
-        CloseAction::Hide => window.hide(),
+    let app = window.app_handle();
+    let action = match app.try_state::<ShellState>() {
+        Some(state) => {
+            let action = on_main_close(state.is_quitting(), state.is_main_closed());
+            state.set_main_closed(true);
+            action
+        }
+        None => CloseAction::Hide,
     };
-    if let Err(err) = done {
+    if let Err(err) = window.hide() {
         eprintln!("closing the main window failed: {err}");
+    }
+    if action == CloseAction::HideAndShowMini {
+        if let Err(err) = mini::show(app, &mini::home_anchor(app)) {
+            eprintln!("showing the mini player failed: {err}");
+        }
     }
 }
 
@@ -145,7 +148,10 @@ pub fn start_main(app: &AppHandle, autostart: bool) {
     }
 }
 
-/// Brings the main window up (shown, restored and focused) and hides the mini player.
+/// Brings the main window up and hides the mini player: no longer closed, shown (which gives
+/// it its taskbar button back on Windows; the thumbnail buttons follow on
+/// `TaskbarButtonCreated`), restored and focused. The way back from the tray menu, the mini
+/// player's "Open Prism", a second launch and the Dock.
 pub fn main_show(app: &AppHandle) -> Result<(), String> {
     if let Some(state) = app.try_state::<ShellState>() {
         state.set_main_closed(false);
@@ -220,11 +226,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn close_policy_per_platform() {
-        // Windows keeps the single taskbar button: the window is minimized, not hidden.
-        assert_eq!(on_main_close(true), CloseAction::MinimizeAndMarkClosed);
-        // macOS has the Dock icon and the menu bar: the window just goes away.
-        assert_eq!(on_main_close(false), CloseAction::Hide);
+    fn closing_the_open_window_brings_the_mini_player() {
+        assert_eq!(on_main_close(false, false), CloseAction::HideAndShowMini);
+    }
+
+    #[test]
+    fn no_mini_player_when_quitting_or_never_open() {
+        // Tray "Quit" or app.exit: the windows go, nothing new appears.
+        assert_eq!(on_main_close(true, false), CloseAction::Hide);
+        // Started at sign-in the window was never open (already marked closed).
+        assert_eq!(on_main_close(false, true), CloseAction::Hide);
+        assert_eq!(on_main_close(true, true), CloseAction::Hide);
+    }
+
+    #[test]
+    fn quitting_is_remembered() {
+        let state = ShellState::default();
+        assert!(!state.is_quitting());
+        state.set_quitting();
+        assert!(state.is_quitting());
     }
 
     #[test]
@@ -244,13 +264,6 @@ mod tests {
         let main = &config["app"]["windows"][0];
         assert_eq!(main["label"], MAIN_LABEL);
         assert_eq!(main["visible"], false);
-    }
-
-    #[test]
-    fn taskbar_restore_toggles_only_when_closed() {
-        assert_eq!(on_taskbar_restore(true), RestoreAction::ToggleMini);
-        // A window the user only minimized comes back as usual.
-        assert_eq!(on_taskbar_restore(false), RestoreAction::RestoreMain);
     }
 
     #[test]

@@ -223,7 +223,7 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
         eprintln!("registering the mini player shortcut failed: {err}");
     }
     media.start(handle.clone(), main_window_handle(app), cover_cache);
-    // The tray and (Windows) the taskbar button: closing the main window leaves Prism there.
+    // The tray: closing the main window leaves Prism there (and the taskbar button goes).
     if let Err(err) = shell::tray::create(&handle) {
         eprintln!("creating the tray icon failed: {err}");
     }
@@ -348,6 +348,12 @@ pub fn run() {
         .build(tauri::generate_context!())
         .unwrap_or_else(|err| fail_with(&anyhow::Error::new(err)))
         .run(|app, event| match event {
+            // Windows closed on the way out bring no mini player up (`shell::close_main`).
+            tauri::RunEvent::ExitRequested { .. } => {
+                if let Some(state) = app.try_state::<shell::ShellState>() {
+                    state.set_quitting();
+                }
+            }
             tauri::RunEvent::Exit => {
                 if let Some(state) = app.try_state::<AppState>() {
                     state.settings.flush();

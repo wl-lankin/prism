@@ -182,8 +182,14 @@ fn on_menu(app: &AppHandle, event: MenuEvent) {
         MenuAction::PlayPause => player(|player| player.toggle()),
         MenuAction::Next => player(|player| player.next()),
         MenuAction::Previous => player(|player| player.prev()),
-        // `RunEvent::Exit` saves the settings.
-        MenuAction::Quit => app.exit(0),
+        // `RunEvent::Exit` saves the settings. Marked first, so no window closed on the way
+        // out brings the mini player up.
+        MenuAction::Quit => {
+            if let Some(state) = app.try_state::<ShellState>() {
+                state.set_quitting();
+            }
+            app.exit(0)
+        }
     }
 }
 
