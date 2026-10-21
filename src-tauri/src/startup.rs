@@ -247,6 +247,45 @@ fn system_is_german() -> bool {
     }
 }
 
+/// The system locale (`de-DE`, `de_DE`, `en_DE@rg=...`), empty when unknown. Windows reads
+/// the user locale, macOS `AppleLocale` (it carries the region even when the language is
+/// another), anything else `LC_ALL` / `LANG`.
+pub fn system_locale() -> String {
+    #[cfg(target_os = "windows")]
+    {
+        let mut buffer = [0_u16; 85];
+        // SAFETY: the buffer is 85 u16, the documented LOCALE_NAME_MAX_LENGTH.
+        let len = unsafe {
+            windows_sys::Win32::Globalization::GetUserDefaultLocaleName(
+                buffer.as_mut_ptr(),
+                buffer.len() as i32,
+            )
+        };
+        if len > 0 {
+            String::from_utf16_lossy(&buffer[..len as usize - 1])
+        } else {
+            String::new()
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("defaults")
+            .args(["read", "-g", "AppleLocale"])
+            .output()
+            .ok()
+            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_owned())
+            .unwrap_or_default()
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        ["LC_ALL", "LANG"]
+            .iter()
+            .filter_map(|key| std::env::var(key).ok())
+            .find(|value| !value.is_empty())
+            .unwrap_or_default()
+    }
+}
+
 /// Title and body of the startup dialog. The newer-schema and data-folder texts are English
 /// and German; any other failure shows the error chain in English.
 fn startup_message(err: &anyhow::Error, german: bool) -> (String, String) {
