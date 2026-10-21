@@ -129,7 +129,7 @@
   }
 
   .brand-row {
-    height: 52px;
+    height: var(--header-h);
     display: flex;
     align-items: center;
     padding-left: 4px;

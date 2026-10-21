@@ -24,6 +24,10 @@
   --radius-m: 12px;
   --radius-l: 16px;
 
+  /* The card's top row: the sidebar's brand and the title bar (search, window controls) share
+     one centre line, with equal room above and below. */
+  --header-h: 64px;
+
   /* --dur covers hover and fades and keeps running under reduced motion; --dur-l is large motion. */
   --dur: 120ms;
   --dur-l: 320ms;

@@ -49,7 +49,7 @@
     display: flex;
     align-items: center;
     gap: 16px;
-    height: 52px;
+    height: var(--header-h);
     padding: 0 10px 0 32px;
     user-select: none;
     -webkit-user-select: none;
