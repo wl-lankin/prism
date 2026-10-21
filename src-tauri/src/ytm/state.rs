@@ -27,6 +27,9 @@ pub struct YtmState {
     pub position_ms: u64,
     /// 0 while unknown.
     pub duration_ms: u64,
+    /// The page's next and previous buttons can be pressed.
+    pub can_next: bool,
+    pub can_prev: bool,
 }
 
 impl YtmState {

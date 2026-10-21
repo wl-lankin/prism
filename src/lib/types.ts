@@ -144,6 +144,24 @@ export interface PlayerState {
   shuffle?: boolean;
 }
 
+/** `unavailable`: the page's player bar or buttons are missing, Prism cannot control it. */
+export type YtmStatus = 'idle' | 'playing' | 'paused' | 'unavailable';
+
+/** What YouTube Music plays (`ytm_state`, `ytm://state`). */
+export interface YtmState {
+  status: YtmStatus;
+  title: string;
+  artist: string;
+  album: string;
+  /** `yt-<hash>`, served by the cover protocol; null without artwork. */
+  coverId: string | null;
+  positionMs: number;
+  /** 0 while unknown. */
+  durationMs: number;
+  canNext: boolean;
+  canPrev: boolean;
+}
+
 /** Off, all (the first track follows the last), one (the track plays again). */
 export type RepeatMode = 'off' | 'all' | 'one';
 

@@ -38,10 +38,13 @@ use player::{
 use radio::location::{IpLocator, Locator};
 use radio::{RadioEmit, RadioEvent, RadioOptions, RadioService};
 use settings::SettingsStore;
+use shell::transport::{SystemClock, Transport};
 use startup::{
     fail_with, open_or_quarantine, AppDirs, CannotCreateDataDir, DataDir, OpenOutcome,
     StartupNotice,
 };
+use ytm::state::YtmControl;
+use ytm::YtmService;
 
 /// Shared backend state, managed by Tauri.
 pub struct AppState {
@@ -60,6 +63,22 @@ pub struct AppState {
     pub navidrome: Arc<NavidromeService>,
     /// Stations: near you, search, saved, the stream title.
     pub radio: Arc<RadioService>,
+    /// What YouTube Music's page reports, and the commands into it.
+    pub ytm: Arc<YtmService>,
+    /// Which player the transport targets; keeps only one of them playing.
+    pub transport: Arc<Transport>,
+}
+
+/// Sends YouTube Music's state to the main and the mini page (never to the page itself).
+fn ytm_emit(handle: tauri::AppHandle) -> ytm::StateEmit {
+    use tauri::Emitter;
+    Arc::new(move |state| {
+        for label in [shell::MAIN_LABEL, shell::mini::MINI_LABEL] {
+            if let Err(err) = handle.emit_to(label, ytm::EVENT_STATE, state) {
+                eprintln!("emitting {} failed: {err}", ytm::EVENT_STATE);
+            }
+        }
+    })
 }
 
 /// Sends the radio service's events to every window.
@@ -253,6 +272,8 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
     // the sink is plugged in once both exist.
     let flow_sink: Arc<OnceLock<EventSink>> = Arc::default();
     let to_flow = Arc::clone(&flow_sink);
+    // Same for the transport, which needs the player's handle.
+    let transport_slot: Arc<OnceLock<Arc<Transport>>> = Arc::default();
     // Keychain entries are keyed by the app identifier: a dev run never sees the real password.
     // Created before the player, whose opener streams Navidrome tracks through it.
     let navidrome = NavidromeService::spawn(
@@ -280,6 +301,7 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
                     sink(event);
                 }
             }),
+            shell::transport::late_sink(Arc::clone(&transport_slot)),
         ]),
         radio::stream::radio_opener(
             radio.lookup(),
@@ -346,7 +368,31 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
     if let Err(err) = radio::covers::attach(&thumbs, &library.db) {
         eprintln!("station logos are off: {err:#}");
     }
+    let ytm = Arc::new(YtmService::new(
+        Arc::new(ytm::WebviewEval(handle.clone())),
+        ytm_emit(handle.clone()),
+    ));
+    if let Err(err) = ytm::covers::attach(&thumbs, ytm.artwork()) {
+        eprintln!("YouTube Music artwork is off: {err:#}");
+    }
+    let transport = Arc::new(Transport::new(
+        player.handle(),
+        Arc::clone(&ytm) as Arc<dyn YtmControl>,
+        Arc::new(SystemClock),
+    ));
+    let _ = transport_slot.set(Arc::clone(&transport));
+    // Every report, heartbeats included: the transport's debounce counts on them.
+    ytm.follow({
+        let transport = Arc::downgrade(&transport);
+        Arc::new(move |state| {
+            if let Some(transport) = transport.upgrade() {
+                transport.on_ytm_state(state);
+            }
+        })
+    });
     app.manage(AppState {
+        ytm,
+        transport,
         navidrome,
         radio,
         lookup,

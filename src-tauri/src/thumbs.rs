@@ -3,7 +3,8 @@
 //!
 //! Local covers come from the cover store. Remote covers come through one [`RemoteCovers`]
 //! per id prefix: Navidrome covers (`nd-<coverArt>`) from the server, station logos
-//! (`rb-<hash>`) from the station's favicon or homepage. They are fetched at the size asked
+//! (`rb-<hash>`) from the station's favicon or homepage, YouTube Music artwork (`yt-<hash>`)
+//! from the URL the page reported. They are fetched at the size asked
 //! for, then flattened, bounded and encoded like a local cover into the same cache.
 
 use std::collections::HashMap;
@@ -20,6 +21,7 @@ use sha1::{Digest, Sha1};
 use crate::library::covers::CoverStore;
 use crate::library::model::{navidrome_cover_raw, NAVIDROME_COVER_PREFIX};
 use crate::radio::model::{radio_cover_raw, RADIO_COVER_PREFIX};
+use crate::ytm::covers::{ytm_cover_raw, YTM_COVER_PREFIX};
 
 /// The sizes covers are served at.
 pub const SIZES: [u32; 3] = [96, 300, 600];
@@ -184,7 +186,7 @@ impl ResizeGate {
             .min(4)
     }
 
-    /// Where the covers of `prefix` (`nd-` or `rb-`) are fetched from. Until this is set they
+    /// Where the covers of `prefix` (`nd-`, `rb-` or `yt-`) are fetched from. Until this is set they
     /// are `Unreachable`.
     pub fn set_remote_for(&self, prefix: &'static str, remote: Arc<dyn RemoteCovers>) {
         let fetches = Arc::new(Semaphore::new(remote.fetch_limit()));
@@ -235,7 +237,8 @@ impl ResizeGate {
         if !SIZES.contains(&size) {
             return Err(ResizeError::Unknown);
         }
-        // Server cover ids are checked against `[A-Za-z0-9_.-]`, logo ids are 20 hex digits;
+        // Server cover ids are checked against `[A-Za-z0-9_.-]`, logo and artwork ids are 20
+        // hex digits;
         // everything else must be a hex id of the store.
         let origin = if let Some(raw) = navidrome_cover_raw(id) {
             Origin::Remote(NAVIDROME_COVER_PREFIX, raw)
@@ -243,6 +246,11 @@ impl ResizeGate {
             Origin::Remote(
                 RADIO_COVER_PREFIX,
                 radio_cover_raw(id).ok_or(ResizeError::Unknown)?,
+            )
+        } else if id.starts_with(YTM_COVER_PREFIX) {
+            Origin::Remote(
+                YTM_COVER_PREFIX,
+                ytm_cover_raw(id).ok_or(ResizeError::Unknown)?,
             )
         } else {
             Origin::Local(store.path(id).ok_or(ResizeError::Unknown)?)
@@ -354,7 +362,7 @@ impl ResizeGate {
 /// Neutral cover for tracks without one: the app icon on the surface color.
 /// Cached at `<cache>/600/_placeholder-<8 hex>.jpg`, where the hex is a short hash of the
 /// icon bytes so a new icon is not hidden by an old cache file; the leading underscore
-/// cannot collide with a cover id (those are hex, or start with `nd-` or `rb-`).
+/// cannot collide with a cover id (those are hex, or start with `nd-`, `rb-` or `yt-`).
 pub fn placeholder_cover(cache: &Path) -> Option<PathBuf> {
     let hash: String = Sha1::digest(ICON)
         .iter()
@@ -589,6 +597,32 @@ mod tests {
         assert_eq!(
             bare.get(&store, root.path(), FAVICON, 96),
             Err(ResizeError::Unreachable)
+        );
+    }
+
+    #[test]
+    fn youtube_music_artwork_has_its_own_remote() {
+        let (root, store) = setup();
+        let artwork = FakeRemote::new(Duration::ZERO);
+        let gate = ResizeGate::new(2);
+        gate.set_remote_for(
+            YTM_COVER_PREFIX,
+            Arc::clone(&artwork) as Arc<dyn RemoteCovers>,
+        );
+        for id in ["yt-../x", "yt-0123", "yt-0123456789ABCDEF0123", "yt-"] {
+            assert_eq!(
+                gate.get(&store, root.path(), id, 96),
+                Err(ResizeError::Unknown),
+                "{id}"
+            );
+        }
+        assert!(artwork.calls().is_empty());
+        let id = "yt-0123456789abcdef0123";
+        let file = gate.get(&store, root.path(), id, 96).unwrap();
+        assert_eq!(file, root.path().join("96").join(format!("{id}.jpg")));
+        assert_eq!(
+            artwork.calls(),
+            vec![("0123456789abcdef0123".to_string(), 96)]
         );
     }
 

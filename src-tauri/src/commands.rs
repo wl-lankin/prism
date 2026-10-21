@@ -32,6 +32,7 @@ use crate::settings::{Change, Settings};
 use crate::shell;
 use crate::shell::mini::{self, MiniLayout};
 use crate::shell::tray::TrayLabels;
+use crate::ytm::{self, state::YtmState};
 use crate::AppState;
 
 /// Upper bound for `library_search` and `library_tracks_range` page sizes.
@@ -834,10 +835,11 @@ pub fn tray_set_labels(app: AppHandle, labels: TrayLabels) {
     shell::tray::set_labels(&app, &labels);
 }
 
-// YouTube Music. Placeholders until the service (Task 4) and the view (Task 5) exist; they
+// YouTube Music. The view commands are placeholders until the view (Task 5) exists; they
 // are here so the handler list and the command manifest are complete.
 
 const YTM_NOT_YET: &str = "not yet";
+const YTM_REFUSED: &str = "refused";
 
 /// Where the YouTube Music view goes in the main window, in logical pixels.
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -848,11 +850,17 @@ pub struct YtmRect {
     pub height: f64,
 }
 
-/// The one command the remote YouTube Music page may call.
+/// The one command the remote YouTube Music page may call. Only the `ytm` view on
+/// music.youtube.com is heard; the answer never says more than "refused".
 #[tauri::command]
 pub fn ytm_report(webview: tauri::Webview, report: serde_json::Value) -> Result<(), String> {
-    let _ = (webview, report);
-    Err(YTM_NOT_YET.to_string())
+    let url = webview.url().ok();
+    if !ytm::report_allowed(webview.label(), url.as_ref(), ytm::dev_host()) {
+        return Err(YTM_REFUSED.to_string());
+    }
+    let report = ytm::report::parse(report).map_err(|_| YTM_REFUSED.to_string())?;
+    app_state(webview.app_handle())?.ytm.handle(report);
+    Ok(())
 }
 
 #[tauri::command]
@@ -867,16 +875,24 @@ pub fn ytm_hide(app: AppHandle) -> Result<(), String> {
     Err(YTM_NOT_YET.to_string())
 }
 
+/// A command for the YouTube Music page itself, whichever player is active:
+/// `invoke('ytm_control', { action })` with `toggle`, `play`, `pause`, `next` or `prev`;
+/// `{ action: 'seek', positionMs }`; `{ action: 'volume', volume }` (0..=1).
 #[tauri::command]
-pub fn ytm_control(app: AppHandle, action: String) -> Result<(), String> {
-    let _ = (app, action);
-    Err(YTM_NOT_YET.to_string())
+pub fn ytm_control(
+    state: State<'_, AppState>,
+    action: String,
+    position_ms: Option<f64>,
+    volume: Option<f64>,
+) -> Result<(), String> {
+    let action = ytm::parse_action(&action, position_ms, volume)?;
+    ytm::state::YtmControl::send(state.ytm.as_ref(), action);
+    Ok(())
 }
 
 #[tauri::command]
-pub fn ytm_state(app: AppHandle) -> Result<(), String> {
-    let _ = app;
-    Err(YTM_NOT_YET.to_string())
+pub fn ytm_state(state: State<'_, AppState>) -> Result<YtmState, String> {
+    Ok(state.ytm.state())
 }
 
 #[tauri::command]
