@@ -543,6 +543,57 @@ mod tests {
     }
 
     #[test]
+    fn flow_never_deals_a_station() {
+        use crate::library::favorites::{set_with_source, FavKind};
+        use crate::library::model::Source;
+        use crate::radio::{model::tests::station, store};
+
+        let db = Db::open_in_memory().unwrap();
+        let conn = db.0.lock().unwrap();
+        for i in 0..5 {
+            add(&conn, &format!("t{i}"), "A", "A", "album", Some("Pop"));
+        }
+        favorite(&conn, "track", "t1");
+        favorite(&conn, "track", "t3");
+        for n in 1..=3 {
+            let station = station(n);
+            store::upsert_station(&conn, &station, 1).unwrap();
+            store::mark_played(&conn, &station.id, 2).unwrap();
+            set_with_source(&conn, FavKind::Station, &station.id, true, Source::Radio, 3).unwrap();
+        }
+        let tracks: Vec<String> = conn
+            .prepare("SELECT id FROM tracks")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        for variant in [
+            FlowVariant::Favorites,
+            FlowVariant::Library,
+            FlowVariant::Genre {
+                genre: "Pop".into(),
+            },
+        ] {
+            let (_, dealt) = deal_pool(&conn, &variant, true).unwrap();
+            assert!(!dealt.is_empty(), "{variant:?}");
+            for candidate in &dealt {
+                assert!(
+                    tracks.contains(&candidate.id),
+                    "{variant:?}: {}",
+                    candidate.id
+                );
+            }
+        }
+        // Only station favorites: the favorites Flow falls back to the library, no station.
+        conn.execute("DELETE FROM favorites WHERE kind = 'track'", [])
+            .unwrap();
+        let (variant, dealt) = deal_pool(&conn, &FlowVariant::Favorites, true).unwrap();
+        assert_eq!(variant, FlowVariant::Library);
+        assert!(dealt.iter().all(|c| tracks.contains(&c.id)));
+    }
+
+    #[test]
     fn favorite_album_contributes_all_tracks() {
         let db = Db::open_in_memory().unwrap();
         let conn = db.0.lock().unwrap();
