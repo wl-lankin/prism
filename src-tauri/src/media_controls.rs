@@ -139,6 +139,10 @@ fn playback_for(state: &PlayerState) -> MediaPlayback {
     }
 }
 
+/// A metadata update that failed, or went out without the track's own cover (an offline
+/// server), is tried again after this long instead of on every push.
+const RETRY_AFTER: Duration = Duration::from_secs(60);
+
 /// What was last sent to the OS.
 #[derive(Default)]
 struct Pushed {
@@ -148,14 +152,48 @@ struct Pushed {
     status: Option<PlayerStatus>,
     position_ms: u64,
     at: Option<Instant>,
+    /// The last `(track, cover)` whose update failed or lacked its own cover, and when.
+    failed: Option<Failed>,
 }
 
-type CoverFor = Box<dyn Fn(&Track) -> Option<PathBuf>>;
+struct Failed {
+    track_id: String,
+    cover_id: Option<String>,
+    at: Instant,
+}
+
+/// The cover file to send for a track, and whether that is the track's own cover (`false`
+/// when a track with a cover id got the placeholder).
+type CoverFor = Box<dyn Fn(&Track) -> (Option<PathBuf>, bool)>;
 
 /// The OS metadata is out of date: another track, or the same one with another cover.
 fn metadata_stale(pushed: &Pushed, track: Option<&Track>) -> bool {
     track.map(|t| t.id.as_str()) != pushed.track_id.as_deref()
         || track.is_some_and(|t| t.cover_id != pushed.cover_id)
+}
+
+/// The metadata is pushed now: it is out of date, except that a `(track, cover)` that failed
+/// within the last [`RETRY_AFTER`] waits, and one that went out without its own cover is
+/// tried again once that time has passed.
+fn metadata_due(pushed: &Pushed, track: Option<&Track>, now: Instant) -> bool {
+    let failed = track.and_then(|t| {
+        pushed
+            .failed
+            .as_ref()
+            .filter(|f| f.track_id == t.id && f.cover_id == t.cover_id)
+    });
+    match failed {
+        Some(failed) => now.saturating_duration_since(failed.at) >= RETRY_AFTER,
+        None => metadata_stale(pushed, track),
+    }
+}
+
+fn failed_now(track: &Track, now: Instant) -> Option<Failed> {
+    Some(Failed {
+        track_id: track.id.clone(),
+        cover_id: track.cover_id.clone(),
+        at: now,
+    })
 }
 
 fn push(
@@ -164,7 +202,8 @@ fn push(
     state: &PlayerState,
     cover_for: &CoverFor,
 ) {
-    let track_changed = metadata_stale(pushed, state.track.as_ref());
+    let now = Instant::now();
+    let track_changed = metadata_due(pushed, state.track.as_ref(), now);
     let status_changed = Some(state.status) != pushed.status;
     let position_due = match state.status {
         PlayerStatus::Playing => pushed.at.is_none_or(|at| at.elapsed() >= POSITION_INTERVAL),
@@ -177,20 +216,26 @@ fn push(
     if track_changed {
         match &state.track {
             Some(track) => {
-                let cover = cover_for(track);
+                let (cover, own) = cover_for(track);
                 let metadata = to_metadata(track, cover.as_deref());
                 match controls.set_metadata(metadata.as_metadata()) {
-                    // Remembered only on success, so a failed update is retried.
+                    // A missing own cover is fetched again in a minute.
                     Ok(()) => {
                         pushed.track_id = Some(track.id.clone());
                         pushed.cover_id = track.cover_id.clone();
+                        pushed.failed = if own { None } else { failed_now(track, now) };
                     }
-                    Err(err) => eprintln!("updating the media metadata failed: {err:?}"),
+                    // Retried in a minute, not on every push.
+                    Err(err) => {
+                        eprintln!("updating the media metadata failed: {err:?}");
+                        pushed.failed = failed_now(track, now);
+                    }
                 }
             }
             None => {
                 pushed.track_id = None;
                 pushed.cover_id = None;
+                pushed.failed = None;
             }
         }
     }
@@ -320,7 +365,13 @@ fn run(receiver: Receiver<PlayerState>, app: AppHandle, hwnd: Option<usize>, cov
         };
         // The overlay keeps the previous artwork unless a new one is set, so a track
         // without a usable cover gets the placeholder.
-        own().or_else(|| crate::thumbs::placeholder_cover(&cover_cache))
+        match own() {
+            Some(path) => (Some(path), true),
+            None => (
+                crate::thumbs::placeholder_cover(&cover_cache),
+                track.cover_id.is_none(),
+            ),
+        }
     });
     let mut pushed = Pushed::default();
     while let Ok(mut state) = receiver.recv() {
@@ -392,6 +443,41 @@ mod tests {
         assert!(metadata_stale(&pushed, Some(&covered)));
 
         assert!(metadata_stale(&pushed, None), "track gone");
+    }
+
+    #[test]
+    fn a_failed_track_and_cover_is_retried_after_a_minute() {
+        let start = Instant::now();
+        let mut playing = track();
+        playing.cover_id = Some("nd-al-1".into());
+        let mut pushed = Pushed {
+            failed: failed_now(&playing, start),
+            ..Pushed::default()
+        };
+        // The update failed: not again on the next pushes.
+        assert!(!metadata_due(&pushed, Some(&playing), start));
+        assert!(!metadata_due(
+            &pushed,
+            Some(&playing),
+            start + Duration::from_secs(59)
+        ));
+        assert!(metadata_due(&pushed, Some(&playing), start + RETRY_AFTER));
+        // Another track, or another cover, goes out at once.
+        let mut other = track();
+        other.id = "t2".into();
+        assert!(metadata_due(&pushed, Some(&other), start));
+        let mut recovered = playing.clone();
+        recovered.cover_id = Some("nd-al-2".into());
+        assert!(metadata_due(&pushed, Some(&recovered), start));
+
+        // Sent with the placeholder: up to date, but the own cover is tried in a minute.
+        pushed.track_id = Some(playing.id.clone());
+        pushed.cover_id = playing.cover_id.clone();
+        assert!(!metadata_due(&pushed, Some(&playing), start));
+        assert!(metadata_due(&pushed, Some(&playing), start + RETRY_AFTER));
+        // Sent with its own cover: nothing to retry.
+        pushed.failed = None;
+        assert!(!metadata_due(&pushed, Some(&playing), start + RETRY_AFTER));
     }
 
     fn state(status: PlayerStatus, position_ms: u64) -> PlayerState {

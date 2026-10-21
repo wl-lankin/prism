@@ -147,11 +147,14 @@ pub fn ensure_server(db: &Db, key: &str) -> anyhow::Result<bool> {
 }
 
 /// Deletes every Navidrome row (tracks, albums, favorites, play stats, both queues, remote
-/// playlists) and every sync state key except `server`.
+/// playlists, cover rows and cover lookups) and every sync state key except `server`. The
+/// cached cover files go after the commit, through the service's cover purge.
 pub fn wipe_navidrome(tx: &Transaction) -> anyhow::Result<()> {
     tx.execute_batch(
         "DELETE FROM tracks WHERE source = 'navidrome';
          DELETE FROM albums WHERE source = 'navidrome';
+         DELETE FROM covers WHERE id GLOB 'nd-*';
+         DELETE FROM cover_lookups WHERE album_id GLOB 'navidrome:*';
          DELETE FROM favorites WHERE source = 'navidrome';
          DELETE FROM track_stats WHERE track_id GLOB 'navidrome:*';
          DELETE FROM navidrome_star_queue;
@@ -1058,7 +1061,12 @@ mod tests {
                  INSERT INTO remote_playlists (id, name, updated_at)
                      VALUES ('navidrome:pl-0', 'Demo Playlist 1', 1);
                  INSERT INTO remote_playlist_tracks (playlist_id, position, track_id)
-                     VALUES ('navidrome:pl-0', 0, 'navidrome:tr-0');",
+                     VALUES ('navidrome:pl-0', 0, 'navidrome:tr-0');
+                 INSERT INTO covers (id, file) VALUES ('nd-al-0_cover', 'nd-al-0_cover.jpg'),
+                                                      ('abc123', 'abc123.jpg');
+                 INSERT INTO cover_lookups (album_id, status, checked_at)
+                     VALUES ('navidrome:al-0', 'notfound', 1),
+                            ('local:album', 'notfound', 1);",
             )
             .unwrap();
         }
@@ -1076,6 +1084,8 @@ mod tests {
             "remote_playlists",
             "remote_playlist_tracks",
             "navidrome_state WHERE key <> 'server'",
+            "covers WHERE id GLOB 'nd-*'",
+            "cover_lookups WHERE album_id GLOB 'navidrome:*'",
         ] {
             assert_eq!(
                 env.count(&format!("SELECT COUNT(*) FROM {table}")),
@@ -1083,6 +1093,15 @@ mod tests {
                 "{table}"
             );
         }
+        // Local cover rows and lookups stay.
+        assert_eq!(
+            env.count("SELECT COUNT(*) FROM covers WHERE id = 'abc123'"),
+            1
+        );
+        assert_eq!(
+            env.count("SELECT COUNT(*) FROM cover_lookups WHERE album_id = 'local:album'"),
+            1
+        );
         assert_eq!(env.state("server"), Some(other));
         assert_eq!(env.local_rows(), (1, 1, 2, 1));
 

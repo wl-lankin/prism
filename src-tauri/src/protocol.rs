@@ -24,7 +24,10 @@ pub fn register<R: Runtime>(
     tauri::async_runtime::spawn_blocking(move || {
         // A panic in a decoder must still answer the request.
         let response = catch_unwind(AssertUnwindSafe(|| {
-            let state = app.state::<AppState>();
+            // A request that arrives before setup finished gets a retryable answer.
+            let Some(state) = app.try_state::<AppState>() else {
+                return no_store(StatusCode::SERVICE_UNAVAILABLE, "starting");
+            };
             let store = &state.library.covers;
             match store.dir().parent() {
                 Some(cache) => handle(&state.thumbs, store, cache, &path),
@@ -63,6 +66,13 @@ pub fn handle(
         Err(ResizeError::Internal(_)) => {
             return plain(StatusCode::INTERNAL_SERVER_ERROR, "cover cannot be served")
         }
+        // The server is offline: the web view must ask again later, not keep this answer.
+        Err(ResizeError::Unreachable) => {
+            return no_store(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "cover server not reachable",
+            )
+        }
     };
     let Ok(body) = std::fs::read(&cached) else {
         return plain(StatusCode::INTERNAL_SERVER_ERROR, "cover cannot be served");
@@ -85,11 +95,25 @@ fn plain(status: StatusCode, message: &str) -> Response<Vec<u8>> {
         .unwrap_or_else(|_| Response::new(Vec::new()))
 }
 
+/// A plain answer the web view must not cache.
+fn no_store(status: StatusCode, message: &str) -> Response<Vec<u8>> {
+    let mut response = plain(status, message);
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("no-store"),
+    );
+    response
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use image::{ImageFormat, RgbImage};
     use std::io::Cursor;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    use crate::thumbs::RemoteCovers;
 
     fn png(width: u32, height: u32) -> Vec<u8> {
         let image = RgbImage::from_fn(width, height, |x, y| image::Rgb([x as u8, y as u8, 90]));
@@ -191,6 +215,58 @@ mod tests {
         let id = store.store_bytes(&bytes).unwrap();
         let response = handle(&gate(), &store, root.path(), &format!("/cover/{id}/96"));
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    /// A server that is never reachable and counts how often it was asked.
+    #[derive(Default)]
+    struct DownServer(AtomicUsize);
+
+    impl RemoteCovers for DownServer {
+        fn fetch(&self, _: &str, _: u32) -> Result<Vec<u8>, ResizeError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(ResizeError::Unreachable)
+        }
+    }
+
+    fn down_gate() -> (ResizeGate, Arc<DownServer>) {
+        let server = Arc::new(DownServer::default());
+        let gate = gate();
+        gate.set_remote(server.clone());
+        (gate, server)
+    }
+
+    #[test]
+    fn protocol_maps_unreachable_to_503_no_store() {
+        let (root, store) = setup();
+        let (gate, server) = down_gate();
+        let response = handle(&gate, &store, root.path(), "/cover/nd-al-1_abc/300");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(server.0.load(Ordering::SeqCst), 1);
+        assert!(!root.path().join("300").join("nd-al-1_abc.jpg").exists());
+    }
+
+    #[test]
+    fn non_hex_local_ids_still_rejected() {
+        let (root, store) = setup();
+        let (gate, server) = down_gate();
+        for path in [
+            "/cover/xyz/96",
+            "/cover/nd-/96",
+            "/cover/ND-al-1/96",
+            "/cover/nd-al%201/96",
+            "/cover/nd-al:1/96",
+            "/cover/nd-..%5Cx/96",
+            "/cover/n-al-1/96",
+        ] {
+            let response = handle(&gate, &store, root.path(), path);
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+        }
+        assert_eq!(
+            server.0.load(Ordering::SeqCst),
+            0,
+            "no id above reaches the server"
+        );
     }
 
     #[test]
