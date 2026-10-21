@@ -324,7 +324,12 @@ impl FakeStation {
             "homepage": self.homepage,
             "favicon": self.favicon,
             "tags": self.tags,
-            "country": "Germany",
+            "country": match self.country_code.as_str() {
+                "DE" => "Germany",
+                "AT" => "Austria",
+                "CH" => "Switzerland",
+                other => other,
+            },
             "countrycode": self.country_code,
             "iso_3166_2": "",
             "state": self.state,
@@ -365,6 +370,8 @@ pub(crate) enum Fault {
     Html,
     /// A 200 with a 9 MiB body.
     Huge,
+    /// A 200 with a 9 MiB body and no Content-Length (the body ends when the connection closes).
+    HugeUnsized,
 }
 
 /// One request the fake directory received.
@@ -596,6 +603,16 @@ fn serve_directory(
                                 200,
                                 "<html><body>Maintenance</body></html>",
                             ),
+                            Fault::HugeUnsized => {
+                                let head = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n";
+                                let _ = stream.write_all(head.as_bytes());
+                                let chunk = vec![b' '; 64 * 1024];
+                                for _ in 0..(9 * 1024 * 1024) / chunk.len() {
+                                    if stream.write_all(&chunk).is_err() {
+                                        break;
+                                    }
+                                }
+                            }
                             Fault::Huge => {
                                 let size = 9 * 1024 * 1024;
                                 let head = format!(

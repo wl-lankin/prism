@@ -271,7 +271,7 @@ fn parse_array(body: &[u8], host: &str) -> Result<Vec<Value>, DirectoryError> {
     match serde_json::from_slice::<Value>(body) {
         Ok(Value::Array(items)) => Ok(items),
         _ => Err(DirectoryError::BadResponse(format!(
-            "something else than a list ({host})"
+            "something other than a list ({host})"
         ))),
     }
 }
@@ -544,8 +544,12 @@ impl Directory {
     }
 
     /// Tries each mirror at most once, starting with the one that answered last. Offline and 5xx
-    /// move on; anything else ends the request.
-    fn get(&self, path: &str, params: &[(&str, String)]) -> Result<Vec<u8>, DirectoryError> {
+    /// move on; anything else ends the request. Returns the body and the host that sent it.
+    fn get(
+        &self,
+        path: &str,
+        params: &[(&str, String)],
+    ) -> Result<(Vec<u8>, String), DirectoryError> {
         let (bases, start) = {
             let mirrors = self.mirrors.lock().unwrap_or_else(|e| e.into_inner());
             (mirrors.bases.clone(), mirrors.first)
@@ -559,7 +563,7 @@ impl Directory {
                     if mirrors.bases == bases {
                         mirrors.first = index;
                     }
-                    return Ok(body);
+                    return Ok((body, host_of(&bases[index])));
                 }
                 Err(err) if err.is_down() => last = Some(err),
                 Err(err) => return Err(err),
@@ -573,13 +577,13 @@ impl Directory {
         path: &str,
         params: &[(&str, String)],
     ) -> Result<Vec<Value>, DirectoryError> {
-        let body = self.get(path, params)?;
-        parse_array(&body, "the directory")
+        let (body, host) = self.get(path, params)?;
+        parse_array(&body, &host)
     }
 
     pub fn search(&self, query: &StationQuery) -> Result<Vec<Station>, DirectoryError> {
-        let body = self.get("/json/stations/search", &query.params())?;
-        parse_stations(&body, "the directory")
+        let (body, host) = self.get("/json/stations/search", &query.params())?;
+        parse_stations(&body, &host)
     }
 
     /// Stations by uuid (invalid uuids are skipped), asked in batches of 50.
@@ -598,8 +602,8 @@ impl Directory {
         let mut stations = Vec::new();
         for batch in wanted.chunks(UUID_BATCH) {
             let params = [("uuids", batch.join(","))];
-            let body = self.get("/json/stations/byuuid", &params)?;
-            stations.extend(parse_stations(&body, "the directory")?);
+            let (body, host) = self.get("/json/stations/byuuid", &params)?;
+            stations.extend(parse_stations(&body, &host)?);
         }
         Ok(stations)
     }
@@ -981,11 +985,24 @@ mod tests {
     #[test]
     fn huge_body_is_refused() {
         let server = FakeDirectory::start(vec![]);
-        server.set_fault(Fault::Huge);
-        let err = directory(&[&server])
-            .search(&StationQuery::default())
-            .unwrap_err();
-        assert_eq!(err.code(), "badResponse");
+        let dir = directory(&[&server]);
+        // Sized: refused by Content-Length. Unsized: refused by the read cap.
+        for fault in [Fault::Huge, Fault::HugeUnsized] {
+            server.set_fault(fault);
+            let err = dir.search(&StationQuery::default()).unwrap_err();
+            assert_eq!(err.code(), "badResponse", "{fault:?}");
+        }
+    }
+
+    #[test]
+    fn a_non_list_names_the_host() {
+        let server = FakeDirectory::start(vec![]);
+        server.set_fault(Fault::Html);
+        let text = directory(&[&server]).top_tags(5).unwrap_err().to_string();
+        assert_eq!(
+            text,
+            "the directory sent something other than a list (127.0.0.1)"
+        );
     }
 
     #[test]
