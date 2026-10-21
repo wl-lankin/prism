@@ -269,12 +269,15 @@ export interface QueueItem {
   track: Track | null;
 }
 
-/** `track`: the track could not be played and the player moved on. `offline`: the server could
- * not be reached; the player paused on the track and Play resumes it where it stopped. */
+/** `track`: the track could not be played and the player moved on. `offline`: the server or
+ * the station could not be reached; the player paused on the entry and Play resumes it where it
+ * stopped (a station joins live again). */
 export type PlayerErrorKind = 'track' | 'offline';
 
 export interface PlayerError {
   trackId: string;
   message: string;
   kind: PlayerErrorKind;
+  /** Picks the offline notice: `navidrome.offlineNotice` or `radio.offlineNotice`. */
+  source: Source;
 }

@@ -288,6 +288,20 @@ fn local_tracks_are_ignored() {
 }
 
 #[test]
+fn radio_stations_are_never_scrobbled() {
+    let mut run = Run::new();
+    let station = crate::radio::model::tests::station(1).as_track();
+    assert!(run.change(&station).is_empty());
+    assert!(run.play(&station, 0, 600_000).is_empty());
+    // A station also ends a Navidrome play, like a local track.
+    let song = track("navidrome:tr-1", 60_000);
+    run.change(&song);
+    run.play(&song, 0, 20_000);
+    assert!(run.change(&station).is_empty());
+    assert!(run.play(&song, 20_000, 40_000).is_empty());
+}
+
+#[test]
 fn submits_once_per_play() {
     let mut run = Run::new();
     let song = track("navidrome:tr-1", 60_000);

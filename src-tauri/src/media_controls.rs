@@ -17,7 +17,7 @@ use souvlaki::{
 use tauri::{AppHandle, Manager};
 
 use crate::library::model::Track;
-use crate::player::{EventSink, PlayerEvent, PlayerState, PlayerStatus};
+use crate::player::{is_live, EventSink, PlayerEvent, PlayerState, PlayerStatus};
 use crate::AppState;
 
 /// Size of the cover handed to the OS.
@@ -36,7 +36,9 @@ pub struct OwnedMetadata {
     /// `file://` plus the cover path. souvlaki on Windows strips the prefix and opens the
     /// rest as a path, so the path is not percent-encoded.
     pub cover_url: Option<String>,
-    pub duration: Duration,
+    /// `None` for a station. macOS then shows no progress bar; Windows (souvlaki sets the
+    /// SMTC timeline to 0..0) shows an empty one.
+    pub duration: Option<Duration>,
 }
 
 impl OwnedMetadata {
@@ -46,19 +48,33 @@ impl OwnedMetadata {
             album: Some(&self.album),
             artist: Some(&self.artist),
             cover_url: self.cover_url.as_deref(),
-            duration: Some(self.duration),
+            duration: self.duration,
         }
     }
 }
 
-/// Maps a library track (and its cached cover file, if any) to OS metadata.
-pub fn to_metadata(track: &Track, cover_file: Option<&Path>) -> OwnedMetadata {
+/// The stream title that applies to `track`: only a station has one, and a blank one is none.
+fn shown_title<'a>(track: &Track, live_title: Option<&'a str>) -> Option<&'a str> {
+    live_title.filter(|title| is_live(track) && !title.trim().is_empty())
+}
+
+/// Maps a library track (and its cached cover file, if any) to OS metadata. A station shows
+/// the stream title (`live_title`) over its name, or its name over its region line.
+pub fn to_metadata(
+    track: &Track,
+    live_title: Option<&str>,
+    cover_file: Option<&Path>,
+) -> OwnedMetadata {
+    let (title, artist) = match shown_title(track, live_title) {
+        Some(title) => (title.to_string(), track.title.clone()),
+        None => (track.title.clone(), track.artist.clone()),
+    };
     OwnedMetadata {
-        title: track.title.clone(),
-        artist: track.artist.clone(),
+        title,
+        artist,
         album: track.album.clone(),
         cover_url: cover_file.map(|path| cover_url(path, cfg!(target_os = "windows"))),
-        duration: Duration::from_millis(track.duration_ms),
+        duration: (!is_live(track)).then(|| Duration::from_millis(track.duration_ms)),
     }
 }
 
@@ -102,7 +118,24 @@ pub enum Action {
 
 /// Maps an OS event to a player action, given the player's current state. The player only
 /// has a toggle, so Play and Pause act only when they would change something.
+///
+/// A station cannot seek or skip. souvlaki 0.8 cannot disable single buttons: on Windows the
+/// SMTC next and previous buttons stay enabled, on macOS the remote commands too, so on both
+/// the keys are ignored here (and in the engine).
 pub fn action_for(event: &MediaControlEvent, state: &PlayerState) -> Option<Action> {
+    let live = state.track.as_ref().is_some_and(is_live);
+    if live
+        && matches!(
+            event,
+            MediaControlEvent::Next
+                | MediaControlEvent::Previous
+                | MediaControlEvent::SetPosition(_)
+                | MediaControlEvent::Seek(_)
+                | MediaControlEvent::SeekBy(..)
+        )
+    {
+        return None;
+    }
     let seek_by = |direction: SeekDirection, ms: u64| {
         let target = match direction {
             SeekDirection::Forward => state.position_ms.saturating_add(ms),
@@ -130,8 +163,10 @@ pub fn action_for(event: &MediaControlEvent, state: &PlayerState) -> Option<Acti
     }
 }
 
+/// A station has no position to show: macOS then sets no elapsed time, Windows a position of 0.
 fn playback_for(state: &PlayerState) -> MediaPlayback {
-    let progress = Some(MediaPosition(Duration::from_millis(state.position_ms)));
+    let live = state.track.as_ref().is_some_and(is_live);
+    let progress = (!live).then(|| MediaPosition(Duration::from_millis(state.position_ms)));
     match state.status {
         PlayerStatus::Idle => MediaPlayback::Stopped,
         PlayerStatus::Loading | PlayerStatus::Paused => MediaPlayback::Paused { progress },
@@ -149,6 +184,8 @@ struct Pushed {
     track_id: Option<String>,
     /// The cover of `track_id` as sent; a lookup can add one to the playing track.
     cover_id: Option<String>,
+    /// The stream title of a station as sent.
+    title: Option<String>,
     status: Option<PlayerStatus>,
     position_ms: u64,
     at: Option<Instant>,
@@ -174,8 +211,17 @@ fn metadata_stale(pushed: &Pushed, track: Option<&Track>) -> bool {
 
 /// The metadata is pushed now: it is out of date, except that a `(track, cover)` that failed
 /// within the last [`RETRY_AFTER`] waits, and one that went out without its own cover is
-/// tried again once that time has passed.
-fn metadata_due(pushed: &Pushed, track: Option<&Track>, now: Instant) -> bool {
+/// tried again once that time has passed. A station's new stream title goes out at once.
+fn metadata_due(
+    pushed: &Pushed,
+    track: Option<&Track>,
+    live_title: Option<&str>,
+    now: Instant,
+) -> bool {
+    let title = track.and_then(|t| shown_title(t, live_title));
+    if track.is_some() && title != pushed.title.as_deref() {
+        return true;
+    }
     let failed = track.and_then(|t| {
         pushed
             .failed
@@ -200,16 +246,19 @@ fn push(
     controls: &mut MediaControls,
     pushed: &mut Pushed,
     state: &PlayerState,
+    live_title: Option<&str>,
     cover_for: &CoverFor,
 ) {
     let now = Instant::now();
-    let track_changed = metadata_due(pushed, state.track.as_ref(), now);
+    let track_changed = metadata_due(pushed, state.track.as_ref(), live_title, now);
     let status_changed = Some(state.status) != pushed.status;
-    let position_due = match state.status {
-        PlayerStatus::Playing => pushed.at.is_none_or(|at| at.elapsed() >= POSITION_INTERVAL),
-        // A seek while paused must show up too.
-        _ => state.position_ms != pushed.position_ms,
-    };
+    let live = state.track.as_ref().is_some_and(is_live);
+    let position_due = !live
+        && match state.status {
+            PlayerStatus::Playing => pushed.at.is_none_or(|at| at.elapsed() >= POSITION_INTERVAL),
+            // A seek while paused must show up too.
+            _ => state.position_ms != pushed.position_ms,
+        };
     if !(track_changed || status_changed || position_due) {
         return;
     }
@@ -217,7 +266,9 @@ fn push(
         match &state.track {
             Some(track) => {
                 let (cover, own) = cover_for(track);
-                let metadata = to_metadata(track, cover.as_deref());
+                let metadata = to_metadata(track, live_title, cover.as_deref());
+                // Set even when the update fails, so a title is not resent on every push.
+                pushed.title = shown_title(track, live_title).map(str::to_string);
                 match controls.set_metadata(metadata.as_metadata()) {
                     // A missing own cover is fetched again in a minute.
                     Ok(()) => {
@@ -235,6 +286,7 @@ fn push(
             None => {
                 pushed.track_id = None;
                 pushed.cover_id = None;
+                pushed.title = None;
                 pushed.failed = None;
             }
         }
@@ -250,15 +302,22 @@ fn push(
 /// The player-state side of the OS controls. [`sink`](MediaBridge::sink) goes into the
 /// player's event fan-out; [`start`](MediaBridge::start) runs once the main window exists.
 pub struct MediaBridge {
-    states: Sender<PlayerState>,
-    pending: Mutex<Option<Receiver<PlayerState>>>,
+    updates: Sender<Update>,
+    pending: Mutex<Option<Receiver<Update>>>,
+}
+
+/// What reaches the worker.
+enum Update {
+    State(Box<PlayerState>),
+    /// The current station's stream title (`None`: none known, or a new station).
+    LiveTitle(Option<String>),
 }
 
 impl MediaBridge {
     pub fn new() -> Arc<MediaBridge> {
-        let (states, receiver) = crossbeam_channel::unbounded();
+        let (updates, receiver) = crossbeam_channel::unbounded();
         Arc::new(MediaBridge {
-            states,
+            updates,
             pending: Mutex::new(Some(receiver)),
         })
     }
@@ -268,9 +327,15 @@ impl MediaBridge {
         let bridge = Arc::clone(self);
         Arc::new(move |event| {
             if let PlayerEvent::State(state) = event {
-                let _ = bridge.states.send(state);
+                let _ = bridge.updates.send(Update::State(Box::new(state)));
             }
         })
+    }
+
+    /// The stream title of the station that plays, shown in place of its name while the
+    /// player is on a station (ignored for tracks). Never blocks.
+    pub fn set_live_title(&self, title: Option<String>) {
+        let _ = self.updates.send(Update::LiveTitle(title));
     }
 
     /// Starts the worker. `hwnd` is the main window handle (Windows) or `None`. The worker
@@ -351,7 +416,7 @@ fn create(app: &AppHandle, hwnd: Option<usize>) -> Option<MediaControls> {
     }
 }
 
-fn run(receiver: Receiver<PlayerState>, app: AppHandle, hwnd: Option<usize>, cover_cache: PathBuf) {
+fn run(receiver: Receiver<Update>, app: AppHandle, hwnd: Option<usize>, cover_cache: PathBuf) {
     let mut controls = create(&app, hwnd);
     let cover_app = app.clone();
     let cover_for: CoverFor = Box::new(move |track| {
@@ -374,13 +439,24 @@ fn run(receiver: Receiver<PlayerState>, app: AppHandle, hwnd: Option<usize>, cov
         }
     });
     let mut pushed = Pushed::default();
-    while let Ok(mut state) = receiver.recv() {
-        // Only the newest state matters.
-        while let Ok(newer) = receiver.try_recv() {
-            state = newer;
+    let mut state: Option<Box<PlayerState>> = None;
+    let mut live_title: Option<String> = None;
+    while let Ok(update) = receiver.recv() {
+        // Only the newest state and title matter.
+        for update in std::iter::once(update).chain(receiver.try_iter()) {
+            match update {
+                Update::State(newer) => state = Some(newer),
+                Update::LiveTitle(title) => live_title = title,
+            }
         }
-        if let Some(controls) = controls.as_mut() {
-            push(controls, &mut pushed, &state, &cover_for);
+        if let (Some(controls), Some(state)) = (controls.as_mut(), state.as_ref()) {
+            push(
+                controls,
+                &mut pushed,
+                state,
+                live_title.as_deref(),
+                &cover_for,
+            );
         }
     }
 }
@@ -455,29 +531,28 @@ mod tests {
             ..Pushed::default()
         };
         // The update failed: not again on the next pushes.
-        assert!(!metadata_due(&pushed, Some(&playing), start));
-        assert!(!metadata_due(
-            &pushed,
-            Some(&playing),
-            start + Duration::from_secs(59)
-        ));
-        assert!(metadata_due(&pushed, Some(&playing), start + RETRY_AFTER));
+        let due = |pushed: &Pushed, track: &Track, at: Instant| {
+            metadata_due(pushed, Some(track), None, at)
+        };
+        assert!(!due(&pushed, &playing, start));
+        assert!(!due(&pushed, &playing, start + Duration::from_secs(59)));
+        assert!(due(&pushed, &playing, start + RETRY_AFTER));
         // Another track, or another cover, goes out at once.
         let mut other = track();
         other.id = "t2".into();
-        assert!(metadata_due(&pushed, Some(&other), start));
+        assert!(due(&pushed, &other, start));
         let mut recovered = playing.clone();
         recovered.cover_id = Some("nd-al-2".into());
-        assert!(metadata_due(&pushed, Some(&recovered), start));
+        assert!(due(&pushed, &recovered, start));
 
         // Sent with the placeholder: up to date, but the own cover is tried in a minute.
         pushed.track_id = Some(playing.id.clone());
         pushed.cover_id = playing.cover_id.clone();
-        assert!(!metadata_due(&pushed, Some(&playing), start));
-        assert!(metadata_due(&pushed, Some(&playing), start + RETRY_AFTER));
+        assert!(!due(&pushed, &playing, start));
+        assert!(due(&pushed, &playing, start + RETRY_AFTER));
         // Sent with its own cover: nothing to retry.
         pushed.failed = None;
-        assert!(!metadata_due(&pushed, Some(&playing), start + RETRY_AFTER));
+        assert!(!due(&pushed, &playing, start + RETRY_AFTER));
     }
 
     fn state(status: PlayerStatus, position_ms: u64) -> PlayerState {
@@ -499,11 +574,11 @@ mod tests {
     #[test]
     fn maps_track_to_metadata() {
         let cover = Path::new("cache").join("covers").join("600").join("c1.jpg");
-        let metadata = to_metadata(&track(), Some(&cover));
+        let metadata = to_metadata(&track(), None, Some(&cover));
         assert_eq!(metadata.title, "Song");
         assert_eq!(metadata.artist, "Artist");
         assert_eq!(metadata.album, "Album");
-        assert_eq!(metadata.duration, Duration::from_millis(215_500));
+        assert_eq!(metadata.duration, Some(Duration::from_millis(215_500)));
         assert_eq!(
             metadata.cover_url,
             Some(cover_url(&cover, cfg!(target_os = "windows")))
@@ -541,7 +616,7 @@ mod tests {
 
     #[test]
     fn no_cover_means_no_cover_url() {
-        assert_eq!(to_metadata(&track(), None).cover_url, None);
+        assert_eq!(to_metadata(&track(), None, None).cover_url, None);
     }
 
     #[test]
@@ -605,6 +680,117 @@ mod tests {
             Some(Action::Seek(215_500))
         );
         assert_eq!(action_for(&MediaControlEvent::Raise, &playing), None);
+    }
+
+    fn station() -> Track {
+        crate::radio::model::tests::station(1).as_track()
+    }
+
+    fn station_state(status: PlayerStatus, position_ms: u64) -> PlayerState {
+        PlayerState {
+            track: Some(station()),
+            duration_ms: 0,
+            ..state(status, position_ms)
+        }
+    }
+
+    #[test]
+    fn live_metadata_shows_title_and_station() {
+        let station = station();
+        let cover = Path::new("cache")
+            .join("covers")
+            .join("600")
+            .join("rb-1.jpg");
+        let titled = to_metadata(&station, Some("Demo Artist - Demo Song"), Some(&cover));
+        assert_eq!(titled.title, "Demo Artist - Demo Song");
+        assert_eq!(titled.artist, "Demo Radio 1", "the station under the title");
+        assert_eq!(titled.album, "");
+        assert_eq!(titled.duration, None, "a station has no length");
+        assert_eq!(titled.as_metadata().duration, None);
+        assert_eq!(
+            titled.cover_url,
+            Some(cover_url(&cover, cfg!(target_os = "windows")))
+        );
+        let untitled = to_metadata(&station, None, None);
+        assert_eq!(untitled.title, "Demo Radio 1");
+        assert!(!station.artist.is_empty());
+        assert_eq!(untitled.artist, station.artist, "the region line");
+        assert_eq!(
+            to_metadata(&station, Some("  "), None).title,
+            "Demo Radio 1"
+        );
+        // A stream title never replaces a track's own.
+        let song = to_metadata(&track(), Some("Demo Artist - Demo Song"), None);
+        assert_eq!(song.title, "Song");
+        assert_eq!(song.duration, Some(Duration::from_millis(215_500)));
+    }
+
+    #[test]
+    fn live_disables_seek_next_and_prev() {
+        for status in [PlayerStatus::Playing, PlayerStatus::Paused] {
+            let live = station_state(status, 5_000);
+            for event in [
+                MediaControlEvent::Next,
+                MediaControlEvent::Previous,
+                MediaControlEvent::SetPosition(MediaPosition(Duration::from_secs(9))),
+                MediaControlEvent::Seek(SeekDirection::Forward),
+                MediaControlEvent::SeekBy(SeekDirection::Backward, Duration::from_secs(5)),
+            ] {
+                assert_eq!(action_for(&event, &live), None, "{status:?} {event:?}");
+            }
+            assert_eq!(
+                action_for(&MediaControlEvent::Toggle, &live),
+                Some(Action::Toggle)
+            );
+        }
+        assert_eq!(
+            action_for(
+                &MediaControlEvent::Play,
+                &station_state(PlayerStatus::Paused, 0)
+            ),
+            Some(Action::Toggle),
+            "Play joins the station again"
+        );
+    }
+
+    #[test]
+    fn live_playback_has_no_position() {
+        assert_eq!(
+            playback_for(&station_state(PlayerStatus::Playing, 5_000)),
+            MediaPlayback::Playing { progress: None }
+        );
+        assert_eq!(
+            playback_for(&station_state(PlayerStatus::Paused, 0)),
+            MediaPlayback::Paused { progress: None }
+        );
+    }
+
+    #[test]
+    fn a_new_stream_title_pushes_the_metadata_again() {
+        let now = Instant::now();
+        let station = station();
+        let mut pushed = Pushed {
+            track_id: Some(station.id.clone()),
+            cover_id: station.cover_id.clone(),
+            ..Pushed::default()
+        };
+        assert!(!metadata_due(&pushed, Some(&station), None, now));
+        assert!(metadata_due(&pushed, Some(&station), Some("A"), now));
+        pushed.title = Some("A".into());
+        assert!(!metadata_due(&pushed, Some(&station), Some("A"), now));
+        assert!(metadata_due(&pushed, Some(&station), Some("B"), now));
+        assert!(
+            metadata_due(&pushed, Some(&station), None, now),
+            "title gone"
+        );
+        // A title only counts for a station.
+        let song = track();
+        let pushed = Pushed {
+            track_id: Some(song.id.clone()),
+            cover_id: song.cover_id.clone(),
+            ..Pushed::default()
+        };
+        assert!(!metadata_due(&pushed, Some(&song), Some("A"), now));
     }
 
     #[test]

@@ -9,6 +9,7 @@ use rusqlite::{params, Connection};
 
 use crate::db::Db;
 use crate::player::{EventSink, PlayerEvent, DROPPED_PREFIX};
+use crate::radio::model::RADIO_PREFIX;
 
 use super::scan::lock;
 
@@ -54,8 +55,9 @@ fn spawn(db: Arc<Db>, clock: fn() -> i64) -> (EventSink, JoinHandle<()>) {
         .expect("spawning the history thread");
     let sink: EventSink = Arc::new(move |event| {
         if let PlayerEvent::TrackChanged(track) = event {
-            // Dropped files are not in the library; their stats would never be read.
-            if track.id.starts_with(DROPPED_PREFIX) {
+            // Dropped files are not in the library; their stats would never be read. Stations
+            // never enter play statistics.
+            if track.id.starts_with(DROPPED_PREFIX) || track.id.starts_with(RADIO_PREFIX) {
                 return;
             }
             let _ = sender.send((track.id, clock()));
@@ -139,6 +141,30 @@ mod tests {
                     .get::<_, i64>(0))
                 .unwrap(),
             1
+        );
+    }
+
+    #[test]
+    fn radio_plays_are_not_recorded() {
+        let db = Arc::new(Db::open_in_memory().unwrap());
+        let (sink, thread) = spawn(Arc::clone(&db), || 1_700_000_000_000);
+        let mut station = track(&format!(
+            "{RADIO_PREFIX}00000000-0000-4000-8000-000000000001"
+        ));
+        station.source = Source::Radio;
+        station.duration_ms = 0;
+        sink(PlayerEvent::TrackChanged(station));
+        sink(PlayerEvent::TrackChanged(track("t1")));
+        drop(sink);
+        thread.join().unwrap();
+        assert_eq!(
+            db.0.lock()
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM track_stats", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1,
+            "only the track"
         );
     }
 }
