@@ -4,7 +4,8 @@
 //! it; `shell::main_show` brings both back. While the window is open, the thumbnail preview
 //! carries previous, play/pause and next (`ITaskbarList3::ThumbBarAddButtons`), added each
 //! time the taskbar announces the button (`TaskbarButtonCreated`: at the first show, again
-//! after every hide and show, and after Explorer restarts).
+//! after every hide and show, and after Explorer restarts). The buttons go to whichever player
+//! is active (`shell::transport`), and the play/pause icon follows it (`shell::PlayButton`).
 //!
 //! The macOS counterpart is the Dock: `RunEvent::Reopen` shows the main window (`lib.rs`), and
 //! macOS has no thumbnail toolbar.
@@ -12,7 +13,7 @@
 use std::cell::RefCell;
 use std::sync::OnceLock;
 
-use tauri::{AppHandle, Manager, WebviewWindow};
+use tauri::{AppHandle, WebviewWindow};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
 use windows::Win32::UI::Shell::{
@@ -22,7 +23,7 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::HICON;
 
 use super::tray::TrayLabels;
-use crate::AppState;
+use super::{press_in, TransportButton};
 
 /// The thumbnail toolbar's buttons, by their command id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,6 +31,17 @@ pub enum ThumbAction {
     Previous,
     PlayPause,
     Next,
+}
+
+impl ThumbAction {
+    /// Every thumbnail button goes to whichever player is active.
+    pub fn button(self) -> TransportButton {
+        match self {
+            ThumbAction::Previous => TransportButton::Previous,
+            ThumbAction::PlayPause => TransportButton::PlayPause,
+            ThumbAction::Next => TransportButton::Next,
+        }
+    }
 }
 
 const ID_PREVIOUS: u32 = 1;
@@ -286,16 +298,8 @@ pub fn set_labels(app: &AppHandle, labels: TrayLabels) {
 const SUBCLASS_ID: usize = 0x5052_5442; // "PRTB"
 
 fn run(action: ThumbAction) {
-    let Some(state) = APP.get().and_then(|app| app.try_state::<AppState>()) else {
-        return;
-    };
-    let sent = match action {
-        ThumbAction::Previous => state.player.prev(),
-        ThumbAction::PlayPause => state.player.toggle(),
-        ThumbAction::Next => state.player.next(),
-    };
-    if let Err(err) = sent {
-        eprintln!("a thumbnail button failed: {err}");
+    if let Some(app) = APP.get() {
+        press_in(app, action.button(), "a thumbnail button");
     }
 }
 
@@ -341,6 +345,10 @@ mod tests {
         assert_eq!(thumb_action(click(4)), None);
         // A menu or accelerator command with the same id is not a thumbnail click.
         assert_eq!(thumb_action(2), None);
+        // Routed through the transport (`shell::thumb_buttons_follow_the_active_player`).
+        assert_eq!(ThumbAction::Previous.button(), TransportButton::Previous);
+        assert_eq!(ThumbAction::PlayPause.button(), TransportButton::PlayPause);
+        assert_eq!(ThumbAction::Next.button(), TransportButton::Next);
     }
 
     #[test]

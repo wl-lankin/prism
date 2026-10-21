@@ -94,6 +94,32 @@ it('replaces the track object when only its cover changes', async () => {
   stop();
 });
 
+it('loads the active player for a window that opens later', async () => {
+  invoke.mockImplementation(async (command: string) => (command === 'transport_active' ? 'ytm' : playing));
+  const stop = await initPlayer();
+  expect(invoke).toHaveBeenCalledWith('transport_active', undefined);
+  await vi.waitFor(() => expect(player.active).toBe('ytm'));
+  listeners.get('transport://active')!({ event: 'transport://active', id: 1, payload: 'prism' });
+  expect(player.active).toBe('prism');
+  stop();
+});
+
+it('an active change that arrives before transport_active answers wins', async () => {
+  let answer!: (active: string) => void;
+  invoke.mockImplementation((command: string) =>
+    command === 'transport_active' ? new Promise<string>((r) => (answer = r)) : Promise.resolve(playing),
+  );
+  player.active = 'prism';
+  const stop = await initPlayer();
+  listeners.get('transport://active')!({ event: 'transport://active', id: 1, payload: 'ytm' });
+  answer('prism');
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(player.active).toBe('ytm');
+  player.active = 'prism';
+  stop();
+});
+
 it('an event that arrives before the first player_state wins', async () => {
   let resolve!: (state: PlayerState) => void;
   invoke.mockReturnValue(new Promise<PlayerState>((r) => (resolve = r)));

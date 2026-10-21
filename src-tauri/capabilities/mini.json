@@ -10,6 +10,7 @@
     "allow-player-prev",
     "allow-player-set-volume",
     "allow-player-state",
+    "allow-transport-active",
     "allow-flow-start",
     "allow-library-genres",
     "allow-favorites-ids",

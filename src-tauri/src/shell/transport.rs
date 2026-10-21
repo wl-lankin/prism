@@ -27,6 +27,9 @@ pub const EXPECTED_PAUSE: Duration = Duration::from_secs(2);
 /// A YouTube Music start pauses Prism only once a report this long after the edge confirms it.
 pub const YTM_DEBOUNCE: Duration = Duration::from_millis(500);
 
+/// Payload: the new [`Active`], sent to the main and the mini page when it changes.
+pub const EVENT_ACTIVE: &str = "transport://active";
+
 /// The player transport commands go to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -331,7 +334,7 @@ pub fn late_sink(slot: Arc<OnceLock<Arc<Transport>>>) -> EventSink {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::player::{PlayerEvent, PlayerState, PlayerStatus};
     use crate::settings::RepeatMode;
@@ -340,7 +343,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     #[derive(Debug, Clone, PartialEq)]
-    enum Call {
+    pub(crate) enum Call {
         Toggle,
         Pause,
         Next,
@@ -350,7 +353,7 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct FakePrism {
+    pub(crate) struct FakePrism {
         calls: Mutex<Vec<Call>>,
     }
 
@@ -359,7 +362,7 @@ mod tests {
             self.calls.lock().unwrap().push(call);
             Ok(())
         }
-        fn calls(&self) -> Vec<Call> {
+        pub(crate) fn calls(&self) -> Vec<Call> {
             self.calls.lock().unwrap().clone()
         }
         fn pauses(&self) -> usize {
@@ -389,12 +392,12 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct FakeYtm {
+    pub(crate) struct FakeYtm {
         sent: Mutex<Vec<YtmAction>>,
     }
 
     impl FakeYtm {
-        fn sent(&self) -> Vec<YtmAction> {
+        pub(crate) fn sent(&self) -> Vec<YtmAction> {
             self.sent.lock().unwrap().clone()
         }
         fn pauses(&self) -> usize {
@@ -411,7 +414,7 @@ mod tests {
         }
     }
 
-    struct FakeClock {
+    pub(crate) struct FakeClock {
         now: Mutex<Instant>,
     }
 
@@ -427,15 +430,16 @@ mod tests {
         }
     }
 
-    struct Rig {
-        transport: Arc<Transport>,
-        prism: Arc<FakePrism>,
-        ytm: Arc<FakeYtm>,
+    /// A transport over a fake engine, a fake page and a fake clock.
+    pub(crate) struct Rig {
+        pub(crate) transport: Arc<Transport>,
+        pub(crate) prism: Arc<FakePrism>,
+        pub(crate) ytm: Arc<FakeYtm>,
         clock: Arc<FakeClock>,
     }
 
     impl Rig {
-        fn new() -> Rig {
+        pub(crate) fn new() -> Rig {
             let prism = Arc::new(FakePrism::default());
             let ytm = Arc::new(FakeYtm::default());
             let clock = Arc::new(FakeClock {
@@ -469,7 +473,7 @@ mod tests {
         }
 
         /// YouTube Music starts while Prism is quiet: it takes over at once.
-        fn ytm_plays(&self) {
+        pub(crate) fn ytm_plays(&self) {
             self.ytm(YtmStatus::Paused);
             self.ytm(YtmStatus::Playing);
             assert_eq!(self.transport.active(), Active::Ytm);

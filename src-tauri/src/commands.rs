@@ -31,6 +31,7 @@ use crate::secret::Secret;
 use crate::settings::{Change, Settings};
 use crate::shell;
 use crate::shell::mini::{self, MiniLayout};
+use crate::shell::transport::Active;
 use crate::shell::tray::TrayLabels;
 use crate::ytm::{self, state::YtmState};
 use crate::AppState;
@@ -129,30 +130,42 @@ pub fn player_play(
     state.player.play(track_ids, start_index as usize)
 }
 
+// The transport commands go to whichever player is active (Prism or YouTube Music).
+
 #[tauri::command]
 pub fn player_toggle(state: State<'_, AppState>) -> Result<(), String> {
-    state.player.toggle()
+    state.transport.toggle()
 }
 
 #[tauri::command]
 pub fn player_next(state: State<'_, AppState>) -> Result<(), String> {
-    state.player.next()
+    state.transport.next()
 }
 
 #[tauri::command]
 pub fn player_prev(state: State<'_, AppState>) -> Result<(), String> {
-    state.player.prev()
+    state.transport.prev()
 }
 
 #[tauri::command]
 pub fn player_seek(state: State<'_, AppState>, ms: u64) -> Result<(), String> {
-    state.player.seek(ms)
+    state.transport.seek(ms)
 }
 
+/// Only Prism's own volume is saved; YouTube Music's belongs to its page.
 #[tauri::command]
 pub fn player_set_volume(state: State<'_, AppState>, v: f32) -> Result<(), String> {
-    state.settings.remember_volume(v);
-    state.player.set_volume(v)
+    if state.transport.active() == Active::Prism {
+        state.settings.remember_volume(v);
+    }
+    state.transport.set_volume(v)
+}
+
+/// The player the transport targets now, for windows that load later (`transport://active`
+/// follows every change).
+#[tauri::command]
+pub fn transport_active(state: State<'_, AppState>) -> Active {
+    state.transport.active()
 }
 
 /// Plays dropped files without indexing them: tags are read on the fly, folders and non-audio
@@ -314,11 +327,20 @@ pub async fn library_genres(app: AppHandle) -> Result<Vec<String>, String> {
 
 // Flow
 
-/// Plays a new Flow; favorites without any fall back to the whole library.
+/// Plays a new Flow; favorites without any fall back to the whole library. A Flow always
+/// plays in Prism, so Prism takes the transport and YouTube Music pauses, whichever was
+/// active (an empty library touches neither).
 #[tauri::command]
 pub async fn flow_start(app: AppHandle, variant: FlowVariant) -> Result<FlowOutcome, String> {
-    let flow = Arc::clone(&app_state(&app)?.flow);
-    blocking(move || flow.start(variant)).await
+    let (flow, transport) = {
+        let state = app_state(&app)?;
+        (Arc::clone(&state.flow), Arc::clone(&state.transport))
+    };
+    let outcome = blocking(move || flow.start(variant)).await?;
+    if matches!(outcome, FlowOutcome::Started { .. }) {
+        transport.prism_starts();
+    }
+    Ok(outcome)
 }
 
 // Favorites
