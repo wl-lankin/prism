@@ -9,14 +9,16 @@ pub mod taskbar_win;
 pub mod transport;
 pub mod tray;
 
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tauri::{AppHandle, Manager, PhysicalRect};
 
 use crate::player::{EventSink, PlayerEvent, PlayerStatus};
 use crate::settings::Change;
+use crate::ytm::state::YtmStatus;
 use crate::AppState;
+use transport::{Active, Transport};
 
 /// The main window's label.
 pub const MAIN_LABEL: &str = "main";
@@ -171,29 +173,128 @@ pub fn main_show(app: &AppHandle) -> Result<(), String> {
     window.set_focus().map_err(fail)
 }
 
-/// Whether the play/pause buttons outside the page (the Windows thumbnail toolbar) show pause.
-pub fn shows_pause(status: PlayerStatus) -> bool {
-    status == PlayerStatus::Playing
+/// The transport buttons outside the page: the tray menu and the Windows thumbnail toolbar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportButton {
+    PlayPause,
+    Next,
+    Previous,
 }
 
-/// Follows the player for the Windows thumbnail toolbar's play/pause icon; only a change
-/// reaches the main thread. Nothing to follow on macOS (the menu says "Play/Pause").
-pub fn player_sink(app: AppHandle) -> EventSink {
-    const UNKNOWN: u8 = 0;
-    let shown = Arc::new(AtomicU8::new(UNKNOWN));
-    Arc::new(move |event| {
-        let PlayerEvent::State(state) = event else {
-            return;
-        };
-        let pause = shows_pause(state.status);
-        let code = if pause { 2 } else { 1 };
-        if shown.swap(code, Ordering::AcqRel) == code {
-            return;
+/// Presses `button` on whichever player is active.
+pub fn press(transport: &Transport, button: TransportButton) -> Result<(), String> {
+    match button {
+        TransportButton::PlayPause => transport.toggle(),
+        TransportButton::Next => transport.next(),
+        TransportButton::Previous => transport.prev(),
+    }
+}
+
+/// [`press`] through the app state; `source` names the entry point in the log.
+pub fn press_in(app: &AppHandle, button: TransportButton, source: &str) {
+    if let Some(state) = app.try_state::<AppState>() {
+        if let Err(err) = press(&state.transport, button) {
+            eprintln!("{source} failed: {err}");
         }
+    }
+}
+
+/// Whether the play/pause button outside the page (the Windows thumbnail toolbar) shows
+/// pause: while the active player plays.
+pub fn shows_pause(active: Active, prism: PlayerStatus, ytm: YtmStatus) -> bool {
+    match active {
+        Active::Prism => prism == PlayerStatus::Playing,
+        Active::Ytm => ytm == YtmStatus::Playing,
+    }
+}
+
+/// What the play/pause icon shows. Each update answers the new icon (true: pause) when it
+/// changed, `None` otherwise.
+#[derive(Debug)]
+pub struct PlayIcon {
+    active: Active,
+    prism: PlayerStatus,
+    ytm: YtmStatus,
+    shown: Option<bool>,
+}
+
+impl Default for PlayIcon {
+    fn default() -> Self {
+        PlayIcon {
+            active: Active::Prism,
+            prism: PlayerStatus::Idle,
+            ytm: YtmStatus::Idle,
+            shown: None,
+        }
+    }
+}
+
+impl PlayIcon {
+    pub fn prism(&mut self, status: PlayerStatus) -> Option<bool> {
+        self.prism = status;
+        self.settle()
+    }
+
+    pub fn ytm(&mut self, status: YtmStatus) -> Option<bool> {
+        self.ytm = status;
+        self.settle()
+    }
+
+    pub fn active(&mut self, active: Active) -> Option<bool> {
+        self.active = active;
+        self.settle()
+    }
+
+    fn settle(&mut self) -> Option<bool> {
+        let pause = shows_pause(self.active, self.prism, self.ytm);
+        (self.shown.replace(pause) != Some(pause)).then_some(pause)
+    }
+}
+
+/// Follows both players and the active one for the Windows thumbnail toolbar's play/pause
+/// icon; only a change reaches the main thread. Nothing to show on macOS (no thumbnail
+/// toolbar, and the tray menu says "Play/Pause").
+pub struct PlayButton {
+    icon: Mutex<PlayIcon>,
+    app: AppHandle,
+}
+
+impl PlayButton {
+    pub fn new(app: AppHandle) -> Arc<PlayButton> {
+        Arc::new(PlayButton {
+            icon: Mutex::new(PlayIcon::default()),
+            app,
+        })
+    }
+
+    fn update(&self, change: impl FnOnce(&mut PlayIcon) -> Option<bool>) {
+        let changed = match self.icon.lock() {
+            Ok(mut icon) => change(&mut icon),
+            Err(poisoned) => change(&mut poisoned.into_inner()),
+        };
         #[cfg(target_os = "windows")]
-        taskbar_win::set_playing(&app, pause);
+        if let Some(pause) = changed {
+            taskbar_win::set_playing(&self.app, pause);
+        }
         #[cfg(not(target_os = "windows"))]
-        let _ = &app;
+        let _ = (changed, &self.app);
+    }
+
+    pub fn on_ytm(&self, status: YtmStatus) {
+        self.update(|icon| icon.ytm(status));
+    }
+
+    pub fn on_active(&self, active: Active) {
+        self.update(|icon| icon.active(active));
+    }
+}
+
+/// Prism's side of the [`PlayButton`], for the player's event fan-out.
+pub fn player_sink(button: Arc<PlayButton>) -> EventSink {
+    Arc::new(move |event| {
+        if let PlayerEvent::State(state) = event {
+            button.update(|icon| icon.prism(state.status));
+        }
     })
 }
 
@@ -269,10 +370,66 @@ mod tests {
 
     #[test]
     fn thumb_button_shows_pause_only_while_playing() {
-        assert!(shows_pause(PlayerStatus::Playing));
-        assert!(!shows_pause(PlayerStatus::Paused));
-        assert!(!shows_pause(PlayerStatus::Idle));
-        assert!(!shows_pause(PlayerStatus::Loading));
+        let prism = |status| shows_pause(Active::Prism, status, YtmStatus::Playing);
+        assert!(prism(PlayerStatus::Playing));
+        assert!(!prism(PlayerStatus::Paused));
+        assert!(!prism(PlayerStatus::Idle));
+        assert!(!prism(PlayerStatus::Loading));
+        let ytm = |status| shows_pause(Active::Ytm, PlayerStatus::Playing, status);
+        assert!(ytm(YtmStatus::Playing));
+        assert!(!ytm(YtmStatus::Paused));
+        assert!(!ytm(YtmStatus::Idle));
+        assert!(!ytm(YtmStatus::Unavailable));
+    }
+
+    #[test]
+    fn thumb_buttons_follow_the_active_player() {
+        use crate::shell::transport::tests::{Call, Rig};
+        use crate::ytm::state::YtmAction;
+
+        // The buttons press whichever player is active.
+        let rig = Rig::new();
+        for button in [
+            TransportButton::Previous,
+            TransportButton::PlayPause,
+            TransportButton::Next,
+        ] {
+            press(&rig.transport, button).unwrap();
+        }
+        assert_eq!(
+            rig.prism.calls(),
+            vec![Call::Prev, Call::Toggle, Call::Next]
+        );
+        rig.ytm_plays();
+        for button in [
+            TransportButton::Previous,
+            TransportButton::PlayPause,
+            TransportButton::Next,
+        ] {
+            press(&rig.transport, button).unwrap();
+        }
+        assert_eq!(
+            rig.ytm.sent(),
+            vec![YtmAction::Prev, YtmAction::Toggle, YtmAction::Next]
+        );
+        assert_eq!(rig.prism.calls().len(), 3, "nothing more went to Prism");
+
+        // The play/pause icon follows the active player, and only a change goes out.
+        let mut icon = PlayIcon::default();
+        assert_eq!(icon.prism(PlayerStatus::Playing), Some(true));
+        assert_eq!(icon.prism(PlayerStatus::Playing), None);
+        assert_eq!(icon.ytm(YtmStatus::Paused), None, "Prism is active");
+        assert_eq!(icon.prism(PlayerStatus::Paused), Some(false));
+        assert_eq!(icon.ytm(YtmStatus::Playing), None, "still Prism's icon");
+        assert_eq!(icon.active(Active::Ytm), Some(true));
+        assert_eq!(
+            icon.prism(PlayerStatus::Playing),
+            None,
+            "YouTube Music's icon now"
+        );
+        assert_eq!(icon.ytm(YtmStatus::Paused), Some(false));
+        assert_eq!(icon.active(Active::Prism), Some(true));
+        assert_eq!(icon.active(Active::Prism), None);
     }
 
     #[test]

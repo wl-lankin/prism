@@ -69,8 +69,13 @@ pub struct AppState {
     pub transport: Arc<Transport>,
 }
 
-/// Sends YouTube Music's state to the main and the mini page (never to the page itself).
-fn ytm_emit(handle: tauri::AppHandle) -> ytm::StateEmit {
+/// Sends YouTube Music's state to the main and the mini page (never to the page itself), the
+/// OS media controls and the thumbnail toolbar's play/pause icon.
+fn ytm_emit(
+    handle: tauri::AppHandle,
+    media: Arc<MediaBridge>,
+    play_button: Arc<shell::PlayButton>,
+) -> ytm::StateEmit {
     use tauri::Emitter;
     Arc::new(move |state| {
         for label in [shell::MAIN_LABEL, shell::mini::MINI_LABEL] {
@@ -78,6 +83,27 @@ fn ytm_emit(handle: tauri::AppHandle) -> ytm::StateEmit {
                 eprintln!("emitting {} failed: {err}", ytm::EVENT_STATE);
             }
         }
+        media.set_ytm(state);
+        play_button.on_ytm(state.status);
+    })
+}
+
+/// Tells the main and the mini page, the OS media controls and the thumbnail toolbar which
+/// player the transport targets now.
+fn active_listener(
+    handle: tauri::AppHandle,
+    media: Arc<MediaBridge>,
+    play_button: Arc<shell::PlayButton>,
+) -> shell::transport::ActiveListener {
+    use tauri::Emitter;
+    Arc::new(move |active| {
+        for label in [shell::MAIN_LABEL, shell::mini::MINI_LABEL] {
+            if let Err(err) = handle.emit_to(label, shell::transport::EVENT_ACTIVE, active) {
+                eprintln!("emitting {} failed: {err}", shell::transport::EVENT_ACTIVE);
+            }
+        }
+        media.set_active(active);
+        play_button.on_active(active);
     })
 }
 
@@ -267,6 +293,7 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
     let folders = library.folders()?;
     let handle = app.handle().clone();
     let media = MediaBridge::new();
+    let play_button = shell::PlayButton::new(handle.clone());
     let dropped = Arc::new(DroppedFiles::new(Some(Arc::clone(&library.covers))));
     // The Flow service needs the player's handle and the player needs the service's sink:
     // the sink is plugged in once both exist.
@@ -293,7 +320,7 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
         fan_out(vec![
             tauri_sink(handle.clone()),
             media.sink(),
-            shell::player_sink(handle.clone()),
+            shell::player_sink(Arc::clone(&play_button)),
             library::history::spawn_recorder(Arc::clone(&library.db)),
             navidrome::scrobble::spawn_scrobbler(Arc::clone(&navidrome)),
             Arc::new(move |event| {
@@ -370,7 +397,7 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
     }
     let ytm = Arc::new(YtmService::new(
         Arc::new(ytm::WebviewEval(handle.clone())),
-        ytm_emit(handle.clone()),
+        ytm_emit(handle.clone(), Arc::clone(&media), Arc::clone(&play_button)),
     ));
     if let Err(err) = ytm::covers::attach(&thumbs, ytm.artwork()) {
         eprintln!("YouTube Music artwork is off: {err:#}");
@@ -379,6 +406,11 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
         player.handle(),
         Arc::clone(&ytm) as Arc<dyn YtmControl>,
         Arc::new(SystemClock),
+    ));
+    transport.on_active_changed(active_listener(
+        handle.clone(),
+        Arc::clone(&media),
+        play_button,
     ));
     let _ = transport_slot.set(Arc::clone(&transport));
     // Every report, heartbeats included: the transport's debounce counts on them.
@@ -493,6 +525,7 @@ pub fn run() {
             commands::player_seek,
             commands::player_set_volume,
             commands::player_state,
+            commands::transport_active,
             commands::player_play_files,
             commands::player_append,
             commands::player_jump,

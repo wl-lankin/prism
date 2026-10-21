@@ -1,7 +1,13 @@
 //! OS media controls: the Windows media overlay (SMTC) and macOS Now Playing, through
 //! souvlaki. Player state flows in over a channel from the event sink; media keys flow back
-//! as player commands. A worker thread owns the controls, so cover resizing and OS calls
+//! as transport commands. A worker thread owns the controls, so cover resizing and OS calls
 //! never run on the audio engine thread. If the controls cannot start, Prism runs without.
+//!
+//! The controls show whichever player is active (`shell::transport`): Prism's track, or
+//! YouTube Music's song while it is active. The keys go through the transport to that player.
+//! On Windows the YouTube Music view's own WebView2 entry is switched off by its browser
+//! arguments, so Prism's is the only one; on macOS WKWebView may publish a Now Playing entry
+//! of its own next to Prism's, and its public API has no switch for that.
 
 use std::ffi::c_void;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -18,6 +24,8 @@ use tauri::{AppHandle, Manager};
 
 use crate::library::model::Track;
 use crate::player::{is_live, EventSink, PlayerEvent, PlayerState, PlayerStatus};
+use crate::shell::transport::{Active, Transport};
+use crate::ytm::state::{YtmState, YtmStatus};
 use crate::AppState;
 
 /// Size of the cover handed to the OS.
@@ -163,6 +171,89 @@ pub fn action_for(event: &MediaControlEvent, state: &PlayerState) -> Option<Acti
     }
 }
 
+/// Maps an OS event to an action for YouTube Music's page, given its last state. Next and
+/// previous act only when the page's buttons can be pressed, a seek only when the song's
+/// length is known. As for a station, souvlaki 0.8 cannot disable single buttons (SMTC on
+/// Windows, the remote commands on macOS), so the keys are ignored here.
+pub fn ytm_action_for(event: &MediaControlEvent, state: &YtmState) -> Option<Action> {
+    let seekable = state.duration_ms > 0;
+    let seek_by = |direction: SeekDirection, ms: u64| {
+        let target = match direction {
+            SeekDirection::Forward => state.position_ms.saturating_add(ms),
+            SeekDirection::Backward => state.position_ms.saturating_sub(ms),
+        };
+        seekable.then(|| Action::Seek(clamp_seek(target, state.duration_ms)))
+    };
+    match event {
+        MediaControlEvent::Play => (state.status == YtmStatus::Paused).then_some(Action::Toggle),
+        MediaControlEvent::Pause | MediaControlEvent::Stop => {
+            (state.status == YtmStatus::Playing).then_some(Action::Toggle)
+        }
+        MediaControlEvent::Toggle => Some(Action::Toggle),
+        MediaControlEvent::Next => state.can_next.then_some(Action::Next),
+        MediaControlEvent::Previous => state.can_prev.then_some(Action::Prev),
+        MediaControlEvent::SetPosition(MediaPosition(position)) => seekable
+            .then(|| Action::Seek(clamp_seek(position.as_millis() as u64, state.duration_ms))),
+        MediaControlEvent::Seek(direction) => seek_by(*direction, SEEK_STEP_MS),
+        MediaControlEvent::SeekBy(direction, amount) => {
+            seek_by(*direction, amount.as_millis() as u64)
+        }
+        _ => None,
+    }
+}
+
+/// Maps an OS event for the active player, from that player's state.
+pub fn media_action(
+    event: &MediaControlEvent,
+    active: Active,
+    prism: &PlayerState,
+    ytm: &YtmState,
+) -> Option<Action> {
+    match active {
+        Active::Prism => action_for(event, prism),
+        Active::Ytm => ytm_action_for(event, ytm),
+    }
+}
+
+/// Sends a media key's action through the transport, to the active player.
+pub fn apply(transport: &Transport, action: Action) -> Result<(), String> {
+    match action {
+        Action::Toggle => transport.toggle(),
+        Action::Next => transport.next(),
+        Action::Prev => transport.prev(),
+        Action::Seek(ms) => transport.seek(ms),
+    }
+}
+
+/// The controls show YouTube Music while it is active and has a song loaded (an idle or
+/// unavailable page hands the transport back to Prism anyway).
+fn shows_ytm(active: Active, ytm: Option<&YtmState>) -> bool {
+    active == Active::Ytm
+        && ytm.is_some_and(|state| matches!(state.status, YtmStatus::Playing | YtmStatus::Paused))
+}
+
+/// Maps YouTube Music's state (and its cached artwork file, if any) to OS metadata. An
+/// unknown length shows no progress, as for a station.
+pub fn ytm_metadata(state: &YtmState, cover_file: Option<&Path>) -> OwnedMetadata {
+    OwnedMetadata {
+        title: state.title.clone(),
+        artist: state.artist.clone(),
+        album: state.album.clone(),
+        cover_url: cover_file.map(|path| cover_url(path, cfg!(target_os = "windows"))),
+        duration: (state.duration_ms > 0).then(|| Duration::from_millis(state.duration_ms)),
+    }
+}
+
+fn ytm_playback(state: &YtmState) -> MediaPlayback {
+    let progress =
+        (state.duration_ms > 0).then(|| MediaPosition(Duration::from_millis(state.position_ms)));
+    match state.status {
+        YtmStatus::Playing => MediaPlayback::Playing { progress },
+        YtmStatus::Paused => MediaPlayback::Paused { progress },
+        YtmStatus::Idle | YtmStatus::Unavailable => MediaPlayback::Stopped,
+    }
+}
+
 /// A station has no position to show: macOS then sets no elapsed time, Windows a position of 0.
 fn playback_for(state: &PlayerState) -> MediaPlayback {
     let live = state.track.as_ref().is_some_and(is_live);
@@ -199,9 +290,113 @@ struct Failed {
     at: Instant,
 }
 
-/// The cover file to send for a track, and whether that is the track's own cover (`false`
-/// when a track with a cover id got the placeholder).
-type CoverFor = Box<dyn Fn(&Track) -> (Option<PathBuf>, bool)>;
+/// The cover file to send for a cover id, and whether that is the own cover (`false` when an
+/// id got the placeholder).
+type CoverFor = Box<dyn Fn(Option<&str>) -> (Option<PathBuf>, bool)>;
+
+/// The position goes out while playing at most every [`POSITION_INTERVAL`]; otherwise when it
+/// moved (a seek while paused must show up too).
+fn position_due(playing: bool, at: Option<Instant>, pushed_ms: u64, position_ms: u64) -> bool {
+    if playing {
+        at.is_none_or(|at| at.elapsed() >= POSITION_INTERVAL)
+    } else {
+        position_ms != pushed_ms
+    }
+}
+
+/// What the OS shows of a YouTube Music song; the position is not part of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct YtmShown {
+    title: String,
+    artist: String,
+    album: String,
+    cover_id: Option<String>,
+    duration_ms: u64,
+}
+
+impl YtmShown {
+    fn of(state: &YtmState) -> YtmShown {
+        YtmShown {
+            title: state.title.clone(),
+            artist: state.artist.clone(),
+            album: state.album.clone(),
+            cover_id: state.cover_id.clone(),
+            duration_ms: state.duration_ms,
+        }
+    }
+}
+
+/// What was last sent to the OS for YouTube Music.
+#[derive(Default)]
+struct PushedYtm {
+    shown: Option<YtmShown>,
+    /// The song whose update failed or went out without its artwork, and when.
+    failed: Option<(YtmShown, Instant)>,
+    status: Option<YtmStatus>,
+    position_ms: u64,
+    at: Option<Instant>,
+}
+
+/// As [`metadata_due`]: a new song, title or artwork goes out at once; one that failed (or
+/// lacked its artwork) waits [`RETRY_AFTER`].
+fn ytm_metadata_due(pushed: &PushedYtm, shown: &YtmShown, now: Instant) -> bool {
+    match &pushed.failed {
+        Some((failed, at)) if failed == shown => now.saturating_duration_since(*at) >= RETRY_AFTER,
+        _ => pushed.shown.as_ref() != Some(shown),
+    }
+}
+
+fn push_ytm(
+    controls: &mut MediaControls,
+    pushed: &mut PushedYtm,
+    state: &YtmState,
+    cover_for: &CoverFor,
+) {
+    let now = Instant::now();
+    let shown = YtmShown::of(state);
+    let metadata_changed = ytm_metadata_due(pushed, &shown, now);
+    let status_changed = Some(state.status) != pushed.status;
+    let position_due = state.duration_ms > 0
+        && position_due(
+            state.status == YtmStatus::Playing,
+            pushed.at,
+            pushed.position_ms,
+            state.position_ms,
+        );
+    if !(metadata_changed || status_changed || position_due) {
+        return;
+    }
+    if metadata_changed {
+        let (cover, own) = cover_for(state.cover_id.as_deref());
+        let metadata = ytm_metadata(state, cover.as_deref());
+        match controls.set_metadata(metadata.as_metadata()) {
+            Ok(()) => {
+                pushed.failed = (!own).then(|| (shown.clone(), now));
+                pushed.shown = Some(shown);
+            }
+            Err(err) => {
+                eprintln!("updating the media metadata failed: {err:?}");
+                pushed.failed = Some((shown, now));
+            }
+        }
+    }
+    if let Err(err) = controls.set_playback(ytm_playback(state)) {
+        eprintln!("updating the media playback state failed: {err:?}");
+    }
+    pushed.status = Some(state.status);
+    pushed.position_ms = state.position_ms;
+    pushed.at = Some(Instant::now());
+}
+
+/// Prism is shown again without a track: the last song's metadata goes.
+fn clear(controls: &mut MediaControls) {
+    if let Err(err) = controls.set_metadata(MediaMetadata::default()) {
+        eprintln!("clearing the media metadata failed: {err:?}");
+    }
+    if let Err(err) = controls.set_playback(MediaPlayback::Stopped) {
+        eprintln!("updating the media playback state failed: {err:?}");
+    }
+}
 
 /// The OS metadata is out of date: another track, or the same one with another cover.
 fn metadata_stale(pushed: &Pushed, track: Option<&Track>) -> bool {
@@ -254,18 +449,19 @@ fn push(
     let status_changed = Some(state.status) != pushed.status;
     let live = state.track.as_ref().is_some_and(is_live);
     let position_due = !live
-        && match state.status {
-            PlayerStatus::Playing => pushed.at.is_none_or(|at| at.elapsed() >= POSITION_INTERVAL),
-            // A seek while paused must show up too.
-            _ => state.position_ms != pushed.position_ms,
-        };
+        && position_due(
+            state.status == PlayerStatus::Playing,
+            pushed.at,
+            pushed.position_ms,
+            state.position_ms,
+        );
     if !(track_changed || status_changed || position_due) {
         return;
     }
     if track_changed {
         match &state.track {
             Some(track) => {
-                let (cover, own) = cover_for(track);
+                let (cover, own) = cover_for(track.cover_id.as_deref());
                 let metadata = to_metadata(track, live_title, cover.as_deref());
                 // Set even when the update fails, so a title is not resent on every push.
                 pushed.title = shown_title(track, live_title).map(str::to_string);
@@ -311,6 +507,8 @@ enum Update {
     State(Box<PlayerState>),
     /// A station's stream title (`None`: none known, or the station was opened again).
     LiveTitle(String, Option<String>),
+    Ytm(Box<YtmState>),
+    Active(Active),
 }
 
 /// The last stream title and the station it belongs to. It is shown only while that station
@@ -373,6 +571,16 @@ impl MediaBridge {
         let _ = self.updates.send(Update::LiveTitle(station_id, title));
     }
 
+    /// YouTube Music's new state (`ytm://state`). Never blocks.
+    pub fn set_ytm(&self, state: &YtmState) {
+        let _ = self.updates.send(Update::Ytm(Box::new(state.clone())));
+    }
+
+    /// The transport's new active player (`transport://active`). Never blocks.
+    pub fn set_active(&self, active: Active) {
+        let _ = self.updates.send(Update::Active(active));
+    }
+
     /// Starts the worker. `hwnd` is the main window handle (Windows) or `None`. The worker
     /// keeps draining states even when the OS controls fail to initialise.
     pub fn start(&self, app: AppHandle, hwnd: Option<usize>, cover_cache: PathBuf) {
@@ -425,16 +633,12 @@ fn create(app: &AppHandle, hwnd: Option<usize>) -> Option<MediaControls> {
             let Some(state) = handle.try_state::<AppState>() else {
                 return;
             };
-            let Some(action) = action_for(&event, &state.player.state()) else {
+            let active = state.transport.active();
+            let action = media_action(&event, active, &state.player.state(), &state.ytm.state());
+            let Some(action) = action else {
                 return;
             };
-            let result = match action {
-                Action::Toggle => state.player.toggle(),
-                Action::Next => state.player.next(),
-                Action::Prev => state.player.prev(),
-                Action::Seek(ms) => state.player.seek(ms),
-            };
-            if let Err(err) = result {
+            if let Err(err) = apply(&state.transport, action) {
                 eprintln!("a media key could not be applied: {err}");
             }
         }));
@@ -454,9 +658,10 @@ fn create(app: &AppHandle, hwnd: Option<usize>) -> Option<MediaControls> {
 fn run(receiver: Receiver<Update>, app: AppHandle, hwnd: Option<usize>, cover_cache: PathBuf) {
     let mut controls = create(&app, hwnd);
     let cover_app = app.clone();
-    let cover_for: CoverFor = Box::new(move |track| {
+    // `yt-` artwork comes through the same gate as Prism's covers.
+    let cover_for: CoverFor = Box::new(move |id| {
         let own = || {
-            let id = track.cover_id.as_deref()?;
+            let id = id?;
             let state = cover_app.try_state::<AppState>()?;
             state
                 .thumbs
@@ -467,24 +672,45 @@ fn run(receiver: Receiver<Update>, app: AppHandle, hwnd: Option<usize>, cover_ca
         // without a usable cover gets the placeholder.
         match own() {
             Some(path) => (Some(path), true),
-            None => (
-                crate::thumbs::placeholder_cover(&cover_cache),
-                track.cover_id.is_none(),
-            ),
+            None => (crate::thumbs::placeholder_cover(&cover_cache), id.is_none()),
         }
     });
     let mut pushed = Pushed::default();
+    let mut pushed_ytm = PushedYtm::default();
     let mut state: Option<Box<PlayerState>> = None;
+    let mut ytm: Option<Box<YtmState>> = None;
+    let mut active = Active::Prism;
+    let mut showing_ytm = false;
     let mut titles = LiveTitle::default();
     while let Ok(update) = receiver.recv() {
-        // Only the newest state and title matter.
+        // Only the newest states and title matter.
         for update in std::iter::once(update).chain(receiver.try_iter()) {
             match update {
                 Update::State(newer) => state = Some(newer),
                 Update::LiveTitle(station_id, title) => titles.set(station_id, title),
+                Update::Ytm(newer) => ytm = Some(newer),
+                Update::Active(newer) => active = newer,
             }
         }
-        if let (Some(controls), Some(state)) = (controls.as_mut(), state.as_ref()) {
+        let Some(controls) = controls.as_mut() else {
+            continue;
+        };
+        let show_ytm = shows_ytm(active, ytm.as_deref());
+        // The other player's last push says nothing about what the OS shows now.
+        let switched = show_ytm != showing_ytm;
+        if switched {
+            pushed = Pushed::default();
+            pushed_ytm = PushedYtm::default();
+            showing_ytm = show_ytm;
+        }
+        if let Some(ytm) = ytm.as_deref().filter(|_| show_ytm) {
+            push_ytm(controls, &mut pushed_ytm, ytm, &cover_for);
+            continue;
+        }
+        if switched && state.as_ref().is_none_or(|state| state.track.is_none()) {
+            clear(controls);
+        }
+        if let Some(state) = state.as_ref() {
             let title = titles.for_shown(state.track.as_ref());
             push(controls, &mut pushed, state, title, &cover_for);
         }
@@ -847,6 +1073,220 @@ mod tests {
             ..Pushed::default()
         };
         assert!(!metadata_due(&pushed, Some(&song), Some("A"), now));
+    }
+
+    fn ytm(status: YtmStatus) -> YtmState {
+        YtmState {
+            status,
+            title: "Fake Song".into(),
+            artist: "Fake Artist".into(),
+            album: "Fake Album".into(),
+            cover_id: Some("yt-0123456789abcdef0123".into()),
+            position_ms: 30_000,
+            duration_ms: 180_000,
+            can_next: true,
+            can_prev: true,
+        }
+    }
+
+    #[test]
+    fn media_metadata_follows_the_active_player() {
+        let prism = state(PlayerStatus::Paused, 1_000);
+        let page = ytm(YtmStatus::Playing);
+        // Prism's track while Prism is active, YouTube Music's while it is.
+        assert!(!shows_ytm(Active::Prism, Some(&page)));
+        assert!(shows_ytm(Active::Ytm, Some(&page)));
+        assert!(shows_ytm(Active::Ytm, Some(&ytm(YtmStatus::Paused))));
+        assert!(!shows_ytm(Active::Ytm, None), "nothing reported yet");
+        for dead in [YtmStatus::Idle, YtmStatus::Unavailable] {
+            assert!(!shows_ytm(Active::Ytm, Some(&ytm(dead))), "{dead:?}");
+        }
+        assert_eq!(prism.track.as_ref().unwrap().title, "Song");
+
+        let cover = Path::new("cache")
+            .join("covers")
+            .join("600")
+            .join("yt-0123456789abcdef0123.jpg");
+        let metadata = ytm_metadata(&page, Some(&cover));
+        assert_eq!(metadata.title, "Fake Song");
+        assert_eq!(metadata.artist, "Fake Artist");
+        assert_eq!(metadata.album, "Fake Album");
+        assert_eq!(metadata.duration, Some(Duration::from_millis(180_000)));
+        assert_eq!(
+            metadata.cover_url,
+            Some(cover_url(&cover, cfg!(target_os = "windows")))
+        );
+        assert_eq!(
+            ytm_playback(&page),
+            MediaPlayback::Playing {
+                progress: Some(MediaPosition(Duration::from_millis(30_000)))
+            }
+        );
+        assert_eq!(
+            ytm_playback(&ytm(YtmStatus::Paused)),
+            MediaPlayback::Paused {
+                progress: Some(MediaPosition(Duration::from_millis(30_000)))
+            }
+        );
+        assert_eq!(ytm_playback(&ytm(YtmStatus::Idle)), MediaPlayback::Stopped);
+
+        // An unknown length: no progress bar, as for a station.
+        let unknown = YtmState {
+            duration_ms: 0,
+            ..ytm(YtmStatus::Playing)
+        };
+        assert_eq!(ytm_metadata(&unknown, None).duration, None);
+        assert_eq!(ytm_metadata(&unknown, None).cover_url, None);
+        assert_eq!(
+            ytm_playback(&unknown),
+            MediaPlayback::Playing { progress: None }
+        );
+    }
+
+    #[test]
+    fn ytm_keys_follow_its_buttons_and_its_length() {
+        let playing = ytm(YtmStatus::Playing);
+        let paused = ytm(YtmStatus::Paused);
+        let key = |event: MediaControlEvent, state: &YtmState| {
+            media_action(
+                &event,
+                Active::Ytm,
+                &self::state(PlayerStatus::Idle, 0),
+                state,
+            )
+        };
+        assert_eq!(
+            key(MediaControlEvent::Toggle, &playing),
+            Some(Action::Toggle)
+        );
+        assert_eq!(key(MediaControlEvent::Play, &paused), Some(Action::Toggle));
+        assert_eq!(key(MediaControlEvent::Play, &playing), None);
+        assert_eq!(
+            key(MediaControlEvent::Pause, &playing),
+            Some(Action::Toggle)
+        );
+        assert_eq!(key(MediaControlEvent::Pause, &paused), None);
+        assert_eq!(key(MediaControlEvent::Next, &playing), Some(Action::Next));
+        assert_eq!(
+            key(MediaControlEvent::Previous, &playing),
+            Some(Action::Prev)
+        );
+        assert_eq!(
+            key(
+                MediaControlEvent::SetPosition(MediaPosition(Duration::from_secs(999))),
+                &playing
+            ),
+            Some(Action::Seek(180_000))
+        );
+        assert_eq!(
+            key(MediaControlEvent::Seek(SeekDirection::Forward), &playing),
+            Some(Action::Seek(40_000))
+        );
+        assert_eq!(
+            key(
+                MediaControlEvent::SeekBy(SeekDirection::Backward, Duration::from_secs(60)),
+                &playing
+            ),
+            Some(Action::Seek(0))
+        );
+        // Buttons the page cannot press, and seeks without a known length, do nothing.
+        let stuck = YtmState {
+            can_next: false,
+            can_prev: false,
+            duration_ms: 0,
+            ..playing.clone()
+        };
+        for event in [
+            MediaControlEvent::Next,
+            MediaControlEvent::Previous,
+            MediaControlEvent::SetPosition(MediaPosition(Duration::from_secs(9))),
+            MediaControlEvent::Seek(SeekDirection::Forward),
+            MediaControlEvent::SeekBy(SeekDirection::Forward, Duration::from_secs(5)),
+        ] {
+            assert_eq!(key(event.clone(), &stuck), None, "{event:?}");
+        }
+        assert_eq!(key(MediaControlEvent::Raise, &playing), None);
+        // While Prism is active, Prism's state decides.
+        assert_eq!(
+            media_action(
+                &MediaControlEvent::Play,
+                Active::Prism,
+                &state(PlayerStatus::Paused, 0),
+                &playing
+            ),
+            Some(Action::Toggle)
+        );
+    }
+
+    #[test]
+    fn media_keys_go_through_the_transport() {
+        use crate::shell::transport::tests::{Call, Rig};
+        use crate::ytm::state::YtmAction;
+
+        let rig = Rig::new();
+        apply(&rig.transport, Action::Toggle).unwrap();
+        apply(&rig.transport, Action::Seek(5_000)).unwrap();
+        assert_eq!(rig.prism.calls(), vec![Call::Toggle, Call::Seek(5_000)]);
+        rig.ytm_plays();
+        for action in [
+            Action::Toggle,
+            Action::Next,
+            Action::Prev,
+            Action::Seek(7_000),
+        ] {
+            apply(&rig.transport, action).unwrap();
+        }
+        assert_eq!(
+            rig.ytm.sent(),
+            vec![
+                YtmAction::Toggle,
+                YtmAction::Next,
+                YtmAction::Prev,
+                YtmAction::Seek(7_000)
+            ]
+        );
+        assert_eq!(rig.prism.calls().len(), 2);
+    }
+
+    #[test]
+    fn ytm_metadata_goes_out_on_a_change_or_a_minute_after_a_failure() {
+        let start = Instant::now();
+        let page = ytm(YtmStatus::Playing);
+        let shown = YtmShown::of(&page);
+        let mut pushed = PushedYtm::default();
+        assert!(ytm_metadata_due(&pushed, &shown, start), "nothing sent yet");
+        pushed.shown = Some(shown.clone());
+        assert!(!ytm_metadata_due(&pushed, &shown, start));
+        // The position is not part of it.
+        let later = YtmShown::of(&YtmState {
+            position_ms: 90_000,
+            ..page.clone()
+        });
+        assert!(!ytm_metadata_due(&pushed, &later, start));
+        for changed in [
+            YtmState {
+                title: "Other".into(),
+                ..page.clone()
+            },
+            YtmState {
+                cover_id: None,
+                ..page.clone()
+            },
+            YtmState {
+                duration_ms: 1_000,
+                ..page.clone()
+            },
+        ] {
+            assert!(ytm_metadata_due(&pushed, &YtmShown::of(&changed), start));
+        }
+        // Failed, or sent without its artwork: again after a minute, not before.
+        pushed.failed = Some((shown.clone(), start));
+        assert!(!ytm_metadata_due(
+            &pushed,
+            &shown,
+            start + Duration::from_secs(59)
+        ));
+        assert!(ytm_metadata_due(&pushed, &shown, start + RETRY_AFTER));
     }
 
     #[test]

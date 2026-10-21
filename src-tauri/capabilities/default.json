@@ -23,6 +23,7 @@
     "allow-player-seek",
     "allow-player-set-volume",
     "allow-player-state",
+    "allow-transport-active",
     "allow-player-play-files",
     "allow-player-append",
     "allow-player-jump",

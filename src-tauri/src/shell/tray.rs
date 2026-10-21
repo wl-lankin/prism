@@ -3,7 +3,8 @@
 //! A left click toggles the mini player: at the bottom right on Windows, hanging under the
 //! icon on macOS (the icon's place is remembered in `ShellState::last_tray_rect`). The menu
 //! (right click; on macOS also ctrl-click) has Open Prism, Play/Pause, Next, Previous and
-//! Quit Prism. Its strings come from the main window (`tray_set_labels`), English until then.
+//! Quit Prism; the transport entries go to whichever player is active (Prism or YouTube
+//! Music, `shell::transport`). Its strings come from the main window (`tray_set_labels`), English until then.
 //! macOS shows a template icon, drawn in the menu bar's own color.
 
 use serde::Deserialize;
@@ -13,8 +14,7 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, Tray
 use tauri::{AppHandle, Manager, PhysicalRect, Wry};
 
 use super::mini::{self, anchor_for};
-use super::{main_show, ShellState};
-use crate::AppState;
+use super::{main_show, press_in, ShellState, TransportButton};
 
 pub const TRAY_ID: &str = "prism";
 
@@ -73,6 +73,16 @@ impl MenuAction {
 
     pub fn from_id(id: &str) -> Option<MenuAction> {
         Self::ALL.into_iter().find(|action| action.id() == id)
+    }
+
+    /// The transport entries, which go to whichever player is active.
+    pub fn button(self) -> Option<TransportButton> {
+        match self {
+            MenuAction::PlayPause => Some(TransportButton::PlayPause),
+            MenuAction::Next => Some(TransportButton::Next),
+            MenuAction::Previous => Some(TransportButton::Previous),
+            MenuAction::Open | MenuAction::Quit => None,
+        }
     }
 
     fn label(self, labels: &TrayLabels) -> &str {
@@ -166,22 +176,17 @@ fn on_menu(app: &AppHandle, event: MenuEvent) {
     let Some(action) = MenuAction::from_id(event.id().as_ref()) else {
         return;
     };
-    let player = |act: fn(&crate::player::Player) -> Result<(), String>| {
-        if let Some(state) = app.try_state::<AppState>() {
-            if let Err(err) = act(&state.player) {
-                eprintln!("a tray menu command failed: {err}");
-            }
-        }
-    };
+    if let Some(button) = action.button() {
+        press_in(app, button, "a tray menu command");
+        return;
+    }
     match action {
         MenuAction::Open => {
             if let Err(err) = main_show(app) {
                 eprintln!("opening Prism failed: {err}");
             }
         }
-        MenuAction::PlayPause => player(|player| player.toggle()),
-        MenuAction::Next => player(|player| player.next()),
-        MenuAction::Previous => player(|player| player.prev()),
+        MenuAction::PlayPause | MenuAction::Next | MenuAction::Previous => {}
         // `RunEvent::Exit` saves the settings. Marked first, so no window closed on the way
         // out brings the mini player up.
         MenuAction::Quit => {
@@ -264,6 +269,31 @@ mod tests {
         .unwrap();
         assert_eq!(labels.play_pause, "Wiedergabe/Pause");
         assert_eq!(MenuAction::Quit.label(&labels), "Prism beenden");
+    }
+
+    #[test]
+    fn tray_toggle_goes_to_ytm_when_active() {
+        use crate::shell::transport::tests::{Call, Rig};
+        use crate::ytm::state::YtmAction;
+
+        let rig = Rig::new();
+        let press = |action: MenuAction| {
+            let button = action.button().expect("a transport entry");
+            super::super::press(&rig.transport, button).unwrap();
+        };
+        press(MenuAction::PlayPause);
+        assert_eq!(rig.prism.calls(), vec![Call::Toggle]);
+        rig.ytm_plays();
+        press(MenuAction::PlayPause);
+        press(MenuAction::Next);
+        press(MenuAction::Previous);
+        assert_eq!(
+            rig.ytm.sent(),
+            vec![YtmAction::Toggle, YtmAction::Next, YtmAction::Prev]
+        );
+        assert_eq!(rig.prism.calls(), vec![Call::Toggle]);
+        assert_eq!(MenuAction::Open.button(), None);
+        assert_eq!(MenuAction::Quit.button(), None);
     }
 
     #[test]
