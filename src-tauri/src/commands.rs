@@ -834,6 +834,63 @@ pub fn tray_set_labels(app: AppHandle, labels: TrayLabels) {
     shell::tray::set_labels(&app, &labels);
 }
 
+// YouTube Music. Placeholders until the service (Task 4) and the view (Task 5) exist; they
+// are here so the handler list and the command manifest are complete.
+
+const YTM_NOT_YET: &str = "not yet";
+
+/// Where the YouTube Music view goes in the main window, in logical pixels.
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub struct YtmRect {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+/// The one command the remote YouTube Music page may call.
+#[tauri::command]
+pub fn ytm_report(webview: tauri::Webview, report: serde_json::Value) -> Result<(), String> {
+    let _ = (webview, report);
+    Err(YTM_NOT_YET.to_string())
+}
+
+#[tauri::command]
+pub fn ytm_show(app: AppHandle, rect: YtmRect) -> Result<(), String> {
+    let _ = (app, rect);
+    Err(YTM_NOT_YET.to_string())
+}
+
+#[tauri::command]
+pub fn ytm_hide(app: AppHandle) -> Result<(), String> {
+    let _ = app;
+    Err(YTM_NOT_YET.to_string())
+}
+
+#[tauri::command]
+pub fn ytm_control(app: AppHandle, action: String) -> Result<(), String> {
+    let _ = (app, action);
+    Err(YTM_NOT_YET.to_string())
+}
+
+#[tauri::command]
+pub fn ytm_state(app: AppHandle) -> Result<(), String> {
+    let _ = app;
+    Err(YTM_NOT_YET.to_string())
+}
+
+#[tauri::command]
+pub fn ytm_sign_in(app: AppHandle) -> Result<(), String> {
+    let _ = app;
+    Err(YTM_NOT_YET.to_string())
+}
+
+#[tauri::command]
+pub fn ytm_sign_out(app: AppHandle) -> Result<(), String> {
+    let _ = app;
+    Err(YTM_NOT_YET.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
