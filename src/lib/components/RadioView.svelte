@@ -140,6 +140,8 @@
     {/if}
     {#if radio.near.stations.length > 0}
       <StationList stations={radio.near.stations} showDistance />
+    {:else if radio.near.loading}
+      <p class="note" role="status">{t('radio.near.loading')}</p>
     {:else if nearEmpty}
       <div class="empty">
         <span class="emblem" aria-hidden="true"><Icon name="radio" size={26} /></span>

@@ -133,7 +133,9 @@ export const radioPlay = (station: Station) => call<void>('radio_play', { statio
 /** Resolves to the new state; stations are favorited here, not through `favoritesSet`. */
 export const radioFavorite = (station: Station, on: boolean) =>
   call<boolean>('radio_favorite', { station, on });
-export const radioNowPlaying = () => call<NowPlaying | null>('radio_now_playing');
+/** Opens the station's homepage in the browser; the backend checks the link (http/https only). */
+export const radioOpenHomepage = (stationId: string) => call<void>('radio_open_homepage', { stationId });
+export const radioNowPlaying =() => call<NowPlaying | null>('radio_now_playing');
 
 // Playlists.
 

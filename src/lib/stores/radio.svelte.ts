@@ -6,6 +6,7 @@ import {
   radioNear,
   radioCountries,
   radioNowPlaying,
+  radioOpenHomepage,
   radioPlace,
   radioPlay,
   radioRedetect,
@@ -214,6 +215,15 @@ export async function startStation(station: Station): Promise<void> {
     await playStation(station);
   } catch (err) {
     notify(t('radio.play.failed', { name: station.name, message: errorText(err) }));
+  }
+}
+
+/** Opens the station's homepage through the backend, which only opens http(s) links. */
+export async function openHomepage(station: Station): Promise<void> {
+  try {
+    await radioOpenHomepage(station.id);
+  } catch (err) {
+    console.error('opening the homepage failed', err);
   }
 }
 

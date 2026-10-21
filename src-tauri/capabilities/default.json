@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main",
-  "description": "The main window: its own title bar (minimize, maximize, close, drag, resize), the folder picker, the About links and station homepages (the app only passes http(s) links).",
+  "description": "The main window: its own title bar (minimize, maximize, close, drag, resize), the folder picker and the About links.",
   "windows": ["main"],
   "permissions": [
     "core:default",
@@ -14,7 +14,7 @@
     "dialog:allow-open",
     {
       "identifier": "opener:allow-open-url",
-      "allow": [{ "url": "https://*" }, { "url": "http://*" }]
+      "allow": [{ "url": "https://wolfgang-linz.de/*" }, { "url": "https://github.com/wl-lankin/prism*" }]
     }
   ]
 }

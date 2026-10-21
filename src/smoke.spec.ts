@@ -61,7 +61,8 @@ it('puts the ring first in the tab order and names disabled entries', () => {
   unmount(app);
 });
 
-// No sidebar entry is "coming soon" any more (Radio is live); the pill stays for the next one.
+// No sidebar entry is "coming soon" any more (Radio is live), so the pill's hover behavior has
+// no entry to test until the next one; this keeps its place in the DOM covered.
 it('keeps the coming-soon pill outside the clipping sidebar list and hidden', () => {
   setLang('de');
   const target = document.createElement('div');
@@ -73,9 +74,6 @@ it('keeps the coming-soon pill outside the clipping sidebar list and hidden', ()
   expect(pill).not.toBeNull();
   expect(pill?.closest('.scroll')).toBeNull();
   expect(pill?.getAttribute('aria-hidden')).toBe('true');
-  expect(pill?.classList.contains('shown')).toBe(false);
-  radio?.dispatchEvent(new PointerEvent('pointerenter'));
-  flushSync();
   expect(pill?.classList.contains('shown')).toBe(false);
   unmount(app);
   setLang('en');

@@ -7,8 +7,8 @@
     y: number;
   }
 
-  /** Only web pages are opened from a station's homepage; the directory is not trusted with
-   *  `file:` or any other scheme. */
+  /** Whether the menu offers "Open homepage". The backend checks the link again before it
+   *  opens anything: the directory is not trusted with `file:` or any other scheme. */
   export function isWebUrl(url: string | null | undefined): url is string {
     if (!url) return false;
     try {
@@ -31,10 +31,9 @@
 
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
-  import { openUrl } from '@tauri-apps/plugin-opener';
   import { t } from '../i18n';
   import { isFavorite } from '../stores/favorites.svelte';
-  import { startStation, toggleStationFavorite } from '../stores/radio.svelte';
+  import { openHomepage, startStation, toggleStationFavorite } from '../stores/radio.svelte';
   import Icon from './Icon.svelte';
 
   /** The station context menu: play, favorite, open the homepage. A menu in the WAI-ARIA
@@ -83,9 +82,9 @@
   }
 
   function open() {
-    const url = homepage;
+    const chosen = station;
     onclose();
-    if (url) openUrl(url).catch((err) => console.error('opening the homepage failed', err));
+    void openHomepage(chosen);
   }
 
   function onkeydown(event: KeyboardEvent) {

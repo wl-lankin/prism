@@ -493,6 +493,7 @@ pub fn run() {
             commands::radio_play,
             commands::radio_favorite,
             commands::radio_now_playing,
+            commands::radio_open_homepage,
             commands::radio_redetect,
             commands::mini_toggle,
             commands::mini_layout,

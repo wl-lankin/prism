@@ -799,6 +799,71 @@ fn search_reports_a_down_directory() {
 }
 
 #[test]
+fn a_near_results_homepage_is_found() {
+    let env = Env::start(vec![
+        FakeStation::new(1)
+            .geo(50.1, 10.1)
+            .homepage("https://www.example.org/demo1"),
+        FakeStation::new(2).geo(50.2, 10.1),
+    ]);
+    let near = env.service.near(false);
+    let with = near.stations.iter().find(|s| s.homepage.is_some()).unwrap();
+    let url = env.service.homepage_url(&with.id).unwrap();
+    assert_eq!(url.as_str(), "https://www.example.org/demo1");
+    let without = near.stations.iter().find(|s| s.homepage.is_none()).unwrap();
+    assert!(env.service.homepage_url(&without.id).is_err());
+}
+
+#[test]
+fn a_stored_stations_homepage_is_found() {
+    let env = Env::start(vec![
+        FakeStation::new(1).homepage("http://www.example.org/demo1")
+    ]);
+    let station = found(&env, 1);
+    // A fresh service remembers nothing from searches; the stored row answers.
+    env.service.play_prepared(station.clone()).unwrap();
+    *guard(&env.service.homepages) = Homepages::default();
+    assert_eq!(
+        env.service.homepage_url(&station.id).unwrap().as_str(),
+        "http://www.example.org/demo1"
+    );
+}
+
+#[test]
+fn other_schemes_and_unknown_ids_are_refused() {
+    let env = Env::start(vec![FakeStation::new(1)]);
+    let station = found(&env, 1);
+    for bad in [
+        "javascript:alert(1)",
+        "file:///etc/hosts",
+        "ftp://www.example.org/",
+        "not a link",
+    ] {
+        let mut hostile = station.clone();
+        hostile.homepage = Some(bad.to_owned());
+        env.service.remember_homepages(&[hostile]);
+        assert!(env.service.homepage_url(&station.id).is_err(), "{bad}");
+    }
+    assert!(env
+        .service
+        .homepage_url("radio:00000000-0000-4000-8000-0000000000ff")
+        .is_err());
+}
+
+#[test]
+fn remembered_homepages_stay_bounded() {
+    let mut seen = Homepages::default();
+    for n in 0..(HOMEPAGES_KEPT + 50) {
+        seen.remember(&format!("radio:{n}"), "https://www.example.org/");
+    }
+    assert_eq!(seen.map.len(), HOMEPAGES_KEPT);
+    assert!(!seen.map.contains_key("radio:0"));
+    assert!(seen
+        .map
+        .contains_key(&format!("radio:{}", HOMEPAGES_KEPT + 49)));
+}
+
+#[test]
 fn search_results_remember_their_logos() {
     let env = Env::start(vec![
         FakeStation::new(1).favicon("https://www.example.org/demo1/logo.png"),

@@ -70,8 +70,6 @@ vi.mock('@tauri-apps/api/core', () => ({
   invoke: (cmd: string, args?: Record<string, unknown>) => invoke(cmd, args),
 }));
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(async () => () => {}) }));
-const openUrl = vi.fn(async (_url: string) => {});
-vi.mock('@tauri-apps/plugin-opener', () => ({ openUrl: (url: string) => openUrl(url) }));
 
 globalThis.ResizeObserver ??= class {
   observe() {}
@@ -96,7 +94,6 @@ let target: HTMLElement;
 beforeEach(() => {
   setLang('en');
   invoke.mockClear();
-  openUrl.mockClear();
   playFails = null;
   nearResult = { stations: [station(1, { distanceKm: 12.4 }), station(2)], place, cached: false, stale: false, error: null };
   savedResult = { favorites: [station(3)], recent: [station(4)] };
@@ -203,6 +200,27 @@ it('near_shows_cached_hint', async () => {
   await settle();
   expect(target.querySelector('.hint')).toBeNull();
   unmount(again);
+});
+
+it('near_says_it_is_loading_before_the_first_answer', async () => {
+  const impl = invoke.getMockImplementation()!;
+  let answer: (value: unknown) => void = () => {};
+  invoke.mockImplementation((cmd, args) =>
+    cmd === 'radio_near' ? new Promise((resolve) => (answer = resolve)) : impl(cmd, args),
+  );
+  try {
+    const app = mount(RadioView, { target });
+    await settle();
+    expect(target.querySelector('.note[role="status"]')?.textContent).toBe('Looking for stations near you...');
+    expect(target.querySelector('.empty')).toBeNull();
+    answer(nearResult);
+    await settle();
+    expect(target.querySelector('.note[role="status"]')).toBeNull();
+    expect(rows()).toHaveLength(2);
+    unmount(app);
+  } finally {
+    invoke.mockImplementation(impl);
+  }
 });
 
 it('near_empty_state_explains_and_opens_settings', async () => {
@@ -411,7 +429,7 @@ describe('station list', () => {
     await settle();
     expect(menuItems()).toEqual(['Play', 'Add to favorites', 'Open homepage']);
     click([...document.querySelectorAll<HTMLElement>('[role="menuitem"]')][2]);
-    expect(openUrl).toHaveBeenCalledWith('https://radio.example.test/');
+    expect(calls('radio_open_homepage')).toEqual([['radio_open_homepage', { stationId: station(1).id }]]);
     await settle();
     expect(document.querySelector('[role="menu"]')).toBeNull();
 
@@ -422,7 +440,7 @@ describe('station list', () => {
       document.querySelector('[role="menu"]')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
       await settle();
     }
-    expect(openUrl).toHaveBeenCalledTimes(1);
+    expect(calls('radio_open_homepage')).toHaveLength(1);
 
     expect(isWebUrl('http://a.test')).toBe(true);
     expect(isWebUrl('ftp://a.test')).toBe(false);
