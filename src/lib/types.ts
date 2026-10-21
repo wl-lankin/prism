@@ -60,7 +60,8 @@ export interface SearchResult {
   tracks: Track[];
 }
 
-export type FavKind = 'track' | 'album' | 'artist';
+/** `station` hearts go through `radio_favorite`, not `favorites_set`. */
+export type FavKind = 'track' | 'album' | 'artist' | 'station';
 
 /** Every favorite id, newest first, whether or not the item is in the index. */
 export interface FavoriteIds {
@@ -277,4 +278,67 @@ export interface PlayerError {
   trackId: string;
   message: string;
   kind: PlayerErrorKind;
+}
+
+/** Where the user is, as coarsely as "Radio near you" needs it. */
+export interface Place {
+  countryCode: string;
+  region: string | null;
+  city: string | null;
+  lat: number | null;
+  lon: number | null;
+  origin: 'detected' | 'manual' | 'locale';
+  detectedAt: number | null;
+}
+
+/** Why the radio directory could not be asked (`radio_*` commands reject with `{ code }`). */
+export type RadioErrorCode = 'unreachable' | 'server' | 'badResponse' | 'internal';
+
+export interface RadioFailure {
+  code: RadioErrorCode;
+}
+
+export interface NearResult {
+  stations: Station[];
+  place: Place;
+  /** The list comes from the cache. */
+  cached: boolean;
+  /** The cached list is older than 6 hours. */
+  stale: boolean;
+  error: RadioErrorCode | null;
+}
+
+export interface SavedStations {
+  favorites: Station[];
+  recent: Station[];
+}
+
+export interface NowPlaying {
+  stationId: string;
+  title: string | null;
+}
+
+export interface StationQueryArgs {
+  name?: string;
+  countryCode?: string;
+  region?: string;
+  tag?: string;
+  offset?: number;
+  limit?: number;
+}
+
+export interface RadioCountry {
+  code: string;
+  name: string;
+  stationCount: number;
+}
+
+export interface RadioRegion {
+  name: string;
+  stationCount: number;
+}
+
+export interface RadioTag {
+  name: string;
+  stationCount: number;
 }

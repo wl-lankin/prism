@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rusqlite::Connection;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::audio::list_devices;
@@ -21,6 +22,10 @@ use crate::navidrome::playlists::{self as remote_playlists, RemotePlaylist};
 use crate::navidrome::stars;
 use crate::navidrome::{NavidromeService, NavidromeStatus, FAILURE_INTERNAL};
 use crate::player::{PlayerState, QueueItem, DROPPED_PREFIX};
+use crate::radio::directory::{Country, DirectoryError, Region, StationQuery, TagCount};
+use crate::radio::location::Place;
+use crate::radio::model::Station;
+use crate::radio::{NearResult, NowPlaying, RadioService, Saved};
 use crate::secret::Secret;
 use crate::settings::{Change, Settings};
 use crate::shell;
@@ -327,6 +332,9 @@ pub async fn favorites_set(
     on: bool,
 ) -> Result<bool, String> {
     library_ids_only([id.as_str()])?;
+    if kind == FavKind::Station {
+        return Err("stations are favorited through radio_favorite".to_string());
+    }
     let changed = if stars::target(kind, &id).is_some() {
         let navidrome = Arc::clone(&app_state(&app)?.navidrome);
         blocking(move || navidrome.set_favorite(kind, &id, on)).await?
@@ -627,6 +635,157 @@ pub async fn navidrome_playlist_entries(
     read(&app, move |conn| remote_playlists::entries(conn, &id)).await
 }
 
+// Radio
+
+/// A radio failure as the frontend sees it: a stable code, never a location or a host.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct RadioFailure {
+    pub code: &'static str,
+}
+
+const RADIO_INTERNAL: &str = "internal";
+
+/// The most results one search page may ask for.
+const MAX_STATIONS: u32 = 200;
+
+/// The search filters of the Radio view.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StationQueryArgs {
+    name: Option<String>,
+    country_code: Option<String>,
+    region: Option<String>,
+    tag: Option<String>,
+    offset: Option<u32>,
+    limit: Option<u32>,
+}
+
+impl From<StationQueryArgs> for StationQuery {
+    fn from(args: StationQueryArgs) -> StationQuery {
+        let defaults = StationQuery::default();
+        StationQuery {
+            name: args.name,
+            country_code: args.country_code,
+            region: args.region,
+            tag: args.tag,
+            offset: args.offset.unwrap_or(0),
+            limit: args.limit.unwrap_or(defaults.limit).clamp(1, MAX_STATIONS),
+            ..defaults
+        }
+    }
+}
+
+fn radio(app: &AppHandle) -> Result<Arc<RadioService>, String> {
+    Ok(Arc::clone(&app_state(app)?.radio))
+}
+
+/// Runs a blocking radio call (network) off the async runtime's worker threads.
+async fn radio_blocking<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(work)
+        .await
+        .map_err(|err| format!("the radio task failed: {err}"))
+}
+
+/// `radio_blocking` for the calls that fail with a directory error (`{ code }`).
+async fn radio_directory<T: Send + 'static>(
+    app: &AppHandle,
+    work: impl FnOnce(&RadioService) -> Result<T, DirectoryError> + Send + 'static,
+) -> Result<T, RadioFailure> {
+    let internal = |_| RadioFailure {
+        code: RADIO_INTERNAL,
+    };
+    let service = radio(app).map_err(internal)?;
+    radio_blocking(move || work(&service))
+        .await
+        .map_err(internal)?
+        .map_err(|err| RadioFailure { code: err.code() })
+}
+
+/// Where the user is for "near you"; looks it up on first use (automatic mode).
+#[tauri::command]
+pub async fn radio_place(app: AppHandle) -> Result<Place, String> {
+    let service = radio(&app)?;
+    radio_blocking(move || service.place()).await
+}
+
+/// Asks the location service again (automatic mode only) and answers the place.
+#[tauri::command]
+pub async fn radio_redetect(app: AppHandle) -> Result<Place, String> {
+    let service = radio(&app)?;
+    radio_blocking(move || service.redetect()).await
+}
+
+/// Stations near the user; `refresh` skips the cache.
+#[tauri::command]
+pub async fn radio_near(app: AppHandle, refresh: bool) -> Result<NearResult, String> {
+    let service = radio(&app)?;
+    radio_blocking(move || service.near(refresh)).await
+}
+
+#[tauri::command]
+pub async fn radio_search(
+    app: AppHandle,
+    query: StationQueryArgs,
+) -> Result<Vec<Station>, RadioFailure> {
+    let query = StationQuery::from(query);
+    radio_directory(&app, move |service| service.search(query)).await
+}
+
+#[tauri::command]
+pub async fn radio_countries(app: AppHandle) -> Result<Vec<Country>, RadioFailure> {
+    radio_directory(&app, |service| service.countries()).await
+}
+
+#[tauri::command]
+pub async fn radio_regions(
+    app: AppHandle,
+    country_code: String,
+) -> Result<Vec<Region>, RadioFailure> {
+    radio_directory(&app, move |service| service.regions(&country_code)).await
+}
+
+#[tauri::command]
+pub async fn radio_tags(app: AppHandle) -> Result<Vec<TagCount>, RadioFailure> {
+    radio_directory(&app, |service| service.top_tags()).await
+}
+
+/// The favorite stations and the recently played ones.
+#[tauri::command]
+pub async fn radio_saved(app: AppHandle) -> Result<Saved, String> {
+    let service = radio(&app)?;
+    radio_blocking(move || service.saved())
+        .await?
+        .map_err(message)
+}
+
+/// Stores the station, reports the click and plays it as a queue of one.
+#[tauri::command]
+pub async fn radio_play(app: AppHandle, station: Station) -> Result<(), String> {
+    let service = radio(&app)?;
+    let id = radio_blocking(move || service.play_prepared(station))
+        .await?
+        .map_err(message)?;
+    app_state(&app)?.player.play(vec![id], 0)
+}
+
+/// Sets a station favorite and returns the new state. Stations go through here, not
+/// `favorites_set`: the station itself must be stored with its `radio` source.
+#[tauri::command]
+pub async fn radio_favorite(app: AppHandle, station: Station, on: bool) -> Result<bool, String> {
+    let service = radio(&app)?;
+    radio_blocking(move || service.set_favorite(station, on).map(|_| on))
+        .await?
+        .map_err(message)
+}
+
+/// The station that is current and its stream title, for windows that load later.
+#[tauri::command]
+pub fn radio_now_playing(state: State<'_, AppState>) -> Option<NowPlaying> {
+    state.radio.now_playing()
+}
+
 // Shell
 
 /// Shows the mini player (bottom-right, or under the menu bar icon on macOS, without taking
@@ -670,6 +829,45 @@ mod tests {
     fn app_state_is_an_error_until_managed() {
         assert_eq!(ready::<u8>(None), Err(NOT_READY.to_string()));
         assert_eq!(ready(Some(7)), Ok(7));
+    }
+
+    /// Every radio command is in the handler list in `lib.rs`.
+    #[test]
+    fn radio_commands_are_registered() {
+        let lib = include_str!("lib.rs");
+        for name in [
+            "radio_place",
+            "radio_near",
+            "radio_search",
+            "radio_countries",
+            "radio_regions",
+            "radio_tags",
+            "radio_saved",
+            "radio_play",
+            "radio_favorite",
+            "radio_now_playing",
+            "radio_redetect",
+        ] {
+            assert!(
+                lib.contains(&format!("commands::{name},")),
+                "{name} is not registered"
+            );
+        }
+    }
+
+    #[test]
+    fn search_args_are_clamped_and_filled() {
+        let args: StationQueryArgs =
+            serde_json::from_str(r#"{"name":"jazz","countryCode":"DE","limit":5000}"#).unwrap();
+        let query = StationQuery::from(args);
+        assert_eq!(query.name.as_deref(), Some("jazz"));
+        assert_eq!(query.country_code.as_deref(), Some("DE"));
+        assert_eq!(query.limit, MAX_STATIONS);
+        assert_eq!(query.offset, 0);
+        let empty = StationQuery::from(StationQueryArgs::default());
+        assert_eq!(empty.limit, StationQuery::default().limit);
+        let zero: StationQueryArgs = serde_json::from_str(r#"{"limit":0}"#).unwrap();
+        assert_eq!(StationQuery::from(zero).limit, 1);
     }
 
     #[test]
