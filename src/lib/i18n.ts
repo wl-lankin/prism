@@ -400,6 +400,11 @@ const en = {
   // Radio favorites, home, search, settings (M4 Task 11)
   'favorites.stations': 'Stations',
   'favorites.chip.radio': 'Radio',
+  'favorites.count.station': '{count} stations',
+  'favorites.count.station.one': '1 station',
+  'favorites.empty.station': 'No favorite stations yet',
+  'favorites.empty.stationLead': 'Tap the heart next to a station or in the player bar to keep it here.',
+  'favorites.empty.stationAction': 'Find stations',
   'home.stations': 'Your stations',
   'search.stations': 'Stations',
   'settings.radio': 'Radio',
@@ -841,6 +846,11 @@ const de: Record<Key, string> = {
   // Radio favorites, home, search, settings (M4 Task 11)
   'favorites.stations': 'Sender',
   'favorites.chip.radio': 'Radio',
+  'favorites.count.station': '{count} Sender',
+  'favorites.count.station.one': '1 Sender',
+  'favorites.empty.station': 'Noch keine Lieblingssender',
+  'favorites.empty.stationLead': 'Tippe auf das Herz neben einem Sender oder in der Wiedergabeleiste, um ihn hier zu sammeln.',
+  'favorites.empty.stationAction': 'Sender finden',
   'home.stations': 'Deine Sender',
   'search.stations': 'Sender',
   'settings.radio': 'Radio',

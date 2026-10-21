@@ -171,50 +171,125 @@ const names = (g: Element | undefined) => [...(g?.querySelectorAll('.main') ?? [
 const chip = (name: string) =>
   [...target.querySelectorAll<HTMLButtonElement>('.chip')].find((x) => x.textContent?.trim() === name);
 
-it('favorites_lists_stations_and_radio_chip', async () => {
-  const app = mount(FavoritesView, { target });
+const tabButton = (kind: string) => target.querySelector<HTMLButtonElement>(`#fav-tab-${kind}`)!;
+async function openTab(kind: string) {
+  tabButton(kind).click();
   await settle();
-  expect(chip('Radio')).toBeUndefined();
-  expect(target.textContent).not.toContain('Test FM 1');
-  unmount(app);
+}
+const chipNames = () => [...target.querySelectorAll('.chip')].map((x) => x.textContent?.trim());
 
+it('favorites_stations_tab_lists_stations', async () => {
   await favoriteStations(station(1), station(2));
   const view = mount(FavoritesView, { target });
   await settle();
-  expect(chip('Radio')).toBeTruthy();
-  expect(target.querySelector('#fav-stations h2')?.textContent).toContain('Stations');
-  // The radio view's station rows, all of them in the DOM (no virtualization this short).
-  expect(target.querySelector('#fav-stations [role="listbox"]')?.getAttribute('style') ?? '').not.toContain('height');
-  expect([...target.querySelectorAll('#fav-stations .row .name')].map((x) => x.textContent)).toEqual([
+  await openTab('track');
+
+  // The stations are a fourth tab with a count, not a section under the header.
+  expect([...target.querySelectorAll('[role="tab"]')].map((x) => x.id)).toEqual([
+    'fav-tab-track',
+    'fav-tab-album',
+    'fav-tab-artist',
+    'fav-tab-station',
+  ]);
+  expect(tabButton('station').textContent).toContain('Stations');
+  expect(tabButton('station').querySelector('.count')?.textContent).toBe('2');
+  expect(target.querySelector('#fav-stations')).toBeNull();
+  expect(target.querySelector('.stations')).toBeNull();
+
+  await openTab('station');
+  expect(tabButton('station').getAttribute('aria-selected')).toBe('true');
+  expect(target.querySelector('#fav-panel .stations [role="listbox"]')?.getAttribute('style') ?? '').not.toContain('height');
+  expect([...target.querySelectorAll('#fav-panel .stations .row .name')].map((x) => x.textContent)).toEqual([
     'Test FM 1',
     'Test FM 2',
   ]);
-
-  // The Radio chip leaves only the stations; another source hides them.
-  chip('Radio')!.click();
-  await settle();
-  expect(target.querySelectorAll('#fav-stations .row')).toHaveLength(2);
-  chip('Local files')!.click();
-  await settle();
-  expect(target.querySelector('#fav-stations')).toBeNull();
+  expect(target.querySelector('.viewhead .meta')?.textContent).toBe('2 stations');
+  // Stations cannot be queued: no Play or Shuffle.
+  expect(target.querySelector('.viewhead .actions')).toBeNull();
+  // The songs empty state stays away on this tab.
+  expect(target.textContent).not.toContain('No favorite songs yet');
 
   // A station un-hearted here leaves the list at once, through the shared heart.
-  chip('All')!.click();
-  await settle();
-  const heart = target.querySelector<HTMLButtonElement>('#fav-stations .row .heart')!;
+  const heart = target.querySelector<HTMLButtonElement>('.stations .row .heart')!;
   expect(heart.getAttribute('aria-pressed')).toBe('true');
   expect(heart.getAttribute('aria-label')).toBe('Favorite: Test FM 1');
   heart.click();
   await settle();
   expect(invoke).toHaveBeenCalledWith('radio_favorite', { station: station(1), on: false });
-  expect(target.querySelectorAll('#fav-stations .row')).toHaveLength(1);
+  expect(target.querySelectorAll('.stations .row')).toHaveLength(1);
+  expect(target.querySelector('.viewhead .meta')?.textContent).toBe('1 station');
 
   // A row plays its station and a failure names it.
   playResult = 'The station is not reachable';
-  target.querySelector<HTMLButtonElement>('#fav-stations .row [aria-label="Play Test FM 2"]')!.click();
+  target.querySelector<HTMLButtonElement>('.stations .row [aria-label="Play Test FM 2"]')!.click();
   await settle();
   expect(invoke).toHaveBeenCalledWith('radio_play', { station: station(2) });
   expect(notice.text).toBe('Test FM 2 could not be played: The station is not reachable');
+
+  // Back on songs, the queue buttons return.
+  await openTab('track');
+  expect(target.querySelector('.viewhead .actions')).not.toBeNull();
+  unmount(view);
+});
+
+it('favorites_stations_tab_empty_state_finds_stations', async () => {
+  const view = mount(FavoritesView, { target });
+  await settle();
+  await openTab('station');
+  expect(tabButton('station').querySelector('.count')?.textContent).toBe('0');
+  expect(target.querySelector('.empty h2')?.textContent).toBe('No favorite stations yet');
+  expect(target.querySelector('.empty .lead')?.textContent).toBe(
+    'Tap the heart next to a station or in the player bar to keep it here.',
+  );
+  expect(target.textContent).not.toContain('No favorite songs yet');
+  expect(target.querySelectorAll('.empty')).toHaveLength(1);
+  expect(target.querySelector('.viewhead .actions')).toBeNull();
+
+  const find = [...target.querySelectorAll<HTMLButtonElement>('.empty button')].find(
+    (x) => x.textContent?.trim() === 'Find stations',
+  )!;
+  expect(find).toBeTruthy();
+  find.click();
+  await settle();
+  const { nav, go } = await import('../stores/nav.svelte');
+  expect(nav.view).toBe('radio');
+  expect(nav.param).toBe('near');
+  go('home');
+
+  // The songs tab keeps its own invitation.
+  await openTab('track');
+  expect(target.querySelector('.empty h2')?.textContent).toBe('No favorite songs yet');
+  unmount(view);
+});
+
+it('favorites_chips_follow_the_tab', async () => {
+  await favoriteStations(station(1));
+  const view = mount(FavoritesView, { target });
+  await settle();
+  await openTab('track');
+  expect(chipNames()).toEqual(['All', 'Local files']);
+
+  await openTab('station');
+  expect(chipNames()).toEqual(['All', 'Radio']);
+  chip('Radio')!.click();
+  await settle();
+  expect(chip('Radio')!.getAttribute('aria-checked')).toBe('true');
+  expect(target.querySelectorAll('.stations .row')).toHaveLength(1);
+
+  // Leaving the stations tab drops the Radio choice and the chip.
+  await openTab('album');
+  expect(chipNames()).toEqual(['All', 'Local files']);
+  expect(chip('All')!.getAttribute('aria-checked')).toBe('true');
+
+  // The keyboard model covers four tabs: End reaches stations, Home returns to songs.
+  await openTab('track');
+  key(target.querySelector('[role="tablist"]')!, 'End');
+  await settle();
+  expect(tabButton('station').getAttribute('aria-selected')).toBe('true');
+  key(target.querySelector('[role="tablist"]')!, 'ArrowRight');
+  await settle();
+  expect(tabButton('track').getAttribute('aria-selected')).toBe('true');
+  await openTab('track');
   unmount(view);
 });
 
