@@ -1,4 +1,5 @@
 import type { Source } from '../types';
+import { closeOverlay, openOverlay, overlayOpen } from './overlays.svelte';
 
 export type View =
   | 'home'
@@ -27,8 +28,17 @@ export interface Nav {
 /** Where the main window is. M1 shows 'home' as the album grid. */
 export const nav: Nav = $state({ view: 'home' });
 
-/** Window-level overlays. `about` is opened from the sidebar logo; the About overlay renders it. */
-export const overlays = $state({ about: false });
+/** Window-level overlays. `about` is opened from the sidebar logo; the About overlay renders it.
+ *  The flag lives in the overlay registry, so the YouTube Music view makes room for it. */
+export const overlays = {
+  get about(): boolean {
+    return overlayOpen('about');
+  },
+  set about(on: boolean) {
+    if (on) openOverlay('about');
+    else closeOverlay('about');
+  },
+};
 
 /** Where `back()` returns to; a short trail is enough. */
 const trail: Nav[] = [];
