@@ -9,6 +9,26 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+/// Panics unless `url` points at this machine: a test that would leave it fails loudly.
+#[track_caller]
+pub(crate) fn assert_loopback(url: &str) {
+    let host = reqwest::Url::parse(url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned));
+    let ip = host
+        .as_deref()
+        .map(|host| host.trim_start_matches('[').trim_end_matches(']'))
+        .and_then(|host| host.parse::<std::net::IpAddr>().ok());
+    let local = host.as_deref() == Some("localhost")
+        || ip.is_some_and(|ip| match ip {
+            std::net::IpAddr::V4(v4) => v4.is_loopback(),
+            std::net::IpAddr::V6(v6) => {
+                v6.is_loopback() || v6.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback())
+            }
+        });
+    assert!(local, "a test request would leave the machine: {url}");
+}
+
 fn reason(status: u16) -> &'static str {
     match status {
         200 => "OK",

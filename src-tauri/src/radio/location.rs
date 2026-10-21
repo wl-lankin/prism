@@ -90,6 +90,8 @@ impl IpLocator {
     }
 
     fn fetch(url: &str) -> Result<String, LocateError> {
+        #[cfg(test)]
+        crate::radio::testserver::assert_loopback(url);
         let client = reqwest::blocking::Client::builder()
             .user_agent(format!("Prism/{}", env!("CARGO_PKG_VERSION")))
             .connect_timeout(LOOKUP_TIMEOUT)
@@ -236,6 +238,17 @@ pub fn resolve_place(
     locale: &str,
     now_ms: i64,
 ) -> (Place, bool) {
+    resolve_place_with(setting, cached, locator, &|| locale.to_owned(), now_ms)
+}
+
+/// [`resolve_place`] that asks for the locale only when it falls back to it.
+pub fn resolve_place_with(
+    setting: &RadioLocation,
+    cached: Option<Place>,
+    locator: &dyn Locator,
+    locale: &dyn Fn() -> String,
+    now_ms: i64,
+) -> (Place, bool) {
     if let RadioLocation::Manual {
         country_code,
         region,
@@ -276,7 +289,7 @@ pub fn resolve_place(
             Some(place) => (place, false),
             None => (
                 Place {
-                    country_code: locale_country(locale)
+                    country_code: locale_country(&locale())
                         .unwrap_or_else(|| FALLBACK_COUNTRY.to_owned()),
                     region: None,
                     city: None,
