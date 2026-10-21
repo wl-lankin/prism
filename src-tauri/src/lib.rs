@@ -259,7 +259,12 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
             })
         },
     );
-    let (flow, sink) = FlowService::spawn(Arc::clone(&library.db), player.handle());
+    // Flows deal Navidrome tracks only while the server answers.
+    let (flow, sink) = FlowService::spawn(
+        Arc::clone(&library.db),
+        player.handle(),
+        navidrome.online_flag(),
+    );
     let _ = flow_sink.set(sink);
     let thumbs = Arc::new(thumbs::ResizeGate::new(thumbs::ResizeGate::default_limit()));
     navidrome::covers::attach(&thumbs, &navidrome, cover_cache.clone());

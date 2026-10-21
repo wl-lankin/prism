@@ -14,12 +14,14 @@ const DAY_MS: i64 = 86_400_000;
 const MAX_DAYS: i64 = 60;
 
 /// Deals a pool in cycles: no repeats until the whole pool was dealt, each cycle weighted
-/// toward less recently played tracks and spaced so the same artist does not play twice in a
-/// row when avoidable (also across a cycle boundary).
+/// toward less recently played tracks and spaced so the same artist (by name, ignoring case)
+/// does not play twice in a row when avoidable (also across a cycle boundary).
 pub struct Deck {
     pool: Vec<Candidate>,
     /// The pool's artists as small numbers, by pool index.
     artist_of: Vec<usize>,
+    /// Each artist number's key (the name in lower case).
+    artist_keys: Vec<String>,
     now_ms: i64,
     rng: StdRng,
     cycle: Cycle,
@@ -66,24 +68,51 @@ fn weight(last_played: Option<i64>, now_ms: i64) -> f64 {
     (1 + days) as f64
 }
 
+/// Numbers the pool's artists, spelled alike regardless of case: (by pool index, each number's
+/// key).
+fn number_artists(pool: &[Candidate]) -> (Vec<usize>, Vec<String>) {
+    let mut numbers: HashMap<String, usize> = HashMap::new();
+    let mut keys: Vec<String> = Vec::new();
+    let artist_of = pool
+        .iter()
+        .map(|candidate| {
+            let key = candidate.artist.to_lowercase();
+            *numbers.entry(key).or_insert_with_key(|key| {
+                keys.push(key.clone());
+                keys.len() - 1
+            })
+        })
+        .collect();
+    (artist_of, keys)
+}
+
 impl Deck {
     pub fn new(pool: Vec<Candidate>, now_ms: i64, rng: StdRng) -> Deck {
-        let mut artists: HashMap<&str, usize> = HashMap::new();
-        let artist_of = pool
-            .iter()
-            .map(|candidate| {
-                let next = artists.len();
-                *artists.entry(candidate.artist.as_str()).or_insert(next)
-            })
-            .collect();
+        let (artist_of, artist_keys) = number_artists(&pool);
         Deck {
             pool,
             artist_of,
+            artist_keys,
             now_ms,
             rng,
             cycle: Cycle::default(),
             last_artist: None,
         }
+    }
+
+    /// Deals from `pool` from now on, starting a fresh cycle. The artist dealt last stays
+    /// spaced from the next track.
+    pub fn replace_pool(&mut self, pool: Vec<Candidate>, now_ms: i64) {
+        let last = self
+            .last_artist
+            .and_then(|artist| self.artist_keys.get(artist).cloned());
+        let (artist_of, artist_keys) = number_artists(&pool);
+        self.last_artist = last.and_then(|key| artist_keys.iter().position(|k| *k == key));
+        self.pool = pool;
+        self.artist_of = artist_of;
+        self.artist_keys = artist_keys;
+        self.now_ms = now_ms;
+        self.cycle = Cycle::default();
     }
 
     pub fn is_empty(&self) -> bool {
@@ -221,6 +250,53 @@ mod tests {
             never >= 35,
             "only {never} of the first 50 were never played"
         );
+    }
+
+    #[test]
+    fn spacing_ignores_artist_case() {
+        // "Portishead" and "PORTISHEAD" are one artist: two of them never sit side by side
+        // while another artist could go between.
+        let pool: Vec<Candidate> = (0..20)
+            .map(|i| {
+                let artist = match i % 4 {
+                    0 => "Portishead",
+                    1 => "PORTISHEAD",
+                    2 => "portishead",
+                    _ => "Tricky",
+                };
+                candidate(format!("t{i}"), artist, None)
+            })
+            .collect();
+        let artist_of: HashMap<String, String> = pool
+            .iter()
+            .map(|c| (c.id.clone(), c.artist.to_lowercase()))
+            .collect();
+        let mut deck = Deck::new(pool, NOW, rng());
+        let dealt = deck.next_batch(20);
+        // 15 Portishead and 5 Tricky: the first ten alternate, every Tricky spent between
+        // two Portishead.
+        for pair in dealt[..10].windows(2) {
+            assert_ne!(artist_of[&pair[0]], artist_of[&pair[1]], "{dealt:?}");
+        }
+    }
+
+    #[test]
+    fn replaced_pool_keeps_the_spacing() {
+        let pool: Vec<Candidate> = (0..4)
+            .map(|i| candidate(format!("a{i}"), "A", None))
+            .collect();
+        let mut deck = Deck::new(pool, NOW, rng());
+        assert_eq!(deck.next_batch(1).len(), 1);
+        // The new pool holds the same artist in another case and one other artist: the
+        // other one goes first, since "A" just played.
+        let mut fresh: Vec<Candidate> = (0..4)
+            .map(|i| candidate(format!("b{i}"), "a", None))
+            .collect();
+        fresh.push(candidate("other".into(), "B", None));
+        deck.replace_pool(fresh, NOW);
+        assert_eq!(deck.next_batch(1), vec!["other".to_string()]);
+        let rest = deck.next_batch(4);
+        assert!(rest.iter().all(|id| id.starts_with('b')), "{rest:?}");
     }
 
     #[test]
