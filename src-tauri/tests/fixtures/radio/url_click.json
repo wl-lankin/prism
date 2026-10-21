@@ -1,0 +1,7 @@
+{
+  "ok": "true",
+  "message": "retrieved station url",
+  "stationuuid": "00000000-0000-4000-8000-000000000001",
+  "name": "Demo Radio 1",
+  "url": "http://stream.example.org/demo1.mp3"
+}
