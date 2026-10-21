@@ -110,6 +110,7 @@ mod tests {
             first_delay: Duration::from_millis(20),
             interval: Duration::from_secs(3600),
             offline_retry: Duration::from_secs(3600),
+            ..ServiceOptions::default()
         }
     }
 

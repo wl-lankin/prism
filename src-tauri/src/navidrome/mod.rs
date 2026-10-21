@@ -16,6 +16,7 @@
 pub mod client;
 pub mod covers;
 pub mod keychain;
+pub mod stars;
 pub mod stream;
 pub mod sync;
 
@@ -32,6 +33,7 @@ use rusqlite::Connection;
 use serde::Serialize;
 
 use crate::db::Db;
+use crate::library::favorites::FavKind;
 use crate::library::scan::lock as lock_db;
 use crate::secret::Secret;
 use crate::settings::{Settings, SettingsStore};
@@ -39,6 +41,7 @@ use client::{
     normalize_url, Account, NavidromeError, NavidromeFailure, ServerInfo, SubsonicClient,
 };
 use keychain::{account_key, CredentialStore};
+use stars::FlushOutcome;
 use sync::{
     ensure_server, server_key, sync_library_cancellable, wipe_navidrome, SyncError, SyncProgress,
     SyncReport,
@@ -52,6 +55,9 @@ pub const FAILURE_KEYCHAIN: &str = "keychain";
 pub const FAILURE_DATABASE: &str = "database";
 pub const FAILURE_SETTINGS: &str = "settings";
 pub const FAILURE_INTERNAL: &str = "internal";
+
+/// What a heart on a Navidrome item answers while no account is signed in.
+pub const NOT_CONNECTED: &str = "Navidrome is not connected";
 
 /// Status events while a pass reports progress go out at most this often.
 const PROGRESS_EVERY: Duration = Duration::from_millis(250);
@@ -131,6 +137,8 @@ pub struct ServiceOptions {
     pub interval: Duration,
     /// Between two pings while offline.
     pub offline_retry: Duration,
+    /// After a star flush found the server unreachable: the retries, then every cycle.
+    pub star_retry: [Duration; 3],
 }
 
 impl Default for ServiceOptions {
@@ -139,8 +147,23 @@ impl Default for ServiceOptions {
             first_delay: Duration::from_secs(3),
             interval: Duration::from_secs(30 * 60),
             offline_retry: Duration::from_secs(60),
+            star_retry: [
+                Duration::from_secs(5),
+                Duration::from_secs(30),
+                Duration::from_secs(120),
+            ],
         }
     }
+}
+
+/// The star flusher's schedule: a kick (a heart) or a retry due.
+#[derive(Default)]
+struct StarFlush {
+    kick: bool,
+    due: Option<Instant>,
+    /// Retries used since the last kick.
+    retry: usize,
+    shutdown: bool,
 }
 
 fn now_ms() -> i64 {
@@ -245,6 +268,11 @@ struct Core {
     /// Serializes connect and disconnect.
     account: Mutex<()>,
     cover_purge: Mutex<PurgeSlot>,
+    /// Serializes star flushes and the star import, so an import never works from a server
+    /// listing taken before a flush that then cleared the intent.
+    star_lock: Mutex<()>,
+    star_flush: Mutex<StarFlush>,
+    star_wake: Condvar,
     /// Test hook: the next cycle panics.
     #[cfg(test)]
     panic_next: AtomicBool,
@@ -305,6 +333,98 @@ impl Core {
 
     fn is_current(&self, epoch: u64) -> bool {
         self.inner().epoch == epoch
+    }
+
+    /// Sends the star queue. A dropped intent may have dropped its local favorite.
+    fn flush_stars(&self, client: &SubsonicClient, epoch: u64) -> FlushOutcome {
+        let _stars = guard(&self.star_lock);
+        let outcome = stars::flush_cancellable(&self.db, client, &|| !self.is_current(epoch));
+        if outcome.dropped > 0 && self.is_current(epoch) {
+            (self.emit)(NavidromeEvent::FavoritesChanged);
+        }
+        outcome
+    }
+
+    /// Takes the server's stars for every item without a pending intent.
+    fn import_stars(&self, client: &SubsonicClient, epoch: u64) -> Result<(), SyncError> {
+        let _stars = guard(&self.star_lock);
+        let starred = client.starred2()?;
+        let changed = {
+            let mut conn = lock_db(&self.db)?;
+            if !self.is_current(epoch) {
+                return Err(SyncError::Cancelled);
+            }
+            stars::import(&mut conn, &starred, now_ms())?
+        };
+        if changed && self.is_current(epoch) {
+            (self.emit)(NavidromeEvent::FavoritesChanged);
+        }
+        Ok(())
+    }
+
+    /// The star flusher thread: flushes on a kick (a heart) and retries after an offline
+    /// flush. It flushes only while the server answers; otherwise the next cycle (after the
+    /// offline ping answers) sends the queue.
+    fn flush_loop(self: Arc<Core>) {
+        loop {
+            {
+                let mut state = guard(&self.star_flush);
+                loop {
+                    if state.shutdown {
+                        return;
+                    }
+                    if state.kick {
+                        state.kick = false;
+                        state.retry = 0;
+                        state.due = None;
+                        break;
+                    }
+                    let now = Instant::now();
+                    match state.due {
+                        Some(at) if at <= now => {
+                            state.due = None;
+                            break;
+                        }
+                        Some(at) => {
+                            state = self
+                                .star_wake
+                                .wait_timeout(state, at - now)
+                                .unwrap_or_else(|e| e.into_inner())
+                                .0;
+                        }
+                        None => {
+                            state = self
+                                .star_wake
+                                .wait(state)
+                                .unwrap_or_else(|e| e.into_inner());
+                        }
+                    }
+                }
+            }
+            let target = {
+                let inner = self.inner();
+                inner
+                    .client
+                    .clone()
+                    .filter(|_| answers(&inner.status))
+                    .map(|client| (client, inner.epoch))
+            };
+            let offline = match target {
+                Some((client, epoch)) => self.flush_stars(&client, epoch).offline,
+                None => false,
+            };
+            let mut state = guard(&self.star_flush);
+            if !offline {
+                state.retry = 0;
+            } else if !state.kick {
+                state.due = self
+                    .options
+                    .star_retry
+                    .get(state.retry)
+                    .map(|delay| Instant::now() + *delay);
+                state.retry += 1;
+            }
+        }
     }
 
     /// The scheduler thread: waits for a kick or the due time, then runs one cycle on a
@@ -384,6 +504,17 @@ impl Core {
         if self.panic_next.swap(false, Ordering::SeqCst) {
             panic!("test panic in the Navidrome cycle");
         }
+        let flushed = self.flush_stars(client, epoch);
+        if !self.is_current(epoch) {
+            return Err(SyncError::Cancelled);
+        }
+        // A server that did not answer the flush would only cost the library step another
+        // timeout.
+        if flushed.offline {
+            return Err(SyncError::Api(NavidromeError::Unreachable(
+                "the server did not answer".into(),
+            )));
+        }
         let last_progress: Cell<Option<Instant>> = Cell::new(None);
         let progress = |progress: SyncProgress| {
             let finished = progress.total.is_some_and(|total| progress.done >= total);
@@ -403,7 +534,22 @@ impl Core {
             }
         };
         let cancelled = || !self.is_current(epoch);
-        sync_library_cancellable(&self.db, client, now_ms(), &progress, &changed, &cancelled)
+        let report =
+            sync_library_cancellable(&self.db, client, now_ms(), &progress, &changed, &cancelled)?;
+        match self.import_stars(client, epoch) {
+            // The server answered, but not with stars Prism can take: the stars wait for the
+            // next cycle, the rest of this one goes on.
+            Err(SyncError::Api(
+                err @ (NavidromeError::Server { .. }
+                | NavidromeError::NotAuthorized
+                | NavidromeError::NotFound
+                | NavidromeError::NotSubsonic(_)),
+            )) => {
+                eprintln!("Navidrome star import: {}", err.code());
+            }
+            result => result?,
+        }
+        Ok(report)
     }
 
     /// The status after a cycle, and when the next one is due.
@@ -555,6 +701,9 @@ impl NavidromeService {
                 hook: None,
                 pending: purge_pending,
             }),
+            star_lock: Mutex::new(()),
+            star_flush: Mutex::new(StarFlush::default()),
+            star_wake: Condvar::new(),
             #[cfg(test)]
             panic_next: AtomicBool::new(false),
         });
@@ -564,6 +713,15 @@ impl NavidromeService {
             .spawn(move || scheduler.schedule())
             .map_err(|err| eprintln!("starting the Navidrome scheduler failed: {err}"))
             .ok();
+        // Not joined on shutdown: a flush may wait on the network, and it writes nothing
+        // after the epoch changed.
+        let flusher = Arc::clone(&core);
+        if let Err(err) = std::thread::Builder::new()
+            .name("prism-navidrome-stars".into())
+            .spawn(move || flusher.flush_loop())
+        {
+            eprintln!("starting the Navidrome star flusher failed: {err}");
+        }
         Arc::new(NavidromeService {
             core,
             thread: Mutex::new(thread),
@@ -770,13 +928,40 @@ impl NavidromeService {
         }
     }
 
-    /// Asks for the star queue to be flushed now. The star queue arrives with two-way stars;
-    /// until then there is nothing to flush.
-    pub fn kick_flush(&self) {}
+    /// Asks for the star queue to be flushed now. It is sent only while the server answers;
+    /// otherwise it waits for the next cycle. An unreachable server retries after 5 s, 30 s
+    /// and 2 min, then every cycle.
+    pub fn kick_flush(&self) {
+        let mut state = guard(&self.core.star_flush);
+        state.kick = true;
+        self.core.star_wake.notify_all();
+    }
+
+    /// A heart on a Navidrome item: the local favorite at once, the server through the star
+    /// queue. Fails with [`NOT_CONNECTED`] while no account is signed in. Runs under the
+    /// account lock, so the intent is queued for the account it was made for: a connect or
+    /// disconnect wipes it, never sends it to another server.
+    pub fn set_favorite(&self, kind: FavKind, id: &str, on: bool) -> anyhow::Result<bool> {
+        let changed = {
+            let _account = guard(&self.core.account);
+            if self.core.inner().status.state == LinkState::Off {
+                anyhow::bail!(NOT_CONNECTED);
+            }
+            let conn = lock_db(&self.core.db)?;
+            stars::set_favorite(&conn, kind, id, on, now_ms())?
+        };
+        self.kick_flush();
+        Ok(changed)
+    }
 
     /// Stops the scheduler and cancels a running cycle. Returns promptly also while a cycle
     /// waits on the network: that worker writes nothing more and ends with its request.
     pub fn shutdown(&self) {
+        {
+            let mut stars = guard(&self.core.star_flush);
+            stars.shutdown = true;
+            self.core.star_wake.notify_all();
+        }
         {
             let mut inner = self.core.inner();
             inner.shutdown = true;

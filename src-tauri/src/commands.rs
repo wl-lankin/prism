@@ -17,6 +17,7 @@ use crate::library::scan::{lock, ScanReport};
 use crate::library::watch::{FolderWatcher, WatchState};
 use crate::library::{normalize, tauri_emitter, Library};
 use crate::navidrome::client::{NavidromeFailure, ServerInfo};
+use crate::navidrome::stars;
 use crate::navidrome::{NavidromeService, NavidromeStatus, FAILURE_INTERNAL};
 use crate::player::{PlayerState, QueueItem, DROPPED_PREFIX};
 use crate::secret::Secret;
@@ -69,6 +70,15 @@ async fn read<T: Send + 'static>(
 ) -> Result<T, String> {
     let library = library(app)?;
     blocking(move || run(&*lock(&library.db)?)).await
+}
+
+/// Runs a write against the library database.
+async fn write<T: Send + 'static>(
+    app: &AppHandle,
+    run: impl FnOnce(&mut Connection) -> anyhow::Result<T> + Send + 'static,
+) -> Result<T, String> {
+    let library = library(app)?;
+    blocking(move || run(&mut *lock(&library.db)?)).await
 }
 
 fn with_watcher(app: &AppHandle, act: impl FnOnce(&mut FolderWatcher) -> anyhow::Result<()>) {
@@ -305,7 +315,9 @@ pub async fn flow_start(app: AppHandle, variant: FlowVariant) -> Result<FlowOutc
 
 // Favorites
 
-/// Sets a favorite and returns the new state; emits `favorites://changed` when it changed.
+/// Sets a favorite and returns the new state; emits `favorites://changed` when it changed. A
+/// Navidrome item is also starred on the server (queued while it cannot be reached); that
+/// fails with "Navidrome is not connected" while no account is signed in.
 #[tauri::command]
 pub async fn favorites_set(
     app: AppHandle,
@@ -314,10 +326,15 @@ pub async fn favorites_set(
     on: bool,
 ) -> Result<bool, String> {
     library_ids_only([id.as_str()])?;
-    let changed = read(&app, move |conn| {
-        favorites::set_changed(conn, kind, &id, on)
-    })
-    .await?;
+    let changed = if stars::target(kind, &id).is_some() {
+        let navidrome = Arc::clone(&app_state(&app)?.navidrome);
+        blocking(move || navidrome.set_favorite(kind, &id, on)).await?
+    } else {
+        write(&app, move |conn| {
+            favorites::set_changed(conn, kind, &id, on)
+        })
+        .await?
+    };
     if changed {
         if let Err(err) = app.emit(favorites::EVENT_CHANGED, ()) {
             eprintln!("emitting {} failed: {err}", favorites::EVENT_CHANGED);

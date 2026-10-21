@@ -10,7 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 
-use super::model::{Album, Artist, Track};
+use super::model::{Album, Artist, Source, Track};
 use super::query::{
     album_from_row, artist_from_row, artist_select, collect, track_from_row, ALBUM_COLUMNS,
     ARTIST_ID, TRACK_COLUMNS,
@@ -28,11 +28,20 @@ pub enum FavKind {
 }
 
 impl FavKind {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             FavKind::Track => "track",
             FavKind::Album => "album",
             FavKind::Artist => "artist",
+        }
+    }
+
+    pub(crate) fn from_db(value: &str) -> Option<FavKind> {
+        match value {
+            "track" => Some(FavKind::Track),
+            "album" => Some(FavKind::Album),
+            "artist" => Some(FavKind::Artist),
+            _ => None,
         }
     }
 }
@@ -53,13 +62,27 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-/// Sets the favorite state and returns whether anything changed (what the event hangs on).
+/// Sets a local favorite and returns whether anything changed (what the event hangs on).
+/// Navidrome items go through `navidrome::stars::set_favorite`, which also tells the server.
 pub fn set_changed(conn: &Connection, kind: FavKind, id: &str, on: bool) -> anyhow::Result<bool> {
+    set_with_source(conn, kind, id, on, Source::Local, now_ms())
+}
+
+/// Sets the favorite state of an item of `source`; a new row gets `added_at`. Returns whether
+/// anything changed.
+pub(crate) fn set_with_source(
+    conn: &Connection,
+    kind: FavKind,
+    id: &str,
+    on: bool,
+    source: Source,
+    added_at: i64,
+) -> anyhow::Result<bool> {
     let changed = if on {
         conn.execute(
-            "INSERT INTO favorites (kind, item_id, source, added_at) VALUES (?1, ?2, 'local', ?3)
+            "INSERT INTO favorites (kind, item_id, source, added_at) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(kind, item_id) DO NOTHING",
-            params![kind.as_str(), id, now_ms()],
+            params![kind.as_str(), id, source.as_str(), added_at],
         )?
     } else {
         conn.execute(
@@ -68,12 +91,6 @@ pub fn set_changed(conn: &Connection, kind: FavKind, id: &str, on: bool) -> anyh
         )?
     };
     Ok(changed > 0)
-}
-
-/// Idempotent; returns the new state.
-pub fn set(conn: &Connection, kind: FavKind, id: &str, on: bool) -> anyhow::Result<bool> {
-    set_changed(conn, kind, id, on)?;
-    Ok(on)
 }
 
 fn ids_of(conn: &Connection, kind: FavKind) -> anyhow::Result<Vec<String>> {
@@ -134,7 +151,6 @@ mod tests {
 
     use super::*;
     use crate::db::rekey::rekey_tracks;
-    use crate::library::model::Source;
     use crate::library::query;
     use crate::library::scan::tests::copy_fixtures;
     use crate::library::tests::library;
@@ -147,23 +163,56 @@ mod tests {
     fn set_is_idempotent() {
         let (library, _covers) = library();
         let conn = conn_of(&library);
-        assert!(set(&conn, FavKind::Track, "t1", true).unwrap());
-        assert!(set(&conn, FavKind::Track, "t1", true).unwrap());
-        assert_eq!(ids(&conn).unwrap().tracks, vec!["t1".to_string()]);
+        assert!(set_changed(&conn, FavKind::Track, "t1", true).unwrap());
         assert!(!set_changed(&conn, FavKind::Track, "t1", true).unwrap());
-        assert!(!set(&conn, FavKind::Track, "t1", false).unwrap());
-        assert!(!set(&conn, FavKind::Track, "t1", false).unwrap());
+        assert_eq!(ids(&conn).unwrap().tracks, vec!["t1".to_string()]);
+        assert!(set_changed(&conn, FavKind::Track, "t1", false).unwrap());
         assert!(!set_changed(&conn, FavKind::Track, "t1", false).unwrap());
         assert!(ids(&conn).unwrap().tracks.is_empty());
+    }
+
+    fn source_of(conn: &Connection, id: &str) -> String {
+        conn.query_row(
+            "SELECT source FROM favorites WHERE item_id = ?1",
+            [id],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn rows_carry_their_source() {
+        let (library, _covers) = library();
+        let conn = conn_of(&library);
+        set_changed(&conn, FavKind::Track, "local:t1", true).unwrap();
+        assert_eq!(source_of(&conn, "local:t1"), "local");
+        assert!(set_with_source(
+            &conn,
+            FavKind::Track,
+            "navidrome:tr-1",
+            true,
+            Source::Navidrome,
+            42
+        )
+        .unwrap());
+        assert_eq!(source_of(&conn, "navidrome:tr-1"), "navidrome");
+        let added: i64 = conn
+            .query_row(
+                "SELECT added_at FROM favorites WHERE item_id = 'navidrome:tr-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(added, 42);
     }
 
     #[test]
     fn ids_group_by_kind() {
         let (library, _covers) = library();
         let conn = conn_of(&library);
-        set(&conn, FavKind::Track, "same", true).unwrap();
-        set(&conn, FavKind::Album, "same", true).unwrap();
-        set(&conn, FavKind::Artist, "Massive Attack", true).unwrap();
+        set_changed(&conn, FavKind::Track, "same", true).unwrap();
+        set_changed(&conn, FavKind::Album, "same", true).unwrap();
+        set_changed(&conn, FavKind::Artist, "Massive Attack", true).unwrap();
         assert_eq!(
             ids(&conn).unwrap(),
             FavoriteIds {
@@ -172,7 +221,7 @@ mod tests {
                 artists: vec!["Massive Attack".to_string()],
             }
         );
-        set(&conn, FavKind::Album, "same", false).unwrap();
+        set_changed(&conn, FavKind::Album, "same", false).unwrap();
         assert!(ids(&conn).unwrap().albums.is_empty());
         assert_eq!(ids(&conn).unwrap().tracks.len(), 1);
     }
@@ -188,14 +237,14 @@ mod tests {
         let all_artists = query::artists(&conn).unwrap();
         assert!(all_tracks.len() >= 2 && all_albums.len() >= 2 && all_artists.len() >= 2);
 
-        set(&conn, FavKind::Track, &all_tracks[0].id, true).unwrap();
-        set(&conn, FavKind::Track, &all_tracks[1].id, true).unwrap();
-        set(&conn, FavKind::Track, "gone", true).unwrap();
-        set(&conn, FavKind::Album, &all_albums[0].id, true).unwrap();
-        set(&conn, FavKind::Album, "gone", true).unwrap();
-        set(&conn, FavKind::Artist, &all_artists[0].name, true).unwrap();
-        set(&conn, FavKind::Artist, &all_artists[1].name, true).unwrap();
-        set(&conn, FavKind::Artist, "Nobody", true).unwrap();
+        set_changed(&conn, FavKind::Track, &all_tracks[0].id, true).unwrap();
+        set_changed(&conn, FavKind::Track, &all_tracks[1].id, true).unwrap();
+        set_changed(&conn, FavKind::Track, "gone", true).unwrap();
+        set_changed(&conn, FavKind::Album, &all_albums[0].id, true).unwrap();
+        set_changed(&conn, FavKind::Album, "gone", true).unwrap();
+        set_changed(&conn, FavKind::Artist, &all_artists[0].name, true).unwrap();
+        set_changed(&conn, FavKind::Artist, &all_artists[1].name, true).unwrap();
+        set_changed(&conn, FavKind::Artist, "Nobody", true).unwrap();
         // Order is newest first, whatever the clock says.
         conn.execute("UPDATE favorites SET added_at = rowid", [])
             .unwrap();
@@ -234,8 +283,8 @@ mod tests {
             let conn = conn_of(&library);
             let track = query::tracks_range(&conn, 0, 1, None).unwrap().remove(0);
             let album = query::albums(&conn).unwrap().remove(0);
-            set(&conn, FavKind::Track, &track.id, true).unwrap();
-            set(&conn, FavKind::Album, &album.id, true).unwrap();
+            set_changed(&conn, FavKind::Track, &track.id, true).unwrap();
+            set_changed(&conn, FavKind::Album, &album.id, true).unwrap();
             (track, album)
         };
 
@@ -279,7 +328,7 @@ mod tests {
         let conn = conn_of(&library);
         local_and_remote(&conn);
         // An M2 row: artists are favorited by name.
-        set(&conn, FavKind::Artist, "A", true).unwrap();
+        set_changed(&conn, FavKind::Artist, "A", true).unwrap();
         let listed = artists(&conn).unwrap();
         assert_eq!(listed.len(), 1, "{listed:?}");
         assert_eq!(listed[0].id, "A");
@@ -292,7 +341,7 @@ mod tests {
         let (library, _covers) = library();
         let conn = conn_of(&library);
         local_and_remote(&conn);
-        set(&conn, FavKind::Artist, "navidrome:ar-1", true).unwrap();
+        set_changed(&conn, FavKind::Artist, "navidrome:ar-1", true).unwrap();
         let listed = artists(&conn).unwrap();
         assert_eq!(listed.len(), 1, "{listed:?}");
         assert_eq!(listed[0].id, "navidrome:ar-1");
@@ -300,7 +349,7 @@ mod tests {
         assert_eq!(listed[0].name, "A");
         assert_eq!(listed[0].album_count, 1);
         // Both favorited, newest first.
-        set(&conn, FavKind::Artist, "A", true).unwrap();
+        set_changed(&conn, FavKind::Artist, "A", true).unwrap();
         conn.execute("UPDATE favorites SET added_at = rowid", [])
             .unwrap();
         let ids: Vec<String> = artists(&conn).unwrap().into_iter().map(|a| a.id).collect();
@@ -332,9 +381,9 @@ mod tests {
         let (library, _covers) = library();
         let mut conn = conn_of(&library);
         insert_track(&conn, "old-1");
-        set(&conn, FavKind::Track, "old-1", true).unwrap();
+        set_changed(&conn, FavKind::Track, "old-1", true).unwrap();
         // An album favorite with the same text is not a track id.
-        set(&conn, FavKind::Album, "old-1", true).unwrap();
+        set_changed(&conn, FavKind::Album, "old-1", true).unwrap();
         rekey(&mut conn, &[("old-1", "new-1")]);
         let all = ids(&conn).unwrap();
         assert_eq!(all.tracks, vec!["new-1".to_string()]);
