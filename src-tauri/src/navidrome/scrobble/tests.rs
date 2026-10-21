@@ -193,19 +193,75 @@ fn an_offline_pause_does_not_count_and_the_resume_is_the_same_play() {
     let mut run = Run::new();
     let song = track("navidrome:tr-1", 60_000);
     run.change(&song);
-    run.play(&song, 0, 20_000);
-    // Held offline at 20 s for five minutes, then opened again at that position.
-    run.wait(300_000);
-    run.state(&song, PlayerStatus::Paused, 20_000);
+    assert!(run.play(&song, 0, 20_000).is_empty());
+    // Held offline at 20 s for five minutes: paused states at the held position. The resume
+    // sends no `TrackChanged`, only states from there on.
+    for _ in 0..5 {
+        run.wait(60_000);
+        assert!(run.state(&song, PlayerStatus::Paused, 20_000).is_empty());
+    }
+    assert!(run.play(&song, 20_000, 29_750).is_empty());
+    let mut out = run.play(&song, 29_750, 30_000);
+    out.extend(run.play(&song, 30_000, 60_000));
+    assert_eq!(out, [submit("tr-1", START)], "one play, its original start");
+}
+
+#[test]
+fn a_held_at_open_track_is_one_play_once_it_plays() {
+    let mut run = Run::new();
+    let before = track("navidrome:tr-1", 60_000);
+    let held = track("navidrome:tr-2", 60_000);
+    run.change(&before);
+    run.play(&before, 0, 5_000);
+    // tr-2 is held at its open: shown paused at 0, nothing audible, no `TrackChanged`.
+    for _ in 0..3 {
+        run.wait(10_000);
+        assert!(run.state(&held, PlayerStatus::Paused, 0).is_empty());
+    }
+    // Resumed: it becomes audible now, once.
     run.wait(1_000);
+    let started = run.now;
+    assert_eq!(run.change(&held), [now_playing("tr-2")]);
+    let out = run.play(&held, 0, 60_000);
+    assert_eq!(out, [submit("tr-2", started)]);
+}
+
+#[test]
+fn the_same_id_is_a_new_play_even_away_from_the_start() {
+    let mut run = Run::new();
+    let song = track("navidrome:tr-1", 60_000);
+    run.change(&song);
+    assert_eq!(run.play(&song, 0, 30_000), [submit("tr-1", START)]);
+    run.wait(1_000);
+    let second = run.now;
     assert_eq!(run.change(&song), [now_playing("tr-1")]);
+    // The first state shows 10 s: the jump is not listening, but it is a new play.
     run.wait(250);
-    assert!(run.state(&song, PlayerStatus::Playing, 20_250).is_empty());
-    assert!(run.play(&song, 20_250, 30_000).is_empty());
+    assert!(run.state(&song, PlayerStatus::Playing, 10_000).is_empty());
+    assert!(run.play(&song, 10_000, 39_750).is_empty());
+    assert_eq!(run.play(&song, 39_750, 40_000), [submit("tr-1", second)]);
+}
+
+#[test]
+fn a_burst_of_states_cannot_outrun_the_clock() {
+    let mut run = Run::new();
+    let song = track("navidrome:tr-1", 60_000);
+    run.change(&song);
+    assert!(run.play(&song, 0, 28_000).is_empty());
+    // 20 states 50 ms apart, each 250 ms further: 5 s of position in 1 s.
+    let mut position = 28_000;
+    let mut out = Vec::new();
+    for _ in 0..20 {
+        run.wait(50);
+        position += 250;
+        out.extend(run.state(&song, PlayerStatus::Playing, position));
+    }
+    assert!(out.is_empty(), "{out:?}");
+    // Real time again: the half is reached about 0.75 s later, not before.
+    assert!(run.play(&song, position, position + 500).is_empty());
     assert_eq!(
-        run.play(&song, 30_000, 30_250),
-        [submit("tr-1", START)],
-        "the play that started first"
+        run.play(&song, position + 500, position + 1_000),
+        [submit("tr-1", START)]
     );
 }
 
@@ -639,6 +695,19 @@ fn local_tracks_never_reach_the_server() {
     env.wait_online();
     let sink = Sink::new(&env.service);
     sink.listen(&track("local-1", 60_000), 60_000);
+    sink.finish();
+    assert!(server.scrobbles().is_empty());
+    assert!(queued(&env.db).is_empty());
+}
+
+#[test]
+fn nothing_is_sent_or_queued_after_shutdown() {
+    let server = server();
+    let env = start(Some(&server), None);
+    env.wait_online();
+    env.service.shutdown();
+    let sink = Sink::new(&env.service);
+    sink.listen(&track("navidrome:tr-1", 60_000), 31_000);
     sink.finish();
     assert!(server.scrobbles().is_empty());
     assert!(queued(&env.db).is_empty());

@@ -6,10 +6,20 @@
 //!
 //! [`ScrobbleTracker`] turns player events into these actions. Listened time is what the
 //! player's position actually moved while playing: paused time, seeks and a position that
-//! jumps at a gapless hand-over are not counted, and each step is capped by the wall-clock
-//! time between two state events. A repeat (the same track audible again from its start) is
-//! a new play; the same track resumed at its position (after an offline pause) is the same
-//! play.
+//! jumps at a gapless hand-over are not counted. Each step is capped by the wall-clock time
+//! between two state events, and the sum by the play's whole playing wall-clock time. Every
+//! `TrackChanged` of a Navidrome track is a new play, also for the same id (a repeat, a
+//! replay); a resume after an offline pause sends only states, so it stays the same play.
+//!
+//! Limits, by design:
+//! - A submit while no client exists (signed out) is dropped, not queued: nothing of the
+//!   server can play without a client.
+//! - A submission whose response is lost after the server took it is queued and sent again,
+//!   so it can count twice.
+//! - Connecting (to another or the same account) drops the play that is in flight: its
+//!   submit belongs to the epoch it was announced under.
+//! - A queued submission the server answers with an error code (`Server{code}`), `NotFound`
+//!   or `NotAuthorized` is dropped, not retried (as for stars).
 
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -51,12 +61,11 @@ struct Play {
     duration_ms: u64,
     started_at: i64,
     listened_ms: u64,
+    /// Wall-clock time of the play's playing states, the bound of `listened_ms`.
+    playing_ms: u64,
     /// The last position seen and when, the base of the next step.
     last: Option<(u64, i64)>,
     submitted: bool,
-    /// The same track became audible again at this time: a new play when its first state
-    /// shows it near the start (a repeat, a replay), the same play otherwise (a resume).
-    restarted_at: Option<i64>,
 }
 
 impl Play {
@@ -66,10 +75,10 @@ impl Play {
             duration_ms,
             started_at: now_ms,
             listened_ms: 0,
+            playing_ms: 0,
             // A new play is heard from its start.
             last: Some((0, now_ms)),
             submitted: false,
-            restarted_at: None,
         }
     }
 
@@ -111,15 +120,8 @@ impl ScrobbleTracker {
                     self.play = None;
                     return Vec::new();
                 };
-                match &mut self.play {
-                    Some(play) if play.track_id == track.id => {
-                        play.restarted_at = Some(now_ms);
-                        play.last = None;
-                    }
-                    _ => {
-                        self.play = Some(Play::new(track.id.clone(), track.duration_ms, now_ms));
-                    }
-                }
+                // Always a new play: the same id again is a repeat or a replay.
+                self.play = Some(Play::new(track.id.clone(), track.duration_ms, now_ms));
                 vec![ScrobbleAction::NowPlaying { id: raw.to_owned() }]
             }
             PlayerEvent::State(state) => self.on_state(state, now_ms),
@@ -139,21 +141,15 @@ impl ScrobbleTracker {
             play.duration_ms = state.duration_ms;
         }
         let position = state.position_ms;
-        if let Some(at) = play.restarted_at.take() {
-            if position <= MAX_STEP_MS {
-                *play = Play::new(play.track_id.clone(), play.duration_ms, at);
-            } else {
-                // Resumed where it stopped: the same play goes on from here.
-                play.last = Some((position, now_ms));
-                return Vec::new();
-            }
-        }
         if state.status == PlayerStatus::Playing {
             if let Some((last_position, last_at)) = play.last {
                 let step = position.saturating_sub(last_position);
                 let elapsed = u64::try_from(now_ms.saturating_sub(last_at)).unwrap_or(0);
+                // A long gap is a pause (or a hold) that just ended, not playing time.
+                play.playing_ms += elapsed.min(MAX_STEP_MS);
                 if step <= MAX_STEP_MS {
-                    play.listened_ms += step.min(elapsed + STEP_SLACK_MS);
+                    play.listened_ms = (play.listened_ms + step.min(elapsed + STEP_SLACK_MS))
+                        .min(play.playing_ms + STEP_SLACK_MS);
                 }
             }
         }
@@ -299,8 +295,12 @@ impl Core {
     }
 
     /// The signed-in account's client, its epoch and whether the server answers.
+    /// `None` once the service is shut down.
     fn scrobble_target(&self) -> Option<(Arc<SubsonicClient>, u64, bool)> {
         let inner = self.inner();
+        if inner.shutdown {
+            return None;
+        }
         let client = inner.client.clone()?;
         Some((client, inner.epoch, answers(&inner.status)))
     }
