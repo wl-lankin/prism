@@ -700,6 +700,178 @@ fn input_debug_names_the_label_only() {
 }
 
 #[test]
+fn source_drop_404_is_bridged() {
+    let server = FakeRadio::start();
+    tone_station(&server, "/station", None, &[]);
+    server.set_fault(Fault::CutThen {
+        after: 64 * 1024,
+        status: 404,
+        lasting: Duration::from_millis(300),
+    });
+    let config = config(128 * 1024, Duration::from_secs(5));
+    let stream = open(&input(server.url("/station"), &config, None));
+    let mut reader = stream.reader();
+    let out = read_n(&mut reader, 512 * 1024);
+    let mut expected = looped(server.tone(), 64 * 1024);
+    expected.extend(looped(server.tone(), out.len() - expected.len()));
+    assert!(out == expected, "the bytes around the joint differ");
+    assert_eq!(stream.reconnected(), 1);
+    // The 404s in between were retried, not reported.
+    assert!(server.requests().len() > 2, "{:?}", server.requests());
+}
+
+#[test]
+fn a_lasting_error_after_a_cut_goes_offline() {
+    let config = config(64 * 1024, Duration::from_secs(1));
+    for status in [404, 500] {
+        let server = FakeRadio::start();
+        tone_station(&server, "/station", None, &[]);
+        server.set_fault(Fault::CutThen {
+            after: 16 * 1024,
+            status,
+            lasting: Duration::from_secs(3600),
+        });
+        let stream = open(&input(server.url("/station"), &config, None));
+        let mut reader = stream.reader();
+        let started = Instant::now();
+        let mut buf = vec![0; 16 * 1024];
+        let err = loop {
+            match reader.read(&mut buf) {
+                Ok(n) => assert!(n > 0),
+                Err(err) => break err,
+            }
+            assert!(started.elapsed() < Duration::from_secs(10), "no error");
+        };
+        let err = anyhow::Error::new(err);
+        assert!(is_offline(&err), "{status}: {err:#}");
+        assert!(started.elapsed() < Duration::from_secs(3));
+        // The reconnects kept trying until the window ended.
+        assert!(server.requests().len() > 2, "{status}");
+    }
+}
+
+#[test]
+fn shoutcast_icy_status_line_plays() {
+    let server = FakeRadio::start();
+    tone_station(&server, "/station", Some(8192), &["A - One", "B - Two"]);
+    server.set_fault(Fault::IcyStatusLine);
+    let config = config(128 * 1024, Duration::from_secs(5));
+    // The HTTP client cannot read this answer, and it is told apart from the network failing.
+    let err = config
+        .client
+        .get(server.url("/station"))
+        .header("Icy-MetaData", "1")
+        .send()
+        .expect_err("the client rejects ICY 200 OK");
+    assert!(speaks_icy(&err), "{err:?}");
+    let (sink, seen) = recorder();
+    let stream = open(&input(server.url("/station"), &config, Some(sink)));
+    assert_eq!(stream.content_type(), Some("audio/mpeg"));
+    assert_eq!(stream.icy_name(), Some("Demo Radio Café"));
+    assert_eq!(stream.resolved_url(), server.url("/station"));
+    let mut reader = stream.reader();
+    let out = read_n(&mut reader, 300_000);
+    assert!(
+        out == looped(server.tone(), out.len()),
+        "the audio bytes differ"
+    );
+    assert_eq!(
+        seen.lock().unwrap().clone(),
+        [Some("A - One".to_owned()), Some("B - Two".to_owned())]
+    );
+    // A cut reconnects over the same raw path.
+    server.stop();
+    server.restart();
+    // Socket buffers still hold bytes of the cut connection; read through them.
+    let started = Instant::now();
+    while stream.reconnected() == 0 {
+        read_n(&mut reader, 64 * 1024);
+        assert!(started.elapsed() < Duration::from_secs(5), "no reconnect");
+    }
+    read_n(&mut reader, 100_000);
+    assert_eq!(stream.reconnected(), 1);
+    let requests = server.requests();
+    assert!(requests.len() >= 2, "{requests:?}");
+    for request in &requests {
+        assert_eq!(request.path, "/station");
+        assert_eq!(request.user_agent.as_deref(), Some(USER_AGENT));
+        assert_eq!(request.icy_metadata.as_deref(), Some("1"));
+    }
+}
+
+#[test]
+fn raw_heads_parse() {
+    let head = b"ICY 200 OK\r\nicy-name: Caf\xe9\r\ncontent-type: audio/mpeg\r\nicy-metaint:8192\r\nbroken line\r\n";
+    let (status, headers) = parse_raw_head(head).unwrap();
+    assert_eq!(status, 200);
+    assert_eq!(headers.get("icy-name").unwrap().as_bytes(), b"Caf\xe9");
+    assert_eq!(headers.get("icy-metaint").unwrap(), "8192");
+    assert_eq!(parse_raw_head(b"HTTP/1.0 404 Not Found\n").unwrap().0, 404);
+    assert!(parse_raw_head(b"SOMETHING 200 OK").is_none());
+    assert!(parse_raw_head(b"ICY 20 OK").is_none());
+    assert!(parse_raw_head(b"").is_none());
+    assert_eq!(head_end(b"ICY 200 OK\r\nx: y\r\n\r\nbody"), Some((16, 20)));
+    assert_eq!(head_end(b"ICY 200 OK\nx: y\n\nbody"), Some((15, 17)));
+    assert_eq!(head_end(b"ICY 200 OK\r\nx: y\r\n"), None);
+}
+
+#[test]
+fn redirects_are_limited() {
+    let server = FakeRadio::start();
+    tone_station(&server, "/tone", None, &[]);
+    for hop in 1..=6 {
+        let next = if hop == 6 {
+            "/tone".to_owned()
+        } else {
+            format!("/hop-{}", hop + 1)
+        };
+        server.station(&format!("/hop-{hop}"), Body::Redirect(next), None, &[]);
+    }
+    let config = config(64 * 1024, Duration::from_secs(5));
+    // Five redirects are followed.
+    let stream = open(&input(server.url("/hop-2"), &config, None));
+    assert_eq!(stream.resolved_url(), server.url("/tone"));
+    read_n(&mut stream.reader(), 10_000);
+    drop(stream);
+    // A sixth fails, plainly, naming the host only.
+    let err = LiveStream::open(&input(server.url("/hop-1"), &config, None))
+        .err()
+        .expect("six redirects fail");
+    assert!(!is_offline(&err), "{err:#}");
+    assert!(!format!("{err:#}").contains("hop-"), "{err:#}");
+    assert_clean(&err);
+}
+
+#[test]
+fn a_title_repeated_after_a_reconnect_is_not_reported() {
+    let server = FakeRadio::start();
+    tone_station(&server, "/station", Some(8192), &["A - One"]);
+    server.set_fault(Fault::CutAfter(64 * 1024));
+    let config = config(64 * 1024, Duration::from_secs(5));
+    let (sink, seen) = recorder();
+    let stream = open(&input(server.url("/station"), &config, Some(sink)));
+    read_n(&mut stream.reader(), 400_000);
+    assert_eq!(stream.reconnected(), 1);
+    assert_eq!(seen.lock().unwrap().clone(), [Some("A - One".to_owned())]);
+}
+
+#[test]
+fn a_canceller_binds_to_its_reader() {
+    let server = FakeRadio::start();
+    tone_station(&server, "/station", None, &[]);
+    let config = config(64 * 1024, Duration::from_secs(5));
+    let stream = open(&input(server.url("/station"), &config, None));
+    let first = stream.reader();
+    let old = first.canceller();
+    let mut second = stream.reader();
+    // Cancelling the replaced reader leaves its replacement alone.
+    old.cancel();
+    read_n(&mut second, 1000);
+    second.canceller().cancel();
+    assert!(second.read(&mut [0; 16]).is_err());
+}
+
+#[test]
 fn ogg_station_streams_its_pages() {
     let server = FakeRadio::start();
     server.station("/station.ogg", Body::Ogg, None, &[]);

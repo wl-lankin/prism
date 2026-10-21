@@ -35,6 +35,8 @@ pub(crate) enum Body {
     M3u(String),
     /// A live HLS media playlist.
     Hls,
+    /// A 302 to this server's `target` path.
+    Redirect(String),
 }
 
 /// What the server does wrong.
@@ -54,6 +56,15 @@ pub(crate) enum Fault {
     GarbageMeta,
     /// Audio responses announce `icy-metaint: 1000000000` and carry no metadata.
     HugeMetaint,
+    /// The next audio response is cut after `after` audio bytes; from the cut on, every request
+    /// answers `status` for `lasting` (an Icecast mount while its source encoder reconnects).
+    CutThen {
+        after: usize,
+        status: u16,
+        lasting: Duration,
+    },
+    /// Audio responses start with Shoutcast's `ICY 200 OK` and a Latin-1 `icy-name`.
+    IcyStatusLine,
 }
 
 /// One request as the server saw it.
@@ -74,6 +85,8 @@ struct State {
     stations: HashMap<String, Station>,
     fault: Fault,
     requests: Vec<Request>,
+    /// Set by a [`Fault::CutThen`] cut: every request answers this status until then.
+    status_until: Option<(u16, Instant)>,
 }
 
 struct Shared {
@@ -116,6 +129,7 @@ impl FakeRadio {
                 stations: HashMap::new(),
                 fault: Fault::None,
                 requests: Vec::new(),
+                status_until: None,
             }),
             port,
             epoch: AtomicU64::new(0),
@@ -312,7 +326,7 @@ fn handle(mut stream: TcpStream, shared: &Shared) {
         }
     }
     let wants_meta = icy_metadata.as_deref() == Some("1");
-    let (station, fault) = {
+    let (station, fault, held) = {
         let mut state = shared.state();
         state.requests.push(Request {
             path: path.clone(),
@@ -326,12 +340,28 @@ fn handle(mut stream: TcpStream, shared: &Shared) {
             .map(|s| (s.body.clone(), s.metaint, s.titles.clone()));
         // One-shot faults apply to the next audio response only.
         if matches!(station, Some((Body::Mp3Tone { .. } | Body::Ogg, _, _)))
-            && matches!(fault, Fault::CutAfter(_) | Fault::StallAfter(..))
+            && matches!(
+                fault,
+                Fault::CutAfter(_) | Fault::StallAfter(..) | Fault::CutThen { .. }
+            )
         {
             state.fault = Fault::None;
         }
-        (station, fault)
+        let held = state
+            .status_until
+            .filter(|(_, until)| Instant::now() < *until)
+            .map(|(status, _)| status);
+        (station, fault, held)
     };
+    if let Some(status) = held {
+        whole(
+            &mut stream,
+            status,
+            "text/html; charset=utf-8",
+            &html_page(status),
+        );
+        return;
+    }
     if let Fault::Status(status) = fault {
         whole(
             &mut stream,
@@ -377,6 +407,15 @@ fn handle(mut stream: TcpStream, shared: &Shared) {
                 "application/vnd.apple.mpegurl",
                 list.as_bytes(),
             );
+        }
+        Body::Redirect(path) => {
+            let head = format!(
+                "HTTP/1.1 302 Found\r\nLocation: {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                target(&path)
+            );
+            let _ = stream.write_all(head.as_bytes());
+            let _ = stream.flush();
+            let _ = stream.shutdown(Shutdown::Write);
         }
         Body::Mp3Tone { seconds_per_loop } => {
             let pace = Duration::from_secs_f32(seconds_per_loop.max(0.0));
@@ -460,21 +499,31 @@ fn meta_block(titles: &[String], index: usize, garbage: Option<&mut Noise>) -> V
 fn endless(stream: &mut TcpStream, shared: &Shared, epoch: u64, body: Endless<'_>) {
     let huge = matches!(body.fault, Fault::HugeMetaint);
     let metaint = if huge { None } else { body.metaint };
-    let mut head = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nConnection: close\r\nicy-name: Demo Radio\r\n",
-        body.content_type
+    let mut head = Vec::new();
+    if matches!(body.fault, Fault::IcyStatusLine) {
+        // Shoutcast v1: no HTTP version, headers in Latin-1.
+        head.extend_from_slice(b"ICY 200 OK\r\nicy-name: Demo Radio Caf\xe9\r\n");
+    } else {
+        head.extend_from_slice(b"HTTP/1.1 200 OK\r\nicy-name: Demo Radio\r\n");
+    }
+    head.extend_from_slice(
+        format!(
+            "Content-Type: {}\r\nConnection: close\r\n",
+            body.content_type
+        )
+        .as_bytes(),
     );
     if huge {
-        head.push_str(&format!("icy-metaint: {HUGE_METAINT}\r\n"));
+        head.extend_from_slice(format!("icy-metaint: {HUGE_METAINT}\r\n").as_bytes());
     } else if let Some(metaint) = metaint {
-        head.push_str(&format!("icy-metaint: {metaint}\r\n"));
+        head.extend_from_slice(format!("icy-metaint: {metaint}\r\n").as_bytes());
     }
-    head.push_str("\r\n");
-    if stream.write_all(head.as_bytes()).is_err() {
+    head.extend_from_slice(b"\r\n");
+    if stream.write_all(&head).is_err() {
         return;
     }
     let (cut, stall) = match body.fault {
-        Fault::CutAfter(bytes) => (Some(*bytes), None),
+        Fault::CutAfter(bytes) | Fault::CutThen { after: bytes, .. } => (Some(*bytes), None),
         Fault::StallAfter(bytes, wait) => (None, Some((*bytes, *wait))),
         _ => (None, None),
     };
@@ -496,6 +545,12 @@ fn endless(stream: &mut TcpStream, shared: &Shared, epoch: u64, body: Endless<'_
         let mut take = WIRE_CHUNK.min(data.len() - at).min(until_meta);
         if let Some(cut) = cut {
             if sent >= cut {
+                if let Fault::CutThen {
+                    status, lasting, ..
+                } = body.fault
+                {
+                    shared.state().status_until = Some((*status, Instant::now() + *lasting));
+                }
                 let _ = stream.flush();
                 let _ = stream.shutdown(Shutdown::Both);
                 return;

@@ -9,23 +9,30 @@
 //! Opening resolves a PLS or M3U playlist once (one level) and recognizes an HLS playlist, which
 //! is not downloaded here: the caller hands its URL to FFmpeg.
 //!
-//! Drops: a cut, a stall or a connection error is retried with a backoff while the outage (the
-//! time since the last bytes came in) stays under `outage`; the reader keeps getting what the
-//! ring holds and then waits, so a short drop never shows. After that the reader fails with
-//! [`Offline`]. An HTTP error, an HTML page or anything else that is not audio is a plain
-//! [`StreamFailure`] at once. Error texts name the station label and the host, never the URL.
+//! Drops: once a stream played, a cut, a stall, a connection error or any bad answer on
+//! reconnect (an Icecast mount answers 404 while its source encoder reconnects) is retried with
+//! a backoff while the outage (the time since the last bytes came in) stays under `outage`; the
+//! reader keeps getting what the ring holds and then waits, so a short drop never shows. After
+//! that the reader fails with [`Offline`]. At open, an HTTP error, an HTML page or anything else
+//! that is not audio is a plain [`StreamFailure`] at once. Error texts name the station label
+//! and the host, never the URL.
+//!
+//! Shoutcast v1 servers answer `ICY 200 OK`, which the HTTP client rejects; for http URLs such a
+//! station is then requested over a plain socket with HTTP/1.0 (`raw_get`).
 
 #[cfg(test)]
 pub(crate) mod testserver;
 
+use std::error::Error as StdError;
 use std::fmt;
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::net::TcpStream;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
-use reqwest::blocking::{Client, Response};
-use reqwest::header::{HeaderMap, CONTENT_TYPE};
+use reqwest::blocking::Client;
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE};
 use reqwest::Url;
 use symphonia::core::io::MediaSource;
 
@@ -297,17 +304,20 @@ pub struct LiveStream {
     hls: bool,
 }
 
-/// Stops the current reader of a stream from another thread: its blocked or next read fails at
-/// once. A reader made afterwards reads normally.
+/// Stops one reader from another thread: its blocked or next read fails at once. It never
+/// touches a reader made after it (a replacement keeps reading).
 pub struct Canceller {
     shared: Arc<Shared>,
+    reader: u64,
 }
 
 impl Canceller {
     pub fn cancel(&self) {
         let mut state = self.shared.lock();
-        state.reader += 1;
-        self.shared.changed.notify_all();
+        if state.reader == self.reader {
+            state.reader += 1;
+            self.shared.changed.notify_all();
+        }
     }
 }
 
@@ -382,7 +392,8 @@ impl LiveStream {
                 std::thread::Builder::new()
                     .name("prism-live-stream".into())
                     .spawn(move || download(&thread_shared, connection))
-                    .context("starting the stream download")?;
+                    .context("starting the stream download")
+                    .context(context)?;
             }
             None => shared.fail(Failure::Other(
                 "an HLS stream is decoded from its URL".into(),
@@ -437,9 +448,11 @@ impl LiveStream {
         self.shared.lock().reconnects
     }
 
+    /// A canceller for the reader that is current now (see [`LiveReader::canceller`]).
     pub fn canceller(&self) -> Canceller {
         Canceller {
             shared: Arc::clone(&self.shared),
+            reader: self.shared.lock().reader,
         }
     }
 
@@ -466,6 +479,14 @@ pub struct LiveReader {
 }
 
 impl LiveReader {
+    /// A handle that cancels this reader, and only this one.
+    pub fn canceller(&self) -> Canceller {
+        Canceller {
+            shared: Arc::clone(&self.shared),
+            reader: self.id,
+        }
+    }
+
     fn read_ring(&mut self, buf: &mut [u8]) -> Result<usize, Failure> {
         let shared = &self.shared;
         let config = &shared.config;
@@ -543,9 +564,17 @@ impl MediaSource for LiveReader {
     }
 }
 
+/// An answer's status line and headers, with its body (a reqwest response or a raw socket).
+struct Reply {
+    status: u16,
+    headers: HeaderMap,
+    url: Url,
+    body: Box<dyn Read + Send>,
+}
+
 /// An audio response, ready for the download thread.
 struct Connection {
-    response: Response,
+    body: Box<dyn Read + Send>,
     /// Body bytes read at open (before any demux).
     head: Vec<u8>,
     url: Url,
@@ -597,7 +626,7 @@ fn looks_like_playlist(head: &[u8]) -> bool {
 
 /// Reads until `out` holds at least `want` bytes, the body ends, or `cap` is reached.
 fn read_into(
-    response: &mut Response,
+    body: &mut dyn Read,
     out: &mut Vec<u8>,
     want: usize,
     cap: usize,
@@ -605,7 +634,7 @@ fn read_into(
     let mut buf = vec![0u8; CHUNK];
     while out.len() < want && out.len() < cap {
         let room = (cap - out.len()).min(CHUNK);
-        match response.read(&mut buf[..room]) {
+        match body.read(&mut buf[..room]) {
             Ok(0) => break,
             Ok(n) => out.extend_from_slice(&buf[..n]),
             Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
@@ -615,31 +644,172 @@ fn read_into(
     Ok(())
 }
 
-/// Requests `url` and tells what answered. `playlist`: a PLS or M3U answer is parsed for its
-/// entry (else it is an error).
-fn connect(config: &LiveConfig, url: &Url, playlist: bool) -> Result<Answer, Failure> {
-    let mut response = config
+/// True when the client failed on the status line of an answer that is not HTTP (Shoutcast's
+/// `ICY 200 OK`), not on the network.
+fn speaks_icy(err: &reqwest::Error) -> bool {
+    if err.is_connect() || err.is_timeout() || err.is_redirect() {
+        return false;
+    }
+    let mut current: Option<&(dyn StdError + 'static)> = Some(err);
+    while let Some(inner) = current {
+        if inner.to_string().contains("invalid HTTP version") {
+            return true;
+        }
+        current = inner.source();
+    }
+    false
+}
+
+/// GETs `url` with `Icy-MetaData: 1`, through the client, or over a plain socket for an http
+/// station that does not speak HTTP.
+fn fetch(config: &LiveConfig, url: &Url) -> Result<Reply, Failure> {
+    let sent = config
         .client
         .get(url.clone())
         .header("Icy-MetaData", "1")
-        .send()
-        .map_err(transport)?;
-    let status = response.status();
-    if !status.is_success() {
-        let code = status.as_u16();
-        return Err(if (502..=504).contains(&code) {
+        .send();
+    match sent {
+        Ok(response) => Ok(Reply {
+            status: response.status().as_u16(),
+            headers: response.headers().clone(),
+            url: response.url().clone(),
+            body: Box::new(response),
+        }),
+        Err(err) if speaks_icy(&err) => {
+            // After a redirect the error names the URL that answered.
+            match err.url().filter(|target| target.scheme() == "http") {
+                Some(target) => raw_get(config, &target.clone()),
+                None => Err(transport(err)),
+            }
+        }
+        Err(err) => Err(transport(err)),
+    }
+}
+
+/// The largest response head a raw request reads.
+const RAW_HEAD_LIMIT: usize = 16 * 1024;
+
+/// A plain HTTP/1.0 GET over a socket, for Shoutcast v1 servers: `ICY 200` or `HTTP/1.x` is
+/// accepted, headers are kept as bytes (Latin-1 survives), redirects are not followed.
+fn raw_get(config: &LiveConfig, url: &Url) -> Result<Reply, Failure> {
+    let addrs = url.socket_addrs(|| Some(80)).map_err(|_| offline())?;
+    let connect = CONNECT_TIMEOUT.min(config.stall);
+    let mut stream = addrs
+        .iter()
+        .find_map(|addr| TcpStream::connect_timeout(addr, connect).ok())
+        .ok_or_else(offline)?;
+    stream
+        .set_read_timeout(Some(config.stall))
+        .and_then(|()| stream.set_write_timeout(Some(config.stall)))
+        .map_err(|_| offline())?;
+    let mut host = url.host_str().unwrap_or_default().to_owned();
+    if let Some(port) = url.port() {
+        host.push_str(&format!(":{port}"));
+    }
+    let mut target = url.path().to_owned();
+    if let Some(query) = url.query() {
+        target.push('?');
+        target.push_str(query);
+    }
+    let request = format!(
+        "GET {target} HTTP/1.0\r\nHost: {host}\r\nUser-Agent: {USER_AGENT}\r\nAccept: */*\r\nIcy-MetaData: 1\r\nConnection: close\r\n\r\n"
+    );
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|_| offline())?;
+    let mut head = Vec::new();
+    let mut buf = [0u8; 4096];
+    let (head_len, body_start) = loop {
+        if let Some(end) = head_end(&head) {
+            break end;
+        }
+        if head.len() >= RAW_HEAD_LIMIT {
+            return Err(not_audio());
+        }
+        let room = (RAW_HEAD_LIMIT - head.len()).min(buf.len());
+        match stream.read(&mut buf[..room]) {
+            Ok(0) => return Err(offline()),
+            Ok(n) => head.extend_from_slice(&buf[..n]),
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+            Err(_) => return Err(offline()),
+        }
+    };
+    let (status, headers) = parse_raw_head(&head[..head_len]).ok_or_else(not_audio)?;
+    let rest = head[body_start..].to_vec();
+    Ok(Reply {
+        status,
+        headers,
+        url: url.clone(),
+        body: Box::new(io::Cursor::new(rest).chain(stream)),
+    })
+}
+
+/// Where a response head ends: its length and where the body starts (`\r\n\r\n` or `\n\n`).
+fn head_end(bytes: &[u8]) -> Option<(usize, usize)> {
+    let crlf = find(bytes, b"\r\n\r\n").map(|at| (at, at + 4));
+    let lf = find(bytes, b"\n\n").map(|at| (at, at + 2));
+    match (crlf, lf) {
+        (Some(a), Some(b)) => Some(if a.0 <= b.0 { a } else { b }),
+        (a, b) => a.or(b),
+    }
+}
+
+/// The status of `ICY <code>` or `HTTP/1.x <code>` and the headers that parse.
+fn parse_raw_head(head: &[u8]) -> Option<(u16, HeaderMap)> {
+    let mut lines = head
+        .split(|&b| b == b'\n')
+        .map(|line| line.strip_suffix(b"\r").unwrap_or(line));
+    let status_line = std::str::from_utf8(lines.next()?).ok()?;
+    let mut parts = status_line.split_whitespace();
+    let protocol = parts.next()?;
+    if protocol != "ICY" && !protocol.starts_with("HTTP/1.") {
+        return None;
+    }
+    let code = parts.next()?;
+    if code.len() != 3 {
+        return None;
+    }
+    let status: u16 = code.parse().ok()?;
+    let mut headers = HeaderMap::new();
+    for line in lines {
+        let Some(colon) = line.iter().position(|&b| b == b':') else {
+            continue;
+        };
+        let name = HeaderName::from_bytes(line[..colon].trim_ascii());
+        let value = HeaderValue::from_bytes(line[colon + 1..].trim_ascii());
+        if let (Ok(name), Ok(value)) = (name, value) {
+            headers.append(name, value);
+        }
+    }
+    Some((status, headers))
+}
+
+/// Requests `url` and tells what answered. `playlist`: a PLS or M3U answer is parsed for its
+/// entry (else it is an error).
+fn connect(config: &LiveConfig, url: &Url, playlist: bool) -> Result<Answer, Failure> {
+    let Reply {
+        status,
+        headers,
+        url: final_url,
+        body: mut response,
+    } = fetch(config, url)?;
+    if !(200..300).contains(&status) {
+        return Err(if (502..=504).contains(&status) {
             offline()
+        } else if (300..400).contains(&status) {
+            not_audio()
         } else {
-            Failure::Other(format!("The station answered {code}"))
+            Failure::Other(format!("The station answered {status}"))
         });
     }
-    let headers = response.headers();
-    let final_url = response.url().clone();
+    let headers = &headers;
     let content_type = essence(headers);
     let raw_metaint = header(headers, "icy-metaint").map(str::to_owned);
     let metaint = raw_metaint.as_deref().and_then(parse_metaint);
     let bad_metaint = raw_metaint.filter(|_| metaint.is_none());
-    let icy_name = header(headers, "icy-name").and_then(clean_icy_name);
+    let icy_name = headers
+        .get("icy-name")
+        .and_then(|value| clean_icy_name(&decode_text(value.as_bytes())));
     let kind = content_type.as_deref().unwrap_or_default();
     let typed_playlist = PLAYLIST_TYPES.contains(&kind);
     if kind == "text/html" || !typed_playlist && kind != "text/plain" && is_not_audio_type(kind) {
@@ -685,7 +855,7 @@ fn connect(config: &LiveConfig, url: &Url, playlist: bool) -> Result<Answer, Fai
         };
     }
     Ok(Answer::Audio(Box::new(Connection {
-        response,
+        body: response,
         head,
         url: final_url,
         content_type,
@@ -725,7 +895,8 @@ impl Titles {
 
 enum Pump {
     Closed,
-    Failed(Failure),
+    /// A cut, a read timeout (stall) or a broken body: all worth a reconnect.
+    Dropped,
 }
 
 /// The download thread: pumps connections into the ring and reconnects on drops.
@@ -735,12 +906,7 @@ fn download(shared: &Shared, mut connection: Box<Connection>) {
         last: None,
     };
     loop {
-        let failure = match pump(shared, connection, &mut titles) {
-            Pump::Closed => return,
-            Pump::Failed(failure) => failure,
-        };
-        if let Failure::Other(_) = failure {
-            shared.fail(failure);
+        if let Pump::Closed = pump(shared, connection, &mut titles) {
             return;
         }
         match reconnect(shared) {
@@ -762,12 +928,11 @@ fn pump(shared: &Shared, mut connection: Box<Connection>, titles: &mut Titles) -
     }
     let mut buf = vec![0u8; CHUNK];
     loop {
-        let n = match connection.response.read(&mut buf) {
-            Ok(0) => return Pump::Failed(offline()),
+        let n = match connection.body.read(&mut buf) {
+            Ok(0) => return Pump::Dropped,
             Ok(n) => n,
             Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
-            // A cut, a read timeout (stall) or a broken body: all worth a reconnect.
-            Err(_) => return Pump::Failed(offline()),
+            Err(_) => return Pump::Dropped,
         };
         if !deliver(
             shared,
@@ -829,7 +994,8 @@ fn deliver(
 }
 
 /// Reconnects with the backoff while the outage lasts. `None` when the stream was closed or the
-/// station stays away (the failure is recorded for the reader).
+/// station stays away (the offline failure is recorded for the reader). Every failed attempt
+/// counts the same, a plain one too: a station that played is only away for a moment.
 fn reconnect(shared: &Shared) -> Option<Box<Connection>> {
     let config = &shared.config;
     let mut attempt = 0;
@@ -870,15 +1036,9 @@ fn reconnect(shared: &Shared) -> Option<Box<Connection>> {
                 state.reconnects += 1;
                 return Some(connection);
             }
-            Ok(Answer::Hls { .. } | Answer::Playlist(_)) => {
-                shared.fail(Failure::Other(PLAYLIST_NOWHERE.into()));
-                return None;
-            }
-            Err(Failure::Offline(_)) => attempt += 1,
-            Err(failure) => {
-                shared.fail(failure);
-                return None;
-            }
+            // An Icecast mount answers 404 while its source encoder reconnects; a proxy may
+            // answer 500 or an empty 200 meanwhile.
+            Ok(Answer::Hls { .. } | Answer::Playlist(_)) | Err(_) => attempt += 1,
         }
     }
 }
@@ -979,15 +1139,19 @@ fn stream_title(block: &[u8]) -> Option<String> {
             .map_or(0, |last| last + 1);
         rest[..padded].iter().rposition(|&b| b == b'\'')
     })?;
-    let raw = &rest[..end];
-    let text = match std::str::from_utf8(raw) {
-        Ok(text) => text.to_owned(),
-        Err(_) => raw.iter().map(|&b| char::from(b)).collect(),
-    };
+    let text = decode_text(&rest[..end]);
     let clean: String = text.chars().filter(|c| !c.is_control()).collect();
     let title: String = clean.trim().chars().take(TITLE_CHARS).collect();
     let title = title.trim_end();
     (!title.is_empty()).then(|| title.to_owned())
+}
+
+/// UTF-8, else Latin-1 (every byte one char), as ICY servers send either.
+fn decode_text(raw: &[u8]) -> String {
+    match std::str::from_utf8(raw) {
+        Ok(text) => text.to_owned(),
+        Err(_) => raw.iter().map(|&b| char::from(b)).collect(),
+    }
 }
 
 fn is_web_url(value: &str) -> bool {
