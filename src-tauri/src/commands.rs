@@ -10,7 +10,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use crate::audio::list_devices;
 use crate::flow::{FlowOutcome, FlowVariant};
 use crate::library::favorites::{self, FavKind, FavoriteIds};
-use crate::library::model::{Album, Artist, Folder, Track};
+use crate::library::model::{Album, Artist, Folder, Source, Track};
 use crate::library::playlists::{self, Playlist, PlaylistEntry};
 use crate::library::query::{self, SearchResult};
 use crate::library::scan::{lock, ScanReport};
@@ -258,19 +258,25 @@ pub async fn library_artist_albums(app: AppHandle, name: String) -> Result<Vec<A
     read(&app, move |conn| query::artist_albums(conn, &name)).await
 }
 
+/// Tracks in the index; `source` omitted counts every source.
 #[tauri::command]
-pub async fn library_track_count(app: AppHandle) -> Result<u32, String> {
-    read(&app, query::track_count).await
+pub async fn library_track_count(app: AppHandle, source: Option<Source>) -> Result<u32, String> {
+    read(&app, move |conn| query::track_count(conn, source)).await
 }
 
+/// A page of tracks in library order; `source` omitted pages through every source.
 #[tauri::command]
 pub async fn library_tracks_range(
     app: AppHandle,
     offset: u32,
     limit: u32,
+    source: Option<Source>,
 ) -> Result<Vec<Track>, String> {
     let limit = limit.min(MAX_PAGE);
-    read(&app, move |conn| query::tracks_range(conn, offset, limit)).await
+    read(&app, move |conn| {
+        query::tracks_range(conn, offset, limit, source)
+    })
+    .await
 }
 
 #[tauri::command]

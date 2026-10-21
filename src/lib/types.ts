@@ -38,7 +38,10 @@ export interface Album {
   durationMs: number;
 }
 
+/** An artist of one source. `id` is the name for local artists, `navidrome:<id>` for Navidrome. */
 export interface Artist {
+  id: string;
+  source: Source;
   name: string;
   albumCount: number;
   trackCount: number;

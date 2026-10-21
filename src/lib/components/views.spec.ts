@@ -37,7 +37,14 @@ const album: Album = {
   trackCount: 3,
   durationMs: 540_000,
 };
-const artist: Artist = { name: 'Lumen Field', albumCount: 1, trackCount: 3, coverId: null };
+const artist: Artist = {
+  id: 'Lumen Field',
+  source: 'local',
+  name: 'Lumen Field',
+  albumCount: 1,
+  trackCount: 3,
+  coverId: null,
+};
 
 /** How long the queue is that `player_queue_range` serves. */
 let queueLength = 0;
