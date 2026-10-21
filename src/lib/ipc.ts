@@ -8,15 +8,19 @@ import type {
   FlowOutcome,
   FlowVariant,
   Folder,
+  NavidromeStatus,
   PlayerError,
   PlayerState,
   Playlist,
   PlaylistEntry,
   QueueItem,
+  RemotePlaylist,
   ScanProgress,
   ScanReport,
   SearchResult,
+  ServerInfo,
   Settings,
+  Source,
   Track,
 } from './types';
 
@@ -77,10 +81,12 @@ export const libraryAlbums = () => call<Album[]>('library_albums');
 export const libraryAlbumTracks = (albumId: string) => call<Track[]>('library_album_tracks', { albumId });
 export const libraryArtists = () => call<Artist[]>('library_artists');
 export const libraryArtistAlbums = (name: string) => call<Album[]>('library_artist_albums', { name });
-export const libraryTrackCount = () => call<number>('library_track_count');
-/** Sorted by artist, album, disc, track. */
-export const libraryTracksRange = (offset: number, limit: number) =>
-  call<Track[]>('library_tracks_range', { offset, limit });
+/** Tracks in the index; without a source, of every source. */
+export const libraryTrackCount = (source?: Source) =>
+  call<number>('library_track_count', source ? { source } : undefined);
+/** Sorted by artist, album, disc, track; without a source, through every source. */
+export const libraryTracksRange = (offset: number, limit: number, source?: Source) =>
+  call<Track[]>('library_tracks_range', source ? { offset, limit, source } : { offset, limit });
 export const librarySearch = (q: string, limit: number) => call<SearchResult>('library_search', { q, limit });
 /** Every genre once, blank ones left out, sorted case-insensitively. */
 export const libraryGenres = () => call<string[]>('library_genres');
@@ -113,6 +119,26 @@ export const playlistRemove = (id: number, positions: number[]) =>
   call<void>('playlist_remove', { id, positions });
 export const playlistMove = (id: number, from: number, to: number) =>
   call<void>('playlist_move', { id, from, to });
+
+// Navidrome. `navidromeTest` and `navidromeConnect` reject with a `NavidromeFailure`; the
+// other commands reject with a message.
+
+export const navidromeStatus = () => call<NavidromeStatus>('navidrome_status');
+/** Pings the server with these credentials; saves nothing. */
+export const navidromeTest = (url: string, user: string, password: string) =>
+  call<ServerInfo>('navidrome_test', { url, user, password });
+/** Signs in; the password goes to the OS keychain only. Resolves with the new status. */
+export const navidromeConnect = (url: string, user: string, password: string) =>
+  call<NavidromeStatus>('navidrome_connect', { url, user, password });
+/** Signs out and removes the server's tracks, stars and playlists from the index. */
+export const navidromeDisconnect = () => call<void>('navidrome_disconnect');
+/** Starts a sync cycle now; progress arrives as `navidrome://status`. */
+export const navidromeSync = () => call<void>('navidrome_sync');
+/** The server's playlists in the index, most recently changed first. */
+export const navidromePlaylists = () => call<RemotePlaylist[]>('navidrome_playlists');
+/** The entries of a server playlist; a track not in the index comes back with `track: null`. */
+export const navidromePlaylistEntries = (id: string) =>
+  call<PlaylistEntry[]>('navidrome_playlist_entries', { id });
 
 // Settings.
 
@@ -193,5 +219,8 @@ export const onSettingsChanged = (cb: (settings: Settings) => void): Promise<Unl
 export const onMiniShown = (cb: () => void): Promise<UnlistenFn> => listen('mini://shown', () => cb());
 export const onMiniLayout = (cb: (layout: MiniLayout) => void): Promise<UnlistenFn> =>
   listen<MiniLayout>('mini://layout', (event) => cb(event.payload));
+/** The Navidrome status after every change (state, counts, sync progress, failure). */
+export const onNavidromeStatus = (cb: (status: NavidromeStatus) => void): Promise<UnlistenFn> =>
+  listen<NavidromeStatus>('navidrome://status', (event) => cb(event.payload));
 export const onScanProgress = (cb: (progress: ScanProgress) => void): Promise<UnlistenFn> =>
   listen<ScanProgress>('library://scan-progress', (event) => cb(event.payload));

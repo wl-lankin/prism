@@ -1,13 +1,21 @@
 import { libraryAlbums, libraryArtists, libraryTrackCount, onLibraryChanged, onScanProgress } from '../ipc';
-import type { Album, Artist, ScanProgress } from '../types';
+import type { Album, Artist, ScanProgress, Source } from '../types';
+
+/** Tracks in the index, of every source and per source. */
+export interface TrackCounts {
+  all: number;
+  local: number;
+  navidrome: number;
+}
 
 /** The library as the views see it. Lists are raw state: they are replaced, never mutated,
- *  so tens of thousands of entries cost no deep proxies. */
+ *  so tens of thousands of entries cost no deep proxies. Albums and artists hold every
+ *  source; `albumsOf` / `artistsOf` narrow them. */
 class LibraryStore {
   /** null until the first load. */
   albums = $state.raw<Album[] | null>(null);
   artists = $state.raw<Artist[] | null>(null);
-  trackCount = $state<number | null>(null);
+  trackCounts = $state.raw<TrackCounts | null>(null);
   /** Bumped on every reload, so paged views drop their caches. */
   version = $state(0);
   /** The running scan, if any. */
@@ -21,7 +29,19 @@ export const library = new LibraryStore();
 let loading: Promise<void> | null = null;
 let again = false;
 
-/** Reloads albums, artists and the track count. Calls during a reload queue one more. */
+/** The albums of one source, or of every source. Empty before the first load. */
+export function albumsOf(source?: Source): Album[] {
+  const albums = library.albums ?? [];
+  return source ? albums.filter((album) => album.source === source) : albums;
+}
+
+/** The artists of one source, or of every source. Empty before the first load. */
+export function artistsOf(source?: Source): Artist[] {
+  const artists = library.artists ?? [];
+  return source ? artists.filter((artist) => artist.source === source) : artists;
+}
+
+/** Reloads albums, artists and the track counts. Calls during a reload queue one more. */
 export function reloadLibrary(): Promise<void> {
   if (loading) {
     again = true;
@@ -31,10 +51,17 @@ export function reloadLibrary(): Promise<void> {
     try {
       do {
         again = false;
-        const [albums, artists, count] = await Promise.all([libraryAlbums(), libraryArtists(), libraryTrackCount()]);
+        const [albums, artists, local, navidrome] = await Promise.all([
+          libraryAlbums(),
+          libraryArtists(),
+          libraryTrackCount('local'),
+          libraryTrackCount('navidrome'),
+        ]);
         library.albums = albums ?? [];
         library.artists = artists ?? [];
-        library.trackCount = count ?? 0;
+        // `all` is the sum, so the three counts always agree (no third read in between).
+        const counts = { local: local ?? 0, navidrome: navidrome ?? 0 };
+        library.trackCounts = { all: counts.local + counts.navidrome, ...counts };
         library.error = null;
         library.version++;
       } while (again);

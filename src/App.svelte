@@ -29,6 +29,7 @@
   import { onNavGo, playerPlayFiles, playerToggle, startupNotice, traySetLabels, windowVibrancy } from './lib/ipc';
   import { initFavorites } from './lib/stores/favorites.svelte';
   import { initLibrary, library } from './lib/stores/library.svelte';
+  import { initNavidrome } from './lib/stores/navidrome.svelte';
   import { go, nav, overlays, type View } from './lib/stores/nav.svelte';
   import { notice, notify } from './lib/stores/notice.svelte';
   import { initPlayer, player } from './lib/stores/player.svelte';
@@ -108,6 +109,18 @@
     initPlaylists()
       .then((cleanup) => (gone ? cleanup() : (stop = cleanup)))
       .catch((err) => console.error('loading the playlists failed', err));
+    return () => {
+      gone = true;
+      stop?.();
+    };
+  });
+
+  $effect(() => {
+    let stop: (() => void) | undefined;
+    let gone = false;
+    initNavidrome()
+      .then((cleanup) => (gone ? cleanup() : (stop = cleanup)))
+      .catch((err) => console.error('loading the Navidrome status failed', err));
     return () => {
       gone = true;
       stop?.();
@@ -331,18 +344,18 @@
       </TitleBar>
       <!-- data-menu-bounds: context menus stay inside it, clear of the transport and the ring. -->
       <section class="content" data-menu-bounds>
-        {#key `${nav.view}:${nav.param ?? ''}`}
+        {#key `${nav.view}:${nav.param ?? ''}:${nav.source ?? ''}`}
           <div class="view">
-            {#if libraryView(nav.view) && library.trackCount === null && library.error}
+            {#if libraryView(nav.view) && library.trackCounts === null && library.error}
               <div class="placeholder">
                 <p>{t('library.loadFailed', { message: library.error })}</p>
               </div>
-            {:else if libraryView(nav.view) && library.trackCount === null}
+            {:else if libraryView(nav.view) && library.trackCounts === null}
               <!-- The first load takes a moment; nothing flashes meanwhile. -->
-            {:else if libraryView(nav.view) && library.trackCount === 0}
+            {:else if libraryView(nav.view) && library.trackCounts?.all === 0}
               <EmptyLibrary />
             {:else if nav.view === 'home' || nav.view === 'albums'}
-              <AlbumGrid albums={library.albums ?? []} scrollKey="albums" header={albumsHead} />
+              <AlbumGrid albums={library.albums ?? []} scrollKey="albums:{nav.source ?? 'all'}" header={albumsHead} />
             {:else if nav.view === 'album' && nav.param}
               <AlbumView albumId={nav.param} />
             {:else if nav.view === 'artists'}

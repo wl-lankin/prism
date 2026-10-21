@@ -30,8 +30,9 @@ use crate::library::model::{navidrome_raw, Source, Track};
 use crate::player::Opener;
 use crate::settings::SettingsStore;
 
-/// The error text when a Navidrome track is played without a signed-in server.
-pub const NOT_CONNECTED: &str = "Navidrome is not connected";
+/// The error text when a Navidrome track is played without a signed-in server: the same text
+/// a heart answers, which the frontend recognizes.
+pub use super::NOT_CONNECTED;
 
 /// Opens Navidrome tracks as [`NavidromeSource`]s at the quality the settings name (read at every
 /// open), spilling into `spill_dir`; every other track goes to `fallback`.

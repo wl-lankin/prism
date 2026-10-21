@@ -46,6 +46,9 @@ const artist: Artist = {
   coverId: null,
 };
 
+/** Track counts of a library with only local tracks. */
+const counts = (all: number) => ({ all, local: all, navidrome: 0 });
+
 /** How long the queue is that `player_queue_range` serves. */
 let queueLength = 0;
 
@@ -244,7 +247,7 @@ it('wraps around with the arrows and closes on Escape', async () => {
 });
 
 it('fetches songs in pages of 200 and renders only the rows near the viewport', async () => {
-  library.trackCount = 30_000;
+  library.trackCounts = counts(30_000);
   library.version++;
   const app = mount(SongList, { target });
   await frame();
@@ -283,7 +286,7 @@ it('asks for a failed song page again while it is in view', async () => {
     return impl(cmd, args);
   });
   try {
-    library.trackCount = 50;
+    library.trackCounts = counts(50);
     library.version++;
     const app = mount(SongList, { target });
     await frame();
@@ -311,7 +314,7 @@ it('stops asking for a failing song page after three attempts', async () => {
   });
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
   try {
-    library.trackCount = 50;
+    library.trackCounts = counts(50);
     library.version++;
     const app = mount(SongList, { target });
     await frame();
@@ -355,7 +358,7 @@ it('renders a favorite heart as pressed and toggles it on click', async () => {
 it('toggles the favorite of the selected Songs row with "f"', async () => {
   const { favorites } = await import('../stores/favorites.svelte');
   favorites.tracks.clear();
-  library.trackCount = 50;
+  library.trackCounts = counts(50);
   library.version++;
   const app = mount(SongList, { target });
   await frame();
@@ -549,7 +552,7 @@ describe('Track menu', () => {
   });
 
   it('opens from a right-click on a song row', async () => {
-    library.trackCount = 50;
+    library.trackCounts = counts(50);
     library.version++;
     const app = mount(SongList, { target });
     await frame();
@@ -861,7 +864,7 @@ describe('Row play button', () => {
   });
 
   it('plays the Songs list around the clicked row', async () => {
-    library.trackCount = 500;
+    library.trackCounts = counts(500);
     library.version++;
     const app = mount(SongList, { target });
     await frame();

@@ -164,6 +164,80 @@ export interface Settings {
 /** Navidrome stream quality: the original file or an MP3 transcode at a bitrate cap. */
 export type StreamQuality = 'original' | '320' | '192' | '128';
 
+/** Where the Navidrome account stands. `error` needs the user (credentials, TLS, a refused pass). */
+export type LinkState = 'off' | 'syncing' | 'online' | 'offline' | 'error';
+
+/** Every failure code the backend sends: the Subsonic client's nine, then the service's own. */
+export type NavidromeErrorCode =
+  | 'invalidUrl'
+  | 'wrongCredentials'
+  | 'tokenAuthUnsupported'
+  | 'notAuthorized'
+  | 'notFound'
+  | 'unreachable'
+  | 'tls'
+  | 'notSubsonic'
+  | 'server'
+  | 'syncRefused'
+  | 'keychain'
+  | 'keychainTooLong'
+  | 'database'
+  | 'settings'
+  | 'internal';
+
+/** What `navidrome_test` and `navidrome_connect` reject with, and `NavidromeStatus.error`.
+ *  `detail` is English technical text from the backend, never a credential. */
+export interface NavidromeFailure {
+  code: NavidromeErrorCode;
+  detail: string | null;
+}
+
+/** Songs written so far in the song pass; `total` is the albums' song count sum, when known. */
+export interface SyncProgress {
+  done: number;
+  total: number | null;
+}
+
+/** `navidrome_status` and the `navidrome://status` event. */
+export interface NavidromeStatus {
+  /** An account is saved (url and user). */
+  configured: boolean;
+  url: string | null;
+  user: string | null;
+  state: LinkState;
+  /** Ms since the epoch of the last complete sync. */
+  lastSync: number | null;
+  /** Navidrome tracks and albums in the index. */
+  trackCount: number;
+  albumCount: number;
+  progress: SyncProgress | null;
+  error: NavidromeFailure | null;
+}
+
+/** What `navidrome_test` tells about the server. */
+export interface ServerInfo {
+  serverType: string | null;
+  serverVersion: string | null;
+  apiVersion: string;
+  openSubsonic: boolean;
+}
+
+/** A playlist of the server (read-only), as `navidrome_playlists` lists it. */
+export interface RemotePlaylist {
+  /** `navidrome:<playlist id>`. */
+  id: string;
+  name: string;
+  owner: string | null;
+  /** The server's song count. */
+  trackCount: number;
+  /** The server's total duration. */
+  durationMs: number;
+  /** Up to four distinct cover ids of indexed tracks, in playlist order. */
+  coverIds: string[];
+  /** The server's `changed` time (ms), or when Prism first stored the playlist. */
+  updatedAt: number;
+}
+
 /** One entry of `player_queue_range`; `track` is null when the id no longer resolves. */
 export interface QueueItem {
   index: number;

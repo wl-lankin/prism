@@ -478,6 +478,9 @@ fn hearting_while_signed_out_is_refused() {
         .set_favorite(FavKind::Track, "navidrome:tr-1", true)
         .unwrap_err();
     assert_eq!(err.to_string(), NOT_CONNECTED);
+    // `favorites_set` sends `{err:#}`; the frontend matches this exact text.
+    assert_eq!(format!("{err:#}"), NOT_CONNECTED);
+    assert_eq!(NOT_CONNECTED, "Navidrome is not connected");
     assert!(queue(&env.db).is_empty());
     assert!(ids(&env.db).tracks.is_empty());
 }

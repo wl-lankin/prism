@@ -38,6 +38,15 @@ it('takes settings changed in another window, the language included', () => {
   expect(lang()).toBe('de');
 });
 
+it('takes the Navidrome account the backend saved on connect and clears it on disconnect', () => {
+  changed({ navidromeUrl: 'https://music.example.com', navidromeUser: 'demo' });
+  expect(settings.navidromeUrl).toBe('https://music.example.com');
+  expect(settings.navidromeUser).toBe('demo');
+  changed({ navidromeUrl: null, navidromeUser: null });
+  expect(settings.navidromeUrl).toBeNull();
+  expect(settings.navidromeUser).toBeNull();
+});
+
 it('keeps a change of its own that is still on its way', async () => {
   const saving = updateSettings({ volume: 0.3 });
   // Another window's save arrives first, with the old volume.
