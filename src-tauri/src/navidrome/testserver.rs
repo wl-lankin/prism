@@ -57,6 +57,21 @@ pub(crate) enum Fault {
         method: &'static str,
         after_bytes: usize,
     },
+    /// Like [`Fault::CutOnce`], but the fault becomes `then` instead of `None`, already for the
+    /// cut response itself (`then: NoRanges` = a cut on a server without range support;
+    /// `then: Status(503)` = every resume fails).
+    CutOnceThen {
+        method: &'static str,
+        after_bytes: usize,
+        then: Box<Fault>,
+    },
+    /// Requests to `method` send the headers, then the body in `chunk`-byte pieces, one every
+    /// `every`: a slow but steady stream.
+    Trickle {
+        method: &'static str,
+        chunk: usize,
+        every: Duration,
+    },
     /// `stream` ignores `Range` and advertises no `Accept-Ranges`.
     NoRanges,
     /// `search3` returns no songs.
@@ -527,6 +542,7 @@ enum Delivery {
     Whole,
     Stall { after: usize, wait: Duration },
     Cut { after: usize },
+    Trickle { chunk: usize, every: Duration },
 }
 
 fn reason(status: u16) -> &'static str {
@@ -668,6 +684,21 @@ fn route(
         } if cut == method => {
             state.fault = Fault::None;
             delivery = Delivery::Cut { after: after_bytes };
+        }
+        Fault::CutOnceThen {
+            method: cut,
+            after_bytes,
+            then,
+        } if cut == method => {
+            state.fault = *then;
+            delivery = Delivery::Cut { after: after_bytes };
+        }
+        Fault::Trickle {
+            method: trickled,
+            chunk,
+            every,
+        } if trickled == method => {
+            delivery = Delivery::Trickle { chunk, every };
         }
         _ => {}
     }
@@ -1070,6 +1101,16 @@ fn write_reply(stream: &mut TcpStream, reply: &Reply, delivery: Delivery) {
                 std::thread::sleep(wait);
                 let _ = stream.write_all(&head);
                 let _ = stream.write_all(body);
+            }
+        }
+        Delivery::Trickle { chunk, every } => {
+            let _ = stream.write_all(&head);
+            for piece in body.chunks(chunk.max(1)) {
+                let _ = stream.flush();
+                std::thread::sleep(every);
+                if stream.write_all(piece).is_err() {
+                    return;
+                }
             }
         }
         Delivery::Cut { after } => {

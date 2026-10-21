@@ -12,6 +12,7 @@
 
 pub mod ffmpeg;
 pub mod gain;
+pub mod http;
 pub mod mix;
 pub mod output;
 pub mod readahead;
@@ -25,6 +26,7 @@ use std::time::{Duration, Instant};
 
 use crossbeam_channel::Receiver;
 
+pub use http::{is_offline, HttpStream, Offline, StreamConfig};
 pub use mix::{equal_power, LevelMeter};
 pub use output::{
     list_devices, CpalOutputFactory, NullSink, Output, OutputEvent, OutputFactory, OutputSink,
@@ -32,7 +34,7 @@ pub use output::{
 pub use readahead::{ReadAhead, ReadOutcome, READ_AHEAD_MS};
 pub use resample::Resampler;
 pub use source::{
-    open_source, open_source_with, AudioSource, DecoderPanic, Input, StreamSpec,
+    open_source, open_source_with, AudioSource, DecoderPanic, HttpInput, Input, StreamSpec,
     FFMPEG_DEFAULT_SPEC,
 };
 

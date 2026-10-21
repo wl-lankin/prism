@@ -36,6 +36,12 @@ pub const MAX_COVER_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_REDIRECTS: usize = 10;
 /// TCP keepalive of the stream client, so a dead connection under a paused track is noticed.
 const STREAM_KEEPALIVE: Duration = Duration::from_secs(15);
+/// The stream client's timeout. In blocking reqwest it applies to each operation (the wait for
+/// the headers, then every single body read), not to the whole response. It sits above the
+/// stream buffer's stall timeout, so the reader side decides first; this bound only ends a
+/// download thread that is left blocked on a silent server.
+pub const STREAM_READ_TIMEOUT: Duration =
+    Duration::from_secs(crate::audio::http::STALL_TIMEOUT.as_secs() + 10);
 
 /// A Navidrome server and the user signed in to it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -593,7 +599,7 @@ pub(crate) fn classify_reqwest(err: reqwest::Error) -> NavidromeError {
 
 /// Classifies an I/O error from reading a response body; a reqwest error inside it goes through
 /// [`classify_reqwest`].
-fn classify_io(err: std::io::Error) -> NavidromeError {
+pub(crate) fn classify_io(err: std::io::Error) -> NavidromeError {
     if err
         .get_ref()
         .is_some_and(|inner| inner.is::<reqwest::Error>())
@@ -662,6 +668,16 @@ impl SubsonicClient {
         connect: Duration,
         api: Duration,
     ) -> anyhow::Result<SubsonicClient> {
+        SubsonicClient::with_stream_timeout(account, connect, api, STREAM_READ_TIMEOUT)
+    }
+
+    /// Like [`Self::with_timeouts`], with the stream client's per-read timeout too.
+    pub(crate) fn with_stream_timeout(
+        account: Account,
+        connect: Duration,
+        api: Duration,
+        stream_read: Duration,
+    ) -> anyhow::Result<SubsonicClient> {
         let host = Url::parse(&account.url)
             .ok()
             .and_then(|url| url.host_str().map(str::to_owned))
@@ -674,13 +690,14 @@ impl SubsonicClient {
             .redirect(redirect_policy(host.clone()))
             .build()
             .context("building the HTTP client")?;
-        // Streams: no total timeout (a track streams for minutes, and a buffering proxy can be
-        // slow to the first byte), keepalive to notice a dead connection, no transparent
-        // decompression (byte offsets must stay the file's).
+        // Streams: no bound on the whole response (a track streams for minutes), only one per
+        // operation above the stall timeout (a buffering proxy can be slow to the first byte;
+        // a silent server must not hold a download thread forever), keepalive to notice a dead
+        // connection, no transparent decompression (byte offsets must stay the file's).
         let stream = Client::builder()
             .user_agent(&user_agent)
             .connect_timeout(connect)
-            .timeout(None)
+            .timeout(stream_read)
             .tcp_keepalive(STREAM_KEEPALIVE)
             .no_gzip()
             .redirect(redirect_policy(host))
@@ -917,9 +934,10 @@ impl SubsonicClient {
         SecretUrl::new(String::from(url))
     }
 
-    /// The HTTP client for streams (built once): the connect timeout and keepalive, no total
-    /// timeout, no transparent decompression, the same redirect rules as API calls. Map its
-    /// errors with [`classify_reqwest`].
+    /// The HTTP client for streams (built once): the connect timeout and keepalive, a per-read
+    /// timeout ([`STREAM_READ_TIMEOUT`]) but no bound on the whole response, no transparent
+    /// decompression, the same redirect rules as API calls. Map its errors with
+    /// [`classify_reqwest`].
     pub fn stream_http(&self) -> reqwest::blocking::Client {
         self.stream.clone()
     }

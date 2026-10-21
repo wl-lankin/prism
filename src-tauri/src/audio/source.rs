@@ -3,9 +3,12 @@
 use std::fmt;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use super::ffmpeg::FfmpegSource;
+use super::http::StreamConfig;
 use super::symph::SymphoniaSource;
+use crate::secret::SecretUrl;
 
 /// Sample rate and channel count of an interleaved f32 stream.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -14,10 +17,45 @@ pub struct StreamSpec {
     pub channels: u16,
 }
 
-/// Where audio comes from. M3 adds `Url`.
+/// Where audio comes from: a local file, or an HTTP stream (Navidrome).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Input {
     File(PathBuf),
+    Http(HttpInput),
+}
+
+/// An HTTP stream to play. The URL carries credentials (a Subsonic token and salt), so `Debug`
+/// prints the label only, and errors name the label, never the URL.
+#[derive(Clone)]
+pub struct HttpInput {
+    pub url: SecretUrl,
+    /// What the stream is, for error texts ("Artist - Title").
+    pub label: String,
+    /// Container hint for the decoder ("flac", "mp3").
+    pub extension: Option<String>,
+    pub config: Arc<StreamConfig>,
+}
+
+impl PartialEq for HttpInput {
+    fn eq(&self, other: &Self) -> bool {
+        self.url == other.url && self.label == other.label
+    }
+}
+
+impl Eq for HttpInput {}
+
+impl fmt::Debug for HttpInput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("HttpInput").field(&self.label).finish()
+    }
+}
+
+/// How an input is named in error texts: a file's path, a stream's label.
+pub(crate) fn describe(input: &Input) -> String {
+    match input {
+        Input::File(path) => path.display().to_string(),
+        Input::Http(http) => http.label.clone(),
+    }
 }
 
 /// A decoded audio stream.
