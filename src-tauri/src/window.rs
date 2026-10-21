@@ -47,10 +47,71 @@ pub(crate) fn clear_system_chrome(window: &tauri::WebviewWindow) {
     set(DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE);
     set(DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND as u32);
     set(DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_NONE as u32);
+    no_classic_frame(window);
 }
 
 #[cfg(not(target_os = "windows"))]
 pub(crate) fn clear_system_chrome(_window: &tauri::WebviewWindow) {}
+
+/// `DefWindowProc` does not repaint the non-client frame for a `WM_NCACTIVATE` whose lParam
+/// is -1.
+#[cfg(any(target_os = "windows", test))]
+const KEEP_FRAME_UNPAINTED: isize = -1;
+
+/// The lParam a message is passed on with: `WM_NCACTIVATE` gets `KEEP_FRAME_UNPAINTED`,
+/// everything else keeps its own.
+#[cfg(any(target_os = "windows", test))]
+fn passed_lparam(message: u32, lparam: isize) -> isize {
+    const WM_NCACTIVATE: u32 = 0x0086;
+    if message == WM_NCACTIVATE {
+        KEEP_FRAME_UNPAINTED
+    } else {
+        lparam
+    }
+}
+
+/// A window with a window region (`shell::shape`) loses DWM's frame rendering, and then
+/// `DefWindowProc` paints the classic frame on every activation change (`WM_NCACTIVATE`):
+/// light grey bands, 8 px at 100 %, along the window's edges, straight into the window
+/// surface (the client area is the whole window). The page covers them only where it is
+/// opaque, so they showed as light specks wherever the region reaches into a band over a
+/// see-through pixel: the bottom tip of the ring's circle and the card's anti-aliased
+/// corners. The subclass passes `WM_NCACTIVATE` on with lParam -1, so the runtime still sees
+/// every activation change but nothing paints the frame.
+#[cfg(target_os = "windows")]
+fn no_classic_frame(window: &tauri::WebviewWindow) {
+    use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+    use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
+    use windows_sys::Win32::UI::WindowsAndMessaging::WM_NCDESTROY;
+
+    const ID: usize = 0x5052_4e46; // "PRNF"
+
+    unsafe extern "system" fn proc(
+        hwnd: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        _id: usize,
+        _data: usize,
+    ) -> LRESULT {
+        if message == WM_NCDESTROY {
+            // SAFETY: removing our own subclass from the window that is going away.
+            unsafe { RemoveWindowSubclass(hwnd, Some(proc), ID) };
+        }
+        // SAFETY: the arguments this message arrived with, the lParam of `WM_NCACTIVATE`
+        // replaced by -1, which its documentation allows.
+        unsafe { DefSubclassProc(hwnd, message, wparam, passed_lparam(message, lparam)) }
+    }
+
+    let Ok(hwnd) = window.hwnd() else {
+        return;
+    };
+    // SAFETY: `hwnd` is a live window, subclassed on the thread that created it (both
+    // windows are set up on the main thread); `proc` lives for the whole program.
+    if unsafe { SetWindowSubclass(hwnd.0 as _, Some(proc), ID, 0) } == 0 {
+        eprintln!("subclassing the window to keep its frame unpainted failed");
+    }
+}
 
 /// Clears the main window's background so the area outside the card is see-through.
 ///
@@ -104,6 +165,22 @@ pub fn window_vibrancy(vibrancy: State<'_, Vibrancy>) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::{passed_lparam, KEEP_FRAME_UNPAINTED};
+
+    /// Only `WM_NCACTIVATE` loses its lParam, so the classic frame is never painted on an
+    /// activation change; every other message passes through unchanged.
+    #[test]
+    fn activation_changes_keep_the_frame_unpainted() {
+        const WM_NCACTIVATE: u32 = 0x0086;
+        const WM_NCPAINT: u32 = 0x0085;
+        const WM_ACTIVATE: u32 = 0x0006;
+        assert_eq!(KEEP_FRAME_UNPAINTED, -1);
+        assert_eq!(passed_lparam(WM_NCACTIVATE, 0), -1);
+        assert_eq!(passed_lparam(WM_NCACTIVATE, 0x1234), -1);
+        assert_eq!(passed_lparam(WM_NCPAINT, 1), 1);
+        assert_eq!(passed_lparam(WM_ACTIVATE, 0x1234), 0x1234);
+    }
+
     /// The runtime repaints the window surface with the creation color (see `setup`), so only
     /// transparent black keeps the strip below the card see-through.
     #[test]
