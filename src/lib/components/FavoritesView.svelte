@@ -308,7 +308,7 @@
               </span>
               <span class="art">
                 <Cover coverId={track.coverId} size={38} cache={96} radius="7px" />
-                {#if mixed}<SourceBadge source={track.source} size={9} />{/if}
+                {#if mixed && track.source !== 'local'}<SourceBadge source={track.source} size={9} />{/if}
               </span>
               <span class="name">
                 <span class="title">{track.title}</span>
@@ -331,7 +331,7 @@
               <button type="button" class="open" onclick={() => go('artist', artist.name)}>
                 <span class="portrait">
                   <Cover coverId={artist.coverId} size={148} cache={300} radius="50%" alt="" />
-                  {#if mixed}<SourceBadge source={artist.source} size={12} />{/if}
+                  {#if mixed && artist.source !== 'local'}<SourceBadge source={artist.source} size={12} />{/if}
                 </span>
                 <span class="who">
                   {#if playingArtist === artist.name}<NowPlayingBars playing={player.status === 'playing'} size={11} />{/if}

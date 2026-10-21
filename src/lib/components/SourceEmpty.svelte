@@ -9,7 +9,14 @@
   /** A source view with nothing in the index yet. Local files keep the add-a-folder screen;
    *  Navidrome says why it is empty: not connected, the first sync running (with its
    *  progress), not reachable, a failure that needs the user, or a server without music. */
-  let { source }: { source: Source } = $props();
+  let {
+    source,
+    offerLocal = false,
+  }: {
+    source: Source;
+    /** Shown in the views of every source: also offer the way to local music. */
+    offerLocal?: boolean;
+  } = $props();
 
   type Stage = 'connect' | 'syncing' | 'offline' | 'error' | 'empty';
 
@@ -73,6 +80,8 @@
         <span class="core"></span>
       </div>
       <h1>{t(titles[stage])}</h1>
+      <!-- Screen readers hear the state when it changes, not every progress number. -->
+      <span class="sr-only" role="status" aria-live="polite">{t(titles[stage])}</span>
       <p class="lead">{lead}</p>
 
       {#if stage === 'connect' || stage === 'error'}
@@ -82,7 +91,7 @@
       {/if}
 
       {#if stage === 'syncing'}
-        <div class="progress" role="status" aria-live="polite">
+        <div class="progress">
           <div class="bar" class:indeterminate={share === null}>
             <i style={share !== null ? `transform:scaleX(${share})` : undefined}></i>
           </div>
@@ -91,6 +100,12 @@
       {/if}
 
       {#if failed}<p class="error" role="alert">{failed}</p>{/if}
+
+      {#if offerLocal}
+        <button type="button" class="local" onclick={() => go('albums', undefined, 'local')}>
+          {t('sourceEmpty.addFolder')}
+        </button>
+      {/if}
     </div>
   </div>
 {/if}
@@ -201,15 +216,65 @@
     transition: transform var(--dur) linear;
   }
 
+  /* Without a total the bar is a quiet full-width line; the sweep (an endless loop) runs only
+     where motion is welcome. */
   .bar.indeterminate i {
-    width: 40%;
-    animation: sweep 1.2s ease-in-out infinite;
+    width: 100%;
+    opacity: 0.5;
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .bar.indeterminate i {
+      width: 40%;
+      opacity: 1;
+      animation: sweep 1.2s ease-in-out infinite;
+    }
   }
 
   .label {
     font-size: 12.5px;
     color: var(--text-dim);
     font-variant-numeric: tabular-nums;
+  }
+
+  /* A quiet text link under the main action: the way to local files. */
+  .local {
+    margin-top: 22px;
+    padding: 4px 6px;
+    border: 0;
+    border-radius: 6px;
+    background: none;
+    color: var(--text-dim);
+    font: inherit;
+    font-size: 13px;
+    text-decoration: underline;
+    text-underline-offset: 3px;
+    text-decoration-color: rgba(243, 243, 245, 0.3);
+    cursor: pointer;
+    transition:
+      color var(--dur) ease-out,
+      text-decoration-color var(--dur) ease-out;
+  }
+
+  .local:hover {
+    color: var(--text);
+    text-decoration-color: rgba(243, 243, 245, 0.6);
+  }
+
+  .local:focus-visible {
+    outline: 2px solid var(--spec-4);
+    outline-offset: 2px;
+  }
+
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
 
   .error {
@@ -230,14 +295,6 @@
   @keyframes fade {
     from {
       opacity: 0;
-    }
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    .bar.indeterminate i {
-      animation: none;
-      width: 100%;
-      opacity: 0.5;
     }
   }
 </style>

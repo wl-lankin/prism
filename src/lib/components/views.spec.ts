@@ -996,7 +996,10 @@ describe('Sources', () => {
           return source === 'navidrome' ? served.navidrome : source === 'local' ? served.local : served.local + served.navidrome;
         case 'library_tracks_range': {
           const { offset, limit } = args as { offset: number; limit: number };
-          return Array.from({ length: limit }, (_, i) => (source === 'navidrome' ? ndTrack(offset + i) : track(offset + i)));
+          // Every source: local and Navidrome rows take turns.
+          const pick = (n: number) =>
+            source === 'navidrome' || (!source && n % 2 === 1) ? ndTrack(n) : track(n);
+          return Array.from({ length: limit }, (_, i) => pick(offset + i));
         }
         case 'navidrome_status':
           return served.status;
@@ -1111,8 +1114,10 @@ describe('Sources', () => {
     const mounted = await app();
     entry('Albums')!.click();
     await settle();
-    expect(badges().map((b) => b.getAttribute('aria-label'))).toEqual(['Local files', 'Navidrome']);
-    expect(badges()[1].getAttribute('title')).toBe('Navidrome');
+    // Only streamed items carry a dot; local files stay unmarked.
+    expect(badges().map((b) => b.getAttribute('aria-label'))).toEqual(['Navidrome']);
+    expect(badges()[0].getAttribute('title')).toBe('Navidrome');
+    expect(badges()[0].dataset.source).toBe('navidrome');
     entry('Navidrome')!.click();
     await settle();
     expect(badges()).toHaveLength(0);
@@ -1122,7 +1127,9 @@ describe('Sources', () => {
     go('songs');
     await frame();
     await settle();
-    expect(badges().length).toBeGreaterThan(0);
+    const rows = [...target.querySelectorAll('[role="option"]')];
+    expect(rows[0].querySelector('.source-badge')).toBeNull();
+    expect(rows[1].querySelector('.source-badge')?.getAttribute('aria-label')).toBe('Navidrome');
     go('songs', undefined, 'navidrome');
     await frame();
     await settle();
@@ -1134,7 +1141,7 @@ describe('Sources', () => {
     vi.useFakeTimers();
     const { app: open, input } = palette();
     await search(input, 'night');
-    expect(badges().map((b) => b.getAttribute('aria-label'))).toEqual(['Navidrome', 'Local files', 'Navidrome', 'Navidrome']);
+    expect(badges().map((b) => b.getAttribute('aria-label'))).toEqual(['Navidrome', 'Navidrome', 'Navidrome']);
     unmount(open);
   });
 
@@ -1164,11 +1171,22 @@ describe('Sources', () => {
     entry('Navidrome')!.click();
     await settle();
     expect(target.querySelector('.content h1')?.textContent).toBe('Syncing your Navidrome library');
-    expect(target.querySelector('.content [role="status"]')?.textContent).toContain('12,000 of 31,204 songs');
-    // With no local files yet, the views of every source wait for the sync too.
+    expect(target.querySelector('.content .progress .label')?.textContent).toContain('12,000 of 31,204 songs');
+    // The live region carries the state, not the moving count.
+    const live = target.querySelector('.content [role="status"]')!;
+    expect(live.textContent).toBe('Syncing your Navidrome library');
+    expect(target.querySelector('.content .progress [aria-live]')).toBeNull();
+    expect(target.querySelector('.content button.local')).toBeNull();
+    // With no local files yet, the views of every source wait for the sync too, and still
+    // lead to local music.
     entry('Home')!.click();
     await settle();
     expect(target.querySelector('.content h1')?.textContent).toBe('Syncing your Navidrome library');
+    target.querySelector<HTMLButtonElement>('.content button.local')!.click();
+    await settle();
+    expect(nav.view).toBe('albums');
+    expect(nav.source).toBe('local');
+    expect(target.querySelector('.content h1')?.textContent).toBe('Your library is empty');
     unmount(mounted);
   });
 
@@ -1204,7 +1222,12 @@ describe('Sources', () => {
     entry('Navidrome')!.click();
     await settle();
     expect(cardTitles()).toEqual(['Night Signals']);
-    expect(target.querySelector('.content .source-hint')?.textContent).toContain('Offline');
+    // A short visible label; the full sentence is the tooltip and the accessible name.
+    const hint = target.querySelector<HTMLElement>('.content .source-hint')!;
+    expect(hint.textContent?.trim()).toBe('Offline');
+    expect(hint.getAttribute('title')).toBe('Offline, showing the saved library');
+    expect(hint.getAttribute('aria-label')).toBe('Offline, showing the saved library');
+    expect(hint.getAttribute('aria-live')).toBeNull();
     unmount(mounted);
   });
 
@@ -1221,9 +1244,20 @@ describe('Sources', () => {
     flushSync();
     expect(item.getAttribute('aria-label')).toBe('Navidrome (sync failed)');
     expect(item.querySelector('.dot')!.classList.contains('hollow')).toBe(true);
+    // State changes are announced once, in one live region outside the view.
+    const live = target.querySelector('.main > [role="status"]')!;
+    expect(live.textContent).toBe('Sync failed, showing the saved library');
+    navidrome.state = 'syncing';
+    flushSync();
+    expect(live.textContent).toBe('Navidrome sync started');
+    navidrome.progress = { done: 10, total: 600 };
+    flushSync();
+    expect(live.textContent).toBe('Navidrome sync started');
     navidrome.state = 'online';
+    navidrome.progress = null;
     navidrome.error = null;
     flushSync();
+    expect(live.textContent).toBe('Navidrome sync finished');
     expect(item.getAttribute('aria-label')).toBeNull();
     expect(item.querySelector('.dot')!.classList.contains('hollow')).toBe(false);
     unmount(mounted);
@@ -1236,8 +1270,9 @@ describe('Sources', () => {
     const rows = [...target.querySelectorAll('.list li')];
     expect(rows).toHaveLength(2);
     expect(rows.map((r) => r.querySelector('.name')?.textContent)).toEqual(['Lumen Field', 'Lumen Field']);
-    // Two artists of one name read apart: a badge each, and the source in the counts line.
-    expect(rows.map((r) => r.querySelector('.source-badge')?.getAttribute('aria-label'))).toEqual(['Local files', 'Navidrome']);
+    // Two artists of one name read apart: the streamed one has a badge, both name their
+    // source in the counts line.
+    expect(rows.map((r) => r.querySelector('.source-badge')?.getAttribute('aria-label'))).toEqual([undefined, 'Navidrome']);
     expect(rows[0].querySelector('.counts')?.textContent).toContain('Local files');
     expect(rows[1].querySelector('.counts')?.textContent).toContain('Navidrome');
     // Both open the one artist page, a union over the sources.

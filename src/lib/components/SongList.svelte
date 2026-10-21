@@ -279,7 +279,7 @@
           {#if track}
             <span class="art">
               <Cover coverId={track.coverId} size={32} cache={96} radius="6px" />
-              {#if showSource}<SourceBadge source={track.source} size={8} />{/if}
+              {#if showSource && track.source !== 'local'}<SourceBadge source={track.source} size={8} />{/if}
             </span>
             <span class="cell title">{track.title}</span>
             <span class="cell dim">{track.artist}</span>

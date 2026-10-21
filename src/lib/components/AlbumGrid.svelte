@@ -140,7 +140,7 @@
             <button type="button" class="open" onclick={() => go('album', album.id, nav.source)}>
               <span class="art">
                 <Cover coverId={album.coverId} size={Math.round(layout.cardWidth)} fluid cache={300} radius="10px" />
-                {#if showSource}<SourceBadge source={album.source} />{/if}
+                {#if showSource && album.source !== 'local'}<SourceBadge source={album.source} />{/if}
               </span>
               <span class="title">
                 {#if playing}<NowPlayingBars playing={player.status === 'playing'} size={11} />{/if}

@@ -211,7 +211,7 @@
                 {#if item.kind === 'album'}
                   <span class="art">
                     <Cover coverId={item.album.coverId} size={40} cache={96} radius="6px" />
-                    {#if mixed}<SourceBadge source={item.album.source} size={9} />{/if}
+                    {#if mixed && item.album.source !== 'local'}<SourceBadge source={item.album.source} size={9} />{/if}
                   </span>
                   <span class="text">
                     <span class="main">{item.album.title}</span>
@@ -220,7 +220,7 @@
                 {:else if item.kind === 'artist'}
                   <span class="art">
                     <Cover coverId={item.artist.coverId} size={40} cache={96} radius="50%" />
-                    {#if mixed}<SourceBadge source={item.artist.source} size={9} />{/if}
+                    {#if mixed && item.artist.source !== 'local'}<SourceBadge source={item.artist.source} size={9} />{/if}
                   </span>
                   <span class="text">
                     <span class="main">{item.artist.name}</span>
@@ -229,7 +229,7 @@
                 {:else}
                   <span class="art">
                     <Cover coverId={item.track.coverId} size={40} cache={96} radius="6px" />
-                    {#if mixed}<SourceBadge source={item.track.source} size={9} />{/if}
+                    {#if mixed && item.track.source !== 'local'}<SourceBadge source={item.track.source} size={9} />{/if}
                   </span>
                   <span class="text">
                     <span class="main">{item.track.title}</span>

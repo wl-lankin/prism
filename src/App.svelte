@@ -297,23 +297,47 @@
     { value: 'songs', label: t('nav.songs') },
   ]);
 
-  /** A calm line beside a Navidrome view's switch: the index stays browsable meanwhile. */
+  /** A calm chip beside a Navidrome view's switch: the index stays browsable meanwhile. The
+   *  visible label is short (the header must fit at the minimum window width); the full
+   *  sentence is its tooltip and accessible name. */
   const sourceHint = $derived.by(() => {
     if (nav.source !== 'navidrome') return null;
-    if (navidrome.state === 'offline') return { text: t('sourceView.offline'), away: true, title: undefined };
+    if (navidrome.state === 'offline') {
+      return { text: t('sourceView.offlineShort'), full: t('sourceView.offline'), away: true };
+    }
     if (navidrome.state === 'error') {
-      const title = navidrome.error ? failureText(navidrome.error) : undefined;
-      return { text: t('sourceView.failed'), away: true, title };
+      const sentence = t('sourceView.failed');
+      const full = navidrome.error ? `${sentence}. ${failureText(navidrome.error)}` : sentence;
+      return { text: t('sourceView.failedShort'), full, away: true };
     }
     const progress = navidrome.progress;
     if (navidrome.state === 'syncing' && progress) {
       const fmt = (n: number) => n.toLocaleString(lang());
-      const text = progress.total
-        ? t('sourceView.syncing', { done: fmt(progress.done), total: fmt(progress.total) })
-        : t('sourceView.syncingCount', { done: fmt(progress.done) });
-      return { text, away: false, title: undefined };
+      if (progress.total) {
+        const percent = Math.min(100, Math.floor((progress.done / progress.total) * 100));
+        const full = t('sourceView.syncing', { done: fmt(progress.done), total: fmt(progress.total) });
+        return { text: t('sourceView.syncingShort', { percent }), full, away: false };
+      }
+      const full = t('sourceView.syncingCount', { done: fmt(progress.done) });
+      return { text: t('sourceView.syncingBusy'), full, away: false };
     }
     return null;
+  });
+
+  /** What screen readers hear about the Navidrome link: its state changes (offline, failed,
+   *  a sync starting or finishing), never every progress number. */
+  let linkAnnouncement = $state('');
+  let lastLinkState: string | null = null;
+  $effect(() => {
+    const state = navidrome.state;
+    const previous = lastLinkState;
+    lastLinkState = state;
+    if (previous === null || previous === state) return;
+    if (state === 'offline') linkAnnouncement = t('sourceView.offline');
+    else if (state === 'error') linkAnnouncement = t('sourceView.failed');
+    else if (state === 'syncing') linkAnnouncement = t('sourceView.syncStarted');
+    else if (state === 'online' && previous === 'syncing') linkAnnouncement = t('sourceView.syncDone');
+    else linkAnnouncement = '';
   });
 
   /** Views tinted by a cover backdrop: the title bar floats over them, so the tint runs up to
@@ -361,12 +385,12 @@
 
 {#snippet sourceActions()}
   {#if sourceHint?.away && navidrome.state === 'error'}
-    <button type="button" class="source-hint away" title={sourceHint.title} onclick={() => go('settings')}>
-      <i aria-hidden="true"></i>{sourceHint.text}
+    <button type="button" class="source-hint away" title={sourceHint.full} aria-label={sourceHint.full} onclick={() => go('settings')}>
+      <i aria-hidden="true"></i><span class="hint-text">{sourceHint.text}</span>
     </button>
   {:else if sourceHint}
-    <span class="source-hint" class:away={sourceHint.away} role="status">
-      <i aria-hidden="true"></i>{sourceHint.text}
+    <span class="source-hint" class:away={sourceHint.away} title={sourceHint.full} role="note" aria-label={sourceHint.full}>
+      <i aria-hidden="true"></i><span class="hint-text">{sourceHint.text}</span>
     </span>
   {/if}
   <span id="source-switch-label" class="sr-only">{t('sourceView.show')}</span>
@@ -422,6 +446,8 @@
           <kbd>{isMac ? 'Cmd K' : 'Ctrl K'}</kbd>
         </button>
       </TitleBar>
+      <!-- Outside the keyed view, so a state change is heard once, whichever view is open. -->
+      <span class="sr-only" role="status" aria-live="polite">{linkAnnouncement}</span>
       <!-- data-menu-bounds: context menus stay inside it, clear of the transport and the ring. -->
       <section class="content" data-menu-bounds>
         {#key `${nav.view}:${nav.param ?? ''}:${nav.source ?? ''}`}
@@ -434,7 +460,7 @@
               <!-- The first load takes a moment; nothing flashes meanwhile. -->
             {:else if libraryView(nav.view) && shownTracks === 0}
               {#if emptyAsNavidrome}
-                <SourceEmpty source="navidrome" />
+                <SourceEmpty source="navidrome" offerLocal={!nav.source} />
               {:else}
                 <EmptyLibrary />
               {/if}
@@ -666,6 +692,27 @@
     transition:
       background-color var(--dur) ease-out,
       color var(--dur) ease-out;
+  }
+
+  /* At the minimum window width the chip is what gives way (its label ellipsizes); the
+     switch and the title keep their size. */
+  .source-hint {
+    min-width: 0;
+    flex-shrink: 1;
+  }
+
+  .content :global(.viewhead .actions) {
+    min-width: 0;
+  }
+
+  .content :global(.viewhead .segments) {
+    flex: none;
+  }
+
+  .hint-text {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .source-hint i {

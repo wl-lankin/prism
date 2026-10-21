@@ -328,9 +328,17 @@
     box-shadow: inset 0 0 0 1.5px var(--dot);
   }
 
-  /* A sync is running: the glow breathes. A fade, not motion, so it keeps running. */
+  /* A sync is running: the glow breathes. An endless loop, so only where motion is welcome;
+     under reduced motion the dot stays still at a calm mid opacity. */
   .dot.syncing::before {
-    animation: breathe 1.8s ease-in-out infinite;
+    opacity: 0.7;
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .dot.syncing::before {
+      opacity: 1;
+      animation: breathe 1.8s ease-in-out infinite;
+    }
   }
 
   @keyframes breathe {

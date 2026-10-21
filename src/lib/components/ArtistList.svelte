@@ -89,7 +89,7 @@
         <button type="button" class="row" onclick={() => go('artist', artist.name)}>
           <span class="avatar">
             <Cover coverId={artist.coverId} size={44} cache={96} radius="50%" />
-            {#if showSource}<SourceBadge source={artist.source} size={9} />{/if}
+            {#if showSource && artist.source !== 'local'}<SourceBadge source={artist.source} size={9} />{/if}
           </span>
           <span class="text">
             <span class="name">{artist.name}</span>
