@@ -507,6 +507,18 @@ impl Playback {
         self.current.as_ref().is_some_and(ReadAhead::exhausted)
     }
 
+    /// The current source's decoder stopped on an error that a later `pump` reports (or a
+    /// source error is waiting from a hand-over): nothing should be queued behind it.
+    pub fn current_failed(&self) -> bool {
+        self.deferred_error.is_some() || self.current.as_ref().is_some_and(ReadAhead::failed)
+    }
+
+    /// A source error from a hand-over waits for the next `pump`: the source that took over
+    /// has not been heard and never will be.
+    pub fn has_deferred_error(&self) -> bool {
+        self.deferred_error.is_some()
+    }
+
     pub fn set_volume(&mut self, volume: f32) {
         self.volume = volume;
         self.sink.set_volume(volume);

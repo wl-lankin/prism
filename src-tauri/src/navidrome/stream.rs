@@ -233,6 +233,8 @@ impl NavidromeSource {
         let input = self.request.input((seconds > 0).then_some(seconds));
         let opened = match open_http(&input, self.device) {
             Ok(opened) => opened,
+            // Deliberate slack: in the last second by the library's whole-second duration, a
+            // request that finds no audio is the end of the track, not a broken track.
             Err(err)
                 if !is_offline(&err)
                     && self

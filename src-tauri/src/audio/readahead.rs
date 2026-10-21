@@ -62,6 +62,8 @@ struct State {
     target_frames: u64,
     /// The decoder stopped (end of stream or an error) in this epoch.
     exhausted: bool,
+    /// It stopped on an error (in this epoch), not at the end of the stream.
+    failed: bool,
     /// The [`ReadAhead`] is gone; the thread exits.
     stop: bool,
     /// The decode thread is not running (it failed to start or stopped after a panic).
@@ -77,6 +79,7 @@ impl State {
                 item: Item::Error(anyhow!("the decode thread stopped")),
             });
             self.exhausted = true;
+            self.failed = true;
         }
     }
 }
@@ -139,6 +142,7 @@ impl Shared {
                 });
             }
             if let Some(item) = end {
+                state.failed = matches!(item, Item::Error(_));
                 state.chunks.push_back(Chunk { epoch, item });
                 state.exhausted = true;
             }
@@ -177,6 +181,7 @@ impl ReadAhead {
                 buffered_frames: 0,
                 target_frames: frames_for(target_ms, spec),
                 exhausted: false,
+                failed: false,
                 stop: false,
                 gone: false,
             }),
@@ -313,6 +318,7 @@ impl ReadAhead {
         state.chunks.clear();
         state.buffered_frames = 0;
         state.exhausted = false;
+        state.failed = false;
         state.fail_if_gone();
         self.shared.sync(&state);
         drop(state);
@@ -323,6 +329,12 @@ impl ReadAhead {
     /// until a seek, and what is left to play is [`buffered_frames`](Self::buffered_frames).
     pub fn exhausted(&self) -> bool {
         self.shared.lock().exhausted
+    }
+
+    /// The decoder stopped on an error (reported through [`try_read`](Self::try_read) after
+    /// the frames before it), not at the end of the source. Cleared by a seek.
+    pub fn failed(&self) -> bool {
+        self.shared.lock().failed
     }
 
     /// Decoded frames waiting to be read.

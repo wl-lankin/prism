@@ -752,6 +752,8 @@ enum Preload {
 struct Held {
     uid: u64,
     position_ms: u64,
+    /// Its play was already announced (`TrackChanged`): resuming it is the same play.
+    announced: bool,
 }
 
 /// What the engine publishes for [`PlayerHandle`] readers.
@@ -806,6 +808,9 @@ struct Engine {
     draining: bool,
     /// Where the track being loaded starts (ms): 0, or a held position being resumed.
     loading_at: u64,
+    /// The track being loaded resumes a play already announced: it starts without a new
+    /// `TrackChanged` (which always means a new play).
+    loading_announced: bool,
     /// Tracks that failed in a row since one was last heard. Offline failures do not count.
     failures: u32,
     dirty: bool,
@@ -864,6 +869,7 @@ impl Engine {
             held: None,
             draining: false,
             loading_at: 0,
+            loading_announced: false,
             failures: 0,
             dirty: true,
             last_emit: Instant::now(),
@@ -1117,7 +1123,10 @@ impl Engine {
             }
             Command::SetDevice(device) => {
                 if let Err(err) = self.playback.set_device(device) {
-                    self.fail_current(err);
+                    // Held offline nothing decodes, so nothing failed: stay held.
+                    if self.held.is_none() {
+                        self.fail_current(err);
+                    }
                 }
             }
             Command::SetGapless(gapless) => {
@@ -1285,6 +1294,9 @@ impl Engine {
             self.queue.jump(index);
         }
         self.start_current_at(true, held.position_ms);
+        if self.status == PlayerStatus::Loading {
+            self.loading_announced = held.announced;
+        }
     }
 
     /// The shown track's duration, clamping `ms` (0 = unknown, no clamp).
@@ -1373,6 +1385,7 @@ impl Engine {
         // A tail still playing goes on (it is pumped while loading) unless it was cut.
         self.draining = false;
         self.loading_at = start_ms;
+        self.loading_announced = false;
         self.dirty = true;
         let (Some(id), Some(uid)) = (
             self.queue.current().map(str::to_string),
@@ -1452,6 +1465,7 @@ impl Engine {
         self.held = None;
         self.draining = false;
         self.loading_at = 0;
+        self.loading_announced = false;
         self.start_paused = false;
         self.failures = 0;
         self.queue.rewind();
@@ -1478,8 +1492,9 @@ impl Engine {
                         self.ready = Some(source);
                     }
                     Err(failure) if failure.offline => {
-                        let at = self.loading_at;
-                        self.hold(failure.track.map(|track| *track), &opened.id, at);
+                        let (at, announced) = (self.loading_at, self.loading_announced);
+                        let track = failure.track.map(|track| *track);
+                        self.hold(track, &opened.id, at, announced);
                     }
                     Err(failure) => {
                         self.error(&opened.id, &failure.message);
@@ -1517,8 +1532,9 @@ impl Engine {
     }
 
     fn tick(&mut self) {
-        // While paused nothing is heard, so a pending hand-over waits.
-        if self.status != PlayerStatus::Paused {
+        // While paused nothing is heard, so a pending hand-over waits. So does one whose
+        // source already failed: the pump reports it first, as a hand-over never heard.
+        if self.status != PlayerStatus::Paused && !self.playback.has_deferred_error() {
             if let Some((at, _)) = &self.handover {
                 if Instant::now() >= *at {
                     self.settle_handover();
@@ -1573,7 +1589,15 @@ impl Engine {
                     PlayerStatus::Playing
                 };
                 if let Some(track) = self.current.clone() {
-                    self.show(track);
+                    if std::mem::take(&mut self.loading_announced) {
+                        // The same play, resumed after an offline hold: not a new one.
+                        self.shown = Some(track);
+                        self.shown_index = self.queue.index();
+                        self.failures = 0;
+                        self.dirty = true;
+                    } else {
+                        self.show(track);
+                    }
                 }
             }
             Err(err) => {
@@ -1609,6 +1633,11 @@ impl Engine {
                 .saturating_sub(self.playback.position_ms())
                 <= self.preload_ms();
         if !near_end && !self.playback.current_exhausted() {
+            return;
+        }
+        // A source that failed reads as decoded to its end, but nothing plays on after it:
+        // its error decides (an offline one holds the queue there).
+        if self.playback.current_failed() {
             return;
         }
         let (Some(id), Some(uid)) = (
@@ -1652,19 +1681,17 @@ impl Engine {
         let follows = self.follow_index(true);
         match std::mem::replace(&mut self.preload, Preload::None) {
             Preload::Failed(uid, id, failure)
-                if follows.and_then(|index| self.queue.uid(index)) == Some(uid) =>
+                if !failure.offline
+                    && follows.and_then(|index| self.queue.uid(index)) == Some(uid) =>
             {
                 if let Some(index) = follows {
                     self.queue.jump(index);
                 }
-                if failure.offline {
-                    // The current track played to its end; pause on the next one.
-                    self.hold(failure.track.map(|track| *track), &id, 0);
-                } else {
-                    self.error(&id, &failure.message);
-                    self.skip(false);
-                }
+                self.error(&id, &failure.message);
+                self.skip(false);
             }
+            // A pre-open that failed offline is tried once more now, as the track to play
+            // (the server may be back): offline again, the player holds there.
             _ => self.play_on(true, false),
         }
     }
@@ -1677,16 +1704,19 @@ impl Engine {
         // still playing and is not cut.
         let unheard = self.handover.take();
         if is_offline(&err) {
-            let (track, position) = match unheard {
-                Some((_, track)) => (Some(track), 0),
+            let (track, position, announced) = match unheard {
+                // Never heard, never announced.
+                Some((_, track)) => (Some(track), 0, false),
                 None => {
                     let position = self.clamp_to_current(self.playback.position_ms());
                     // Everything up to the position was heard; nothing after it is.
                     self.playback.stop();
-                    (self.current.clone(), position)
+                    // Decoding without a pending hand-over: it was started (or settled) and
+                    // announced.
+                    (self.current.clone(), position, true)
                 }
             };
-            self.hold(track, &id, position);
+            self.hold(track, &id, position, announced);
             return;
         }
         let unheard = unheard.is_some();
@@ -1712,7 +1742,10 @@ impl Engine {
     /// on it, paused at `position_ms`, with one [`ErrorKind::Offline`] notice. Nothing is
     /// skipped and the failure cap is not touched; Play opens it again at the position. A
     /// previous track's tail that is still in the output plays out.
-    fn hold(&mut self, track: Option<Track>, track_id: &str, position_ms: u64) {
+    ///
+    /// `announced`: the track's play was already announced (`TrackChanged`), so resuming it
+    /// does not announce it again.
+    fn hold(&mut self, track: Option<Track>, track_id: &str, position_ms: u64, announced: bool) {
         // A pre-open still running for the next entry is not wanted any more.
         self.generation.fetch_add(1, Ordering::SeqCst);
         self.playback.drop_sources();
@@ -1726,6 +1759,7 @@ impl Engine {
         self.start_paused = false;
         self.paused_at = None;
         self.loading_at = 0;
+        self.loading_announced = false;
         if let Some(track) = track {
             // Shown, but not `TrackChanged`: nothing of it was heard (or it was already).
             self.shown = Some(track);
@@ -1734,6 +1768,7 @@ impl Engine {
         self.held = self.queue.uid(self.queue.index()).map(|uid| Held {
             uid,
             position_ms: self.clamp_to_shown(position_ms),
+            announced,
         });
         self.status = PlayerStatus::Paused;
         self.dirty = true;
@@ -1868,9 +1903,12 @@ mod tests {
     use crate::audio::output::BUFFER_MS;
     use crate::audio::readahead::tests::SlowSource;
     use crate::audio::{open_source, Input, Offline, OutputEvent, OutputSink};
+    use crate::db::Db;
+    use crate::library::history::spawn_recorder;
     use crate::library::tags::{self, fixtures};
     use crate::player::dropped::tests::drop_files;
     use crate::player::dropped::{with_dropped, DroppedFiles};
+    use crate::player::fan_out;
 
     const STEREO_44K: StreamSpec = StreamSpec {
         sample_rate: 44_100,
@@ -4157,6 +4195,17 @@ mod tests {
         speed: f64,
         options: PlayerOptions,
     ) -> Harness {
+        net_harness_with(tracks, server, speed, options, None)
+    }
+
+    /// Like [`net_harness`]; every event also goes to `extra` (the history recorder).
+    fn net_harness_with(
+        tracks: &[(&'static str, f32, u64)],
+        server: &Arc<NetServer>,
+        speed: f64,
+        options: PlayerOptions,
+        extra: Option<EventSink>,
+    ) -> Harness {
         let lengths: Vec<(&str, u64)> = tracks.iter().map(|(id, _, ms)| (*id, *ms)).collect();
         let known = net_tracks(&lengths);
         let resolver: Resolver =
@@ -4170,9 +4219,12 @@ mod tests {
             played: Arc::clone(&played),
         });
         let (tx, events) = crossbeam_channel::unbounded();
-        let sink: EventSink = Arc::new(move |event| {
+        let mut sink: EventSink = Arc::new(move |event| {
             let _ = tx.send(event);
         });
+        if let Some(extra) = extra {
+            sink = fan_out(vec![sink, extra]);
+        }
         let opener = server.opener(tracks.to_vec());
         let player = Player::spawn_with_options(factory, resolver, sink, opener, options);
         Harness {
@@ -4244,13 +4296,21 @@ mod tests {
 
     /// Plays n1 (10 s) of n1, n2, n3 until its stream drops at 3 s; the paused state.
     fn play_until_cut(server: &Arc<NetServer>) -> (Harness, Vec<PlayerEvent>, PlayerState) {
+        play_until_cut_with(server, None)
+    }
+
+    /// [`play_until_cut`], with every event also going to `extra`.
+    fn play_until_cut_with(
+        server: &Arc<NetServer>,
+        extra: Option<EventSink>,
+    ) -> (Harness, Vec<PlayerEvent>, PlayerState) {
         server.set(|c| c.cut_at = vec![("n1".into(), 3_000)]);
         let tones = [
             ("n1", NET_A, SILENCE_MS),
             ("n2", NET_B, 1_000),
             ("n3", NET_C, 1_000),
         ];
-        let h = net_harness(&tones, server, FAST, PlayerOptions::default());
+        let h = net_harness_with(&tones, server, FAST, PlayerOptions::default(), extra);
         h.player.play(ids(&["n1", "n2", "n3"]), 0).unwrap();
         let events = collect_until(&h.events, Duration::from_secs(10), |seen| {
             !errors(seen).is_empty()
@@ -4284,10 +4344,8 @@ mod tests {
             changes(&later).is_empty(),
             "the queue did not move: {later:#?}"
         );
-        // n2 may have been pre-opened (a failed decoder reads as decoded to its end), but it
-        // was dropped, and nothing after it was opened.
-        assert_eq!(server.opens()[0], "n1");
-        assert!(!server.opens().contains(&"n3".to_string()));
+        // Nothing is pre-opened behind a stream that failed.
+        assert_eq!(server.opens(), ids(&["n1"]), "n2 was never opened");
         assert_eq!(played_of(&h.played, NET_B), 0);
         assert_eq!(h.player.state().status, PlayerStatus::Paused);
     }
@@ -4295,7 +4353,9 @@ mod tests {
     #[test]
     fn resume_after_offline_reopens_at_position() {
         let server = NetServer::new();
-        let (h, _, paused) = play_until_cut(&server);
+        let db = Arc::new(Db::open_in_memory().unwrap());
+        let (h, before, paused) =
+            play_until_cut_with(&server, Some(spawn_recorder(Arc::clone(&db))));
         let held = paused.position_ms;
         server.set(|c| c.cut_at.clear());
         h.player.toggle().unwrap();
@@ -4325,6 +4385,91 @@ mod tests {
             .find(|s| playing_track(s, "n1"))
             .expect("n1 played again");
         assert!(resumed.position_ms >= held, "{resumed:#?}");
+        // The resume is the same play: n1 was announced once, and the history has one play.
+        let mut all = before;
+        all.extend(events);
+        assert_eq!(changes(&all), ids(&["n1", "n2"]), "{all:#?}");
+        let plays = |id: &str| -> i64 {
+            db.0.lock()
+                .unwrap()
+                .query_row(
+                    "SELECT COALESCE(SUM(play_count), 0) FROM track_stats WHERE track_id = ?1",
+                    [id],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while plays("n2") < 1 {
+            assert!(Instant::now() < deadline, "the history never saw n2");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            plays("n1"),
+            1,
+            "one play of n1 across the cut and the resume"
+        );
+    }
+
+    #[test]
+    fn offline_preopen_tried_again_when_the_server_is_back() {
+        let server = NetServer::new();
+        server.set(|c| c.down_ids = vec!["n2".into()]);
+        let tones = [("n1", NET_A, 1_500), ("n2", NET_B, 1_000)];
+        let h = net_harness(&tones, &server, 1.0, PlayerOptions::default());
+        h.player.play(ids(&["n1", "n2"]), 0).unwrap();
+        // n1 is shorter than the pre-open lead: n2 is pre-opened at once, and fails.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !server.opens().contains(&"n2".to_string()) {
+            assert!(Instant::now() < deadline, "n2 was never pre-opened");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        server.set(|c| c.down_ids.clear());
+        let events = collect_until(&h.events, Duration::from_secs(10), back_to_idle);
+        assert!(errors(&events).is_empty(), "no notice: {events:#?}");
+        assert_eq!(changes(&events), ids(&["n1", "n2"]));
+        assert_eq!(played_of(&h.played, NET_B), samples_of(1_000));
+        assert_eq!(server.opens(), ids(&["n1", "n2", "n2"]));
+    }
+
+    #[test]
+    fn a_track_held_at_open_is_announced_once_when_it_plays() {
+        let server = NetServer::new();
+        server.set(|c| c.down = true);
+        let tones = [("n1", NET_A, 1_000)];
+        let h = net_harness(&tones, &server, FAST, PlayerOptions::default());
+        h.player.play(ids(&["n1"]), 0).unwrap();
+        let mut events = collect_until(&h.events, Duration::from_secs(5), |seen| {
+            !errors(seen).is_empty()
+        });
+        wait_state(&h.player, |s| s.status == PlayerStatus::Paused);
+        assert!(
+            changes(&events).is_empty(),
+            "never audible, never announced"
+        );
+        server.set(|c| c.down = false);
+        h.player.toggle().unwrap();
+        events.extend(collect_until(
+            &h.events,
+            Duration::from_secs(5),
+            back_to_idle,
+        ));
+        assert_eq!(changes(&events), ids(&["n1"]), "one play: {events:#?}");
+    }
+
+    #[test]
+    fn a_device_change_while_held_stays_held() {
+        let server = NetServer::new();
+        let (h, _, paused) = play_until_cut(&server);
+        h.player.set_device(Some("another output".into())).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        let later: Vec<PlayerEvent> = h.events.try_iter().collect();
+        assert!(errors(&later).is_empty(), "{later:#?}");
+        let state = h.player.state();
+        assert_eq!(state.status, PlayerStatus::Paused);
+        assert_eq!(state.position_ms, paused.position_ms);
+        assert_eq!(state.queue_index, 0);
+        assert_eq!(server.opens(), ids(&["n1"]));
     }
 
     #[test]
