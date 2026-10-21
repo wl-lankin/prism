@@ -1112,7 +1112,38 @@ impl Engine {
 
     /// Removes the queue entry at `index`. When it is the track that plays (or loads), the
     /// one that followed it plays; after the last one, the first with repeat all, else idle.
+    /// Paused stays paused, on the track that follows.
+    ///
+    /// During a gapless hand-over the queue already stands on the next track while the UI
+    /// still shows the previous one. Removing the shown one settles the hand-over first (the
+    /// next track is what plays anyway). Removing the next one drops it unheard: the shown
+    /// track's tail plays out and the entry after it follows.
     fn remove(&mut self, index: usize) {
+        if index >= self.queue.len() {
+            return;
+        }
+        let mut cut = true;
+        if self.handover.is_some() {
+            if index == self.queue.index() {
+                self.handover = None;
+                self.decoding = false;
+                self.current = None;
+                if self.status == PlayerStatus::Paused {
+                    // Nothing is heard while paused: nothing is cut.
+                    self.playback.stop();
+                } else {
+                    self.playback.drop_sources();
+                    cut = false;
+                }
+            } else if index == self.shown_index {
+                self.settle_handover();
+            }
+        }
+        let paused = match self.status {
+            PlayerStatus::Paused => true,
+            PlayerStatus::Loading => self.start_paused,
+            PlayerStatus::Playing | PlayerStatus::Idle => false,
+        };
         let current = index == self.queue.index();
         if !self.change_queue(|queue| queue.remove(index)) {
             return;
@@ -1126,12 +1157,16 @@ impl Engine {
         }
         self.failures = 0;
         if index < self.queue.len() {
-            self.start_current(true);
+            self.start_current(cut);
         } else if self.repeat_mode() == RepeatMode::All {
             self.queue.jump(0);
-            self.start_current(true);
+            self.start_current(cut);
         } else {
-            self.go_idle();
+            self.finish(cut);
+            return;
+        }
+        if self.status == PlayerStatus::Loading {
+            self.start_paused = paused;
         }
     }
 
@@ -1246,9 +1281,10 @@ impl Engine {
         }
     }
 
-    /// Moves past a track that failed: the next one (round to the first with repeat all,
-    /// never the same one again), or the end of the queue. After [`MAX_FAILURES_IN_A_ROW`]
-    /// failures the player gives up and goes idle.
+    /// Moves past a track that failed: the next one (round to the first with repeat all;
+    /// repeat one does not retry it), or the end of the queue. With repeat all, a queue of
+    /// one entry tries that entry again. After [`MAX_FAILURES_IN_A_ROW`] failures in a row
+    /// the player gives up and goes idle, so such a retry stops after 10 attempts.
     fn skip(&mut self, cut: bool) {
         self.play_on(false, cut);
     }
@@ -3557,6 +3593,88 @@ mod tests {
         h.player.remove(0).unwrap();
         let state = wait_state(&h.player, |s| s.queue_length == 0);
         assert_eq!(state.status, PlayerStatus::Idle);
+    }
+
+    #[test]
+    fn remove_the_playing_track_while_paused_stays_paused_on_the_next() {
+        let h = harness(long_tracks(&["a", "b", "c"]), 1.0, Some(silence_opener()));
+        h.player.play(ids(&["a", "b", "c"]), 0).unwrap();
+        wait_state(&h.player, |s| playing_track(s, "a"));
+        h.player.toggle().unwrap();
+        wait_state(&h.player, |s| s.status == PlayerStatus::Paused);
+        h.player.remove(0).unwrap();
+        let state = wait_state(&h.player, |s| {
+            s.status == PlayerStatus::Paused && s.track.as_ref().is_some_and(|t| t.id == "b")
+        });
+        assert_eq!(state.queue_index, 0);
+        std::thread::sleep(Duration::from_millis(200));
+        let state = h.player.state();
+        assert_eq!(state.status, PlayerStatus::Paused, "{state:#?}");
+        assert_eq!(state.track.unwrap().id, "b");
+    }
+
+    #[test]
+    fn remove_the_next_track_during_a_hand_over_drops_it_and_keeps_the_tail() {
+        const TONE_B: f32 = 0.125;
+        let tracks: Vec<Track> = ["a", "b", "c"]
+            .iter()
+            .map(|id| {
+                let mut track = fixture_track(id, "tagged.flac");
+                track.duration_ms = TONE_A_MS;
+                track
+            })
+            .collect();
+        let resolver: Resolver =
+            Arc::new(move |id: &str| tracks.iter().find(|track| track.id == id).cloned());
+        let opener = tone_opener(vec![
+            ("a", TONE_A, TONE_A_MS),
+            ("b", TONE_B, TONE_A_MS),
+            ("c", TONE_C, TONE_A_MS),
+        ]);
+        let played = Arc::new(Mutex::new(Vec::new()));
+        let factory = Arc::new(BufferedFactory {
+            speed: 1.0,
+            ring_ms: BUFFERED_RING_MS,
+            played: Arc::clone(&played),
+        });
+        let (tx, events) = crossbeam_channel::unbounded();
+        let sink: EventSink = Arc::new(move |event| {
+            let _ = tx.send(event);
+        });
+        let player =
+            Player::spawn_with_options(factory, resolver, sink, opener, PlayerOptions::default());
+        player.play(ids(&["a", "b", "c"]), 0).unwrap();
+        // Once the device has played more than "a" minus a full ring, "a" is decoded and
+        // "b" has taken over; "a"'s tail (about 1.9 s) is still to be heard.
+        let decoded = TONE_A_SAMPLES - (BUFFERED_RING_MS * 44_100 / 1000) as usize * 2;
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while played_of(&played, TONE_A) <= decoded + 4_410 {
+            assert!(Instant::now() < deadline, "a never played");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let state = player.state();
+        assert_eq!(
+            state.track.unwrap().id,
+            "a",
+            "the hand-over is still pending"
+        );
+        assert_eq!(state.queue_index, 0);
+        // The UI's next row.
+        player.remove(1).unwrap();
+        let events = collect_until(&events, Duration::from_secs(20), back_to_idle);
+        assert_eq!(
+            changes(&events),
+            ids(&["a", "c"]),
+            "b was never announced: {events:#?}"
+        );
+        assert_eq!(player.queue_ids(), ids(&["a", "c"]));
+        assert_eq!(
+            played_of(&played, TONE_A),
+            TONE_A_SAMPLES,
+            "a's tail was not cut"
+        );
+        assert!(played_of(&played, TONE_B) < TONE_A_SAMPLES / 2);
+        assert_eq!(played_of(&played, TONE_C), TONE_A_SAMPLES);
     }
 
     #[test]
