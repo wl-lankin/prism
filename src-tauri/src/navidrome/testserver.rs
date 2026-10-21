@@ -51,6 +51,13 @@ pub(crate) enum Fault {
         after_bytes: usize,
         wait: Duration,
     },
+    /// Requests to `method` after the first `skip` ones are answered only after `wait` (page 2
+    /// of a listing stalls while page 1 went through).
+    StallAfter {
+        method: &'static str,
+        skip: usize,
+        wait: Duration,
+    },
     /// The next request to `method` sends the headers and `after_bytes` body bytes, then the
     /// connection is cut. Later requests are served normally.
     CutOnce {
@@ -678,6 +685,15 @@ fn route(
                 wait,
             };
         }
+        Fault::StallAfter {
+            method: stalled,
+            skip,
+            wait,
+        } if stalled == method
+            && state.requests.iter().filter(|r| r.method == method).count() > skip =>
+        {
+            delivery = Delivery::Stall { after: 0, wait };
+        }
         Fault::CutOnce {
             method: cut,
             after_bytes,
@@ -752,7 +768,8 @@ fn authenticated(params: &[(String, String)]) -> bool {
     else {
         return false;
     };
-    user == FAKE_USER && t == token(FAKE_PASSWORD, s)
+    // Navidrome finds the user ignoring case.
+    user.eq_ignore_ascii_case(FAKE_USER) && t == token(FAKE_PASSWORD, s)
 }
 
 fn base_response() -> Map<String, Value> {

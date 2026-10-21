@@ -16,7 +16,10 @@ use crate::library::query::{self, SearchResult};
 use crate::library::scan::{lock, ScanReport};
 use crate::library::watch::{FolderWatcher, WatchState};
 use crate::library::{normalize, tauri_emitter, Library};
+use crate::navidrome::client::{NavidromeFailure, ServerInfo};
+use crate::navidrome::{NavidromeService, NavidromeStatus, FAILURE_INTERNAL};
 use crate::player::{PlayerState, QueueItem, DROPPED_PREFIX};
+use crate::secret::Secret;
 use crate::settings::{Change, Settings};
 use crate::shell;
 use crate::shell::mini::{self, MiniLayout};
@@ -504,6 +507,79 @@ fn restore_shortcut(app: &AppHandle, accelerator: &str) {
 #[tauri::command]
 pub async fn audio_devices() -> Result<Vec<String>, String> {
     blocking(|| Ok(list_devices())).await
+}
+
+// Navidrome
+
+fn navidrome(app: &AppHandle) -> Result<Arc<NavidromeService>, NavidromeFailure> {
+    app_state(app)
+        .map(|state| Arc::clone(&state.navidrome))
+        .map_err(|_| NavidromeFailure {
+            code: FAILURE_INTERNAL,
+            detail: Some(NOT_READY.to_string()),
+        })
+}
+
+/// Runs a blocking Navidrome call (network) off the async runtime's worker threads.
+async fn navidrome_blocking<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, NavidromeFailure> + Send + 'static,
+) -> Result<T, NavidromeFailure> {
+    tauri::async_runtime::spawn_blocking(work)
+        .await
+        .map_err(|err| NavidromeFailure {
+            code: FAILURE_INTERNAL,
+            detail: Some(format!("the Navidrome task failed: {err}")),
+        })?
+}
+
+#[tauri::command]
+pub fn navidrome_status(state: State<'_, AppState>) -> NavidromeStatus {
+    state.navidrome.status()
+}
+
+/// Pings the server with these credentials; saves nothing.
+#[tauri::command]
+pub async fn navidrome_test(
+    app: AppHandle,
+    url: String,
+    user: String,
+    password: String,
+) -> Result<ServerInfo, NavidromeFailure> {
+    let service = navidrome(&app)?;
+    let password = Secret::new(password);
+    navidrome_blocking(move || {
+        service
+            .test(&url, &user, password)
+            .map_err(|err| NavidromeFailure::from(&err))
+    })
+    .await
+}
+
+/// Signs in; the password goes to the OS keychain only.
+#[tauri::command]
+pub async fn navidrome_connect(
+    app: AppHandle,
+    url: String,
+    user: String,
+    password: String,
+) -> Result<NavidromeStatus, NavidromeFailure> {
+    let service = navidrome(&app)?;
+    let password = Secret::new(password);
+    navidrome_blocking(move || service.connect(&url, &user, password)).await
+}
+
+/// Signs out and removes the server's tracks, stars and playlists from the index.
+#[tauri::command]
+pub async fn navidrome_disconnect(app: AppHandle) -> Result<(), String> {
+    let service = Arc::clone(&app_state(&app)?.navidrome);
+    blocking(move || service.disconnect()).await
+}
+
+/// Runs a sync cycle now.
+#[tauri::command]
+pub fn navidrome_sync(state: State<'_, AppState>) -> Result<(), String> {
+    state.navidrome.sync_now();
+    Ok(())
 }
 
 // Shell
