@@ -10,6 +10,7 @@ Start here to continue Prism on another machine or in a new session. It says whe
 | Roadmap and the M1 plan | `docs/superpowers/plans/2026-10-20-prism-m1-foundation.md` |
 | M2 plan (Everyday player) | `docs/superpowers/plans/2026-10-20-prism-m2-everyday-player.md` |
 | M3 plan (Navidrome) | `docs/superpowers/plans/2026-10-21-prism-m3-navidrome.md` |
+| M4 plan (Radio), not started | `docs/superpowers/plans/2026-10-21-prism-m4-radio.md` |
 | Per-milestone ledgers (progress, rulings, deferred minors, incidents) | `docs/superpowers/handoff/ledgers/` |
 | Rules every implementer agent follows | `docs/superpowers/handoff/ledgers/m3-implementer-rules.md` |
 | Mockups from brainstorming | `docs/superpowers/mockups/` |
