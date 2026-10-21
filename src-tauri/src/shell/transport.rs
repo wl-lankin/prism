@@ -19,8 +19,8 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 
 use crate::player::{EventSink, PlayerEvent, PlayerHandle, PlayerStatus};
-use crate::ytm::state::YtmState;
 pub use crate::ytm::state::{YtmAction, YtmControl};
+use crate::ytm::state::{YtmState, YtmStatus};
 
 /// After Prism pauses YouTube Music, the page's reports this long do not count as a start.
 pub const EXPECTED_PAUSE: Duration = Duration::from_secs(2);
@@ -97,12 +97,17 @@ impl Inner {
         matches!(self.prism, PlayerStatus::Loading | PlayerStatus::Playing) && !self.prism_paused
     }
 
-    /// Prism became active; true when the page has to be paused.
+    /// Prism became active; true when the page has to be paused. Every start pauses a page
+    /// that still plays, except within [`EXPECTED_PAUSE`] of the last pause (the page may
+    /// not have reacted yet).
     fn prism_started(&mut self, now: Instant) -> bool {
         self.active = Active::Prism;
         self.prism_paused = false;
         self.ytm_edge = None;
-        if self.ytm_playing && self.ytm_paused_at.is_none() {
+        let settled = self
+            .ytm_paused_at
+            .is_none_or(|at| now.saturating_duration_since(at) >= EXPECTED_PAUSE);
+        if self.ytm_playing && settled {
             self.ytm_paused_at = Some(now);
             return true;
         }
@@ -110,16 +115,23 @@ impl Inner {
     }
 }
 
+/// Called with the new active player whenever it changes.
+pub type ActiveListener = Arc<dyn Fn(Active) + Send + Sync>;
+
 pub struct Transport {
     prism: Arc<dyn PrismControl>,
     ytm: Arc<dyn YtmControl>,
     clock: Arc<dyn Clock>,
     inner: Mutex<Inner>,
+    listener: Mutex<Option<ActiveListener>>,
 }
 
 impl Transport {
     pub fn new(player: PlayerHandle, ytm: Arc<dyn YtmControl>, clock: Arc<dyn Clock>) -> Self {
-        Transport::with_control(Arc::new(player), ytm, clock)
+        let status = player.state().status;
+        let transport = Transport::with_control(Arc::new(player), ytm, clock);
+        transport.lock().prism = status;
+        transport
     }
 
     pub fn with_control(
@@ -139,6 +151,29 @@ impl Transport {
                 ytm_paused_at: None,
                 ytm_edge: None,
             }),
+            listener: Mutex::new(None),
+        }
+    }
+
+    /// Replaces the listener for active player changes (for `transport://active`). It is
+    /// called outside the transport's lock, on whichever thread caused the change.
+    pub fn on_active_changed(&self, listener: ActiveListener) {
+        match self.listener.lock() {
+            Ok(mut slot) => *slot = Some(listener),
+            Err(poisoned) => *poisoned.into_inner() = Some(listener),
+        }
+    }
+
+    fn announce(&self, before: Active, after: Active) {
+        if before == after {
+            return;
+        }
+        let listener = match self.listener.lock() {
+            Ok(slot) => slot.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+        if let Some(listener) = listener {
+            listener(after);
         }
     }
 
@@ -158,68 +193,88 @@ impl Transport {
         let PlayerEvent::State(state) = event else {
             return;
         };
-        let pause_ytm = {
+        let (pause_ytm, before, after) = {
             let mut inner = self.lock();
+            let before = inner.active;
             let was = std::mem::replace(&mut inner.prism, state.status);
             let started = matches!(was, PlayerStatus::Idle | PlayerStatus::Paused)
                 && matches!(state.status, PlayerStatus::Loading | PlayerStatus::Playing);
-            started && inner.prism_started(self.clock.now())
+            let pause = started && inner.prism_started(self.clock.now());
+            (pause, before, inner.active)
         };
         if pause_ytm {
             self.ytm.send(YtmAction::Pause);
         }
+        self.announce(before, after);
     }
 
     /// Follows YouTube Music's page, on every state the service derives from a report.
     pub fn on_ytm_state(&self, state: &YtmState) {
         let now = self.clock.now();
-        let pause_prism = {
+        let (pause_prism, before, after) = {
             let mut inner = self.lock();
-            let playing = state.is_playing();
-            let was = std::mem::replace(&mut inner.ytm_playing, playing);
-            if !playing {
-                inner.ytm_edge = None;
-                return;
-            }
-            if !was {
-                inner.ytm_edge = Some(now);
-            }
-            let Some(edge) = inner.ytm_edge else {
-                return;
-            };
-            if inner.active == Active::Ytm {
-                inner.ytm_edge = None;
-                return;
-            }
-            let busy = inner.prism_busy();
-            if busy {
-                let expected = inner
-                    .ytm_paused_at
-                    .is_some_and(|at| now.saturating_duration_since(at) < EXPECTED_PAUSE);
-                if expected || now.saturating_duration_since(edge) < YTM_DEBOUNCE {
-                    return;
-                }
-            }
-            inner.active = Active::Ytm;
-            inner.ytm_edge = None;
-            inner.ytm_paused_at = None;
-            inner.prism_paused = busy;
-            busy
+            let before = inner.active;
+            let pause = Self::follow_ytm(&mut inner, state, now);
+            (pause, before, inner.active)
         };
         if pause_prism {
             if let Err(err) = self.prism.pause() {
                 eprintln!("pausing Prism for YouTube Music failed: {err}");
             }
         }
+        self.announce(before, after);
+    }
+
+    /// Applies one page state; true when Prism has to be paused.
+    fn follow_ytm(inner: &mut Inner, state: &YtmState, now: Instant) -> bool {
+        let playing = state.is_playing();
+        let was = std::mem::replace(&mut inner.ytm_playing, playing);
+        if !playing {
+            inner.ytm_edge = None;
+            // Nothing loaded or no controls: the transport is Prism's again (not resumed).
+            if matches!(state.status, YtmStatus::Idle | YtmStatus::Unavailable) {
+                inner.active = Active::Prism;
+            }
+            return false;
+        }
+        if !was {
+            inner.ytm_edge = Some(now);
+        }
+        let Some(edge) = inner.ytm_edge else {
+            return false;
+        };
+        if inner.active == Active::Ytm {
+            inner.ytm_edge = None;
+            return false;
+        }
+        let busy = inner.prism_busy();
+        if busy {
+            let expected = inner
+                .ytm_paused_at
+                .is_some_and(|at| now.saturating_duration_since(at) < EXPECTED_PAUSE);
+            if expected || now.saturating_duration_since(edge) < YTM_DEBOUNCE {
+                return false;
+            }
+        }
+        inner.active = Active::Ytm;
+        inner.ytm_edge = None;
+        inner.ytm_paused_at = None;
+        inner.prism_paused = busy;
+        busy
     }
 
     /// Prism is about to start from a user action that always means Prism (an idle click on
     /// the Flow ring): it becomes active now and the page pauses, before the engine reports.
     pub fn prism_starts(&self) {
-        let pause_ytm = self.lock().prism_started(self.clock.now());
+        let (pause_ytm, before) = {
+            let mut inner = self.lock();
+            let before = inner.active;
+            (inner.prism_started(self.clock.now()), before)
+        };
         if pause_ytm {
             self.ytm.send(YtmAction::Pause);
         }
+        self.announce(before, Active::Prism);
     }
 
     fn route(
@@ -699,6 +754,72 @@ mod tests {
         rig.transport.prism_starts();
         assert_eq!(rig.ytm.pauses(), 1);
         assert_eq!(rig.transport.active(), Active::Prism);
+    }
+
+    #[test]
+    fn every_prism_start_pauses_ytm_again_after_the_window() {
+        let rig = Rig::new();
+        rig.ytm_plays();
+        rig.prism_plays();
+        assert_eq!(rig.ytm.pauses(), 1);
+        // The page ignores the pause and keeps playing.
+        rig.ytm(YtmStatus::Playing);
+        rig.clock.advance(3_000);
+        rig.ytm(YtmStatus::Playing);
+        rig.prism(PlayerStatus::Paused);
+        rig.prism(PlayerStatus::Playing);
+        assert_eq!(rig.ytm.pauses(), 2);
+        assert_eq!(rig.transport.active(), Active::Prism);
+        assert_eq!(rig.prism.pauses(), 0);
+    }
+
+    #[test]
+    fn a_dead_page_hands_control_back() {
+        for dead in [YtmStatus::Idle, YtmStatus::Unavailable] {
+            let rig = Rig::new();
+            rig.prism_plays();
+            rig.prism(PlayerStatus::Paused);
+            rig.ytm_plays();
+            // A pause in the page keeps it active.
+            rig.ytm(YtmStatus::Paused);
+            assert_eq!(rig.transport.active(), Active::Ytm, "{dead:?}");
+            rig.ytm(dead);
+            assert_eq!(rig.transport.active(), Active::Prism, "{dead:?}");
+            assert!(rig.prism.calls().is_empty(), "Prism is not resumed");
+            rig.transport.toggle().unwrap();
+            assert_eq!(rig.prism.calls(), vec![Call::Toggle], "{dead:?}");
+            assert!(rig.ytm.sent().is_empty(), "{dead:?}");
+        }
+    }
+
+    #[test]
+    fn active_changes_are_announced() {
+        let rig = Rig::new();
+        let seen: Arc<Mutex<Vec<Active>>> = Arc::default();
+        let record = Arc::clone(&seen);
+        rig.transport
+            .on_active_changed(Arc::new(move |active| record.lock().unwrap().push(active)));
+        let seen = move || seen.lock().unwrap().clone();
+        rig.prism_plays();
+        rig.transport.prism_starts();
+        assert!(seen().is_empty(), "Prism was active already");
+        rig.prism(PlayerStatus::Paused);
+        rig.ytm_plays();
+        assert_eq!(seen(), vec![Active::Ytm]);
+        rig.ytm(YtmStatus::Playing);
+        rig.prism(PlayerStatus::Loading);
+        rig.prism(PlayerStatus::Playing);
+        assert_eq!(seen(), vec![Active::Ytm, Active::Prism]);
+        rig.prism(PlayerStatus::Paused);
+        rig.clock.advance(3_000);
+        rig.ytm(YtmStatus::Paused);
+        rig.ytm(YtmStatus::Playing);
+        rig.ytm(YtmStatus::Unavailable);
+        rig.ytm(YtmStatus::Idle);
+        assert_eq!(
+            seen(),
+            vec![Active::Ytm, Active::Prism, Active::Ytm, Active::Prism]
+        );
     }
 
     #[test]
