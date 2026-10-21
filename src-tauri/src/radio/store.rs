@@ -47,10 +47,9 @@ pub struct FaviconSource {
 /// `last_played_at` and `last_click_at` of an existing row stay. The logo is remembered too,
 /// so the station's tile loads.
 pub fn upsert_station(conn: &Connection, station: &Station, now_ms: i64) -> anyhow::Result<()> {
-    let cover_id = station
-        .cover_id
-        .clone()
-        .or_else(|| station_cover_id(station.favicon.as_deref(), station.homepage.as_deref()));
+    // Always the derived id: remember_favicons keys its row the same way, and a caller-set id
+    // that differs would point at no row.
+    let cover_id = station_cover_id(station.favicon.as_deref(), station.homepage.as_deref());
     conn.execute(
         "INSERT INTO radio_stations (id, name, url, url_resolved, homepage, favicon, cover_id,
             country_code, region, language, tags, codec, bitrate_kbps, hls, last_check_ok,
@@ -458,7 +457,28 @@ mod tests {
     fn stations_never_touch_tracks() {
         let db = Db::open_in_memory().unwrap();
         let conn = db.0.lock().unwrap();
-        let before = query::track_count(&conn, None).unwrap();
+        // One local track, so an unchanged count means something.
+        conn.execute(
+            "INSERT INTO tracks (id, source, title, artist, album_artist, album, album_id,
+                duration_ms, format)
+             VALUES ('local:t1', 'local', 'T', 'A', 'A', 'B', 'local:album', 1000, 'flac')",
+            [],
+        )
+        .unwrap();
+        const TABLES: [&str; 7] = [
+            "tracks",
+            "albums",
+            "tracks_fts",
+            "track_stats",
+            "playlists",
+            "playlist_tracks",
+            "navidrome_scrobble_queue",
+        ];
+        let before: Vec<i64> = TABLES.iter().map(|table| count(&conn, table)).collect();
+        assert_eq!(before[0], 1);
+        let tracks_before = query::track_count(&conn, None).unwrap();
+        assert_eq!(tracks_before, 1);
+
         for n in 1..=10 {
             upsert_station(&conn, &station(n), 1).unwrap();
         }
@@ -466,10 +486,38 @@ mod tests {
             favorite(&conn, &station(n));
         }
         mark_played(&conn, &station(4).id, 5).unwrap();
-        for table in ["tracks", "albums", "tracks_fts", "track_stats"] {
+
+        let after: Vec<i64> = TABLES.iter().map(|table| count(&conn, table)).collect();
+        assert_eq!(before, after);
+        for table in ["playlists", "playlist_tracks", "navidrome_scrobble_queue"] {
             assert_eq!(count(&conn, table), 0, "{table}");
         }
-        assert_eq!(query::track_count(&conn, None).unwrap(), before);
+        assert_eq!(query::track_count(&conn, None).unwrap(), tracks_before);
         assert_eq!(query::track_count(&conn, Some(Source::Radio)).unwrap(), 0);
+    }
+
+    #[test]
+    fn a_caller_set_cover_id_is_ignored() {
+        let db = Db::open_in_memory().unwrap();
+        let conn = db.0.lock().unwrap();
+        let mut one = station(1);
+        one.favicon = Some("https://example.test/logo.png".to_string());
+        one.cover_id = Some("rb-00000000000000000000".to_string());
+        upsert_station(&conn, &one, 1).unwrap();
+        let derived = favicon_cover_id("https://example.test/logo.png").unwrap();
+        let stored = station_of(&conn, &one.id);
+        assert_eq!(stored.cover_id.as_deref(), Some(derived.as_str()));
+        assert!(favicon_source(&conn, &derived).unwrap().is_some());
+        assert_eq!(
+            favicon_source(&conn, "rb-00000000000000000000").unwrap(),
+            None
+        );
+        assert_eq!(one.as_track().cover_id.as_deref(), Some(derived.as_str()));
+
+        // No favicon and no homepage: no logo at all, whatever the caller said.
+        let mut bare = station(2);
+        bare.cover_id = Some("rb-11111111111111111111".to_string());
+        upsert_station(&conn, &bare, 1).unwrap();
+        assert_eq!(station_of(&conn, &bare.id).cover_id, None);
     }
 }
