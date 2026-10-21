@@ -1,70 +1,32 @@
-<script lang="ts" module>
-  import { t } from '../i18n';
-  import { navidromePlaylistEntries } from '../ipc';
-  import { playIds, playShuffled } from '../play';
-  import { notify } from '../stores/notice.svelte';
-  import type { PlaylistEntry } from '../types';
-
-  /** Plays `list` from the entry at `fromPosition`, as `playPlaylist` does: entries whose track
-   *  is not in the index are skipped, a skipped start plays from the next available entry, and
-   *  `shuffled` plays every available entry in random order. `remote` words the notice for a
-   *  Navidrome playlist with nothing available. */
-  export async function playEntries(
-    list: PlaylistEntry[],
-    fromPosition = 0,
-    options: { shuffled?: boolean; remote?: boolean } = {},
-  ): Promise<void> {
-    const ids: string[] = [];
-    let start = -1;
-    for (const entry of list) {
-      if (!entry.track) continue;
-      if (start < 0 && entry.position >= fromPosition) start = ids.length;
-      ids.push(entry.trackId);
-    }
-    if (!ids.length) {
-      notify(t(options.remote ? 'playlist.remoteNothingPlayable' : 'playlist.nothingPlayable'));
-      return;
-    }
-    if (options.shuffled) return playShuffled(ids);
-    if (start >= 0) return playIds(ids, start);
-  }
-
-  /** Plays a Navidrome playlist (`navidrome:<id>`) from its first available entry. */
-  export async function playRemotePlaylist(id: string, options: { shuffled?: boolean } = {}): Promise<void> {
-    try {
-      await playEntries(await navidromePlaylistEntries(id), 0, { ...options, remote: true });
-    } catch (err) {
-      notify(t('flow.failed', { message: String(err) }));
-    }
-  }
-
-  /** A stable number for a Navidrome playlist id, so its empty tile keeps one color. */
-  export function remoteSeed(id: string): number {
-    let hash = 0;
-    for (let i = 0; i < id.length; i++) hash = (hash * 31 + id.charCodeAt(i)) | 0;
-    return hash;
-  }
-</script>
-
 <script lang="ts">
   import { tick } from 'svelte';
   import { flip } from 'svelte/animate';
   import { formatDuration } from '../format';
-  import { tc } from '../i18n';
-  import { coverUrl, playlistDelete, playlistEntries, playlistMove, playlistRemove } from '../ipc';
+  import { t, tc } from '../i18n';
+  import {
+    coverUrl,
+    navidromePlaylistEntries,
+    playlistDelete,
+    playlistEntries,
+    playlistMove,
+    playlistRemove,
+  } from '../ipc';
   import { menuPoint } from '../menu';
-  import { playPlaylist } from '../play';
+  import { playEntries, playPlaylist } from '../play';
   import { FAVORITE_KEY, isFavoriteKey, toggleFavorite } from '../stores/favorites.svelte';
   import { library } from '../stores/library.svelte';
   import { back, go } from '../stores/nav.svelte';
+  import { notify } from '../stores/notice.svelte';
   import { player } from '../stores/player.svelte';
-  import { playlists, renamePlaylist } from '../stores/playlists.svelte';
+  import { playlists, remoteSeed, renamePlaylist } from '../stores/playlists.svelte';
+  import type { PlaylistEntry } from '../types';
   import Backdrop from './Backdrop.svelte';
   import Cover from './Cover.svelte';
   import Heart from './Heart.svelte';
   import Icon from './Icon.svelte';
   import RowPlay from './RowPlay.svelte';
   import PlaylistCover from './PlaylistCover.svelte';
+  import SourceBadge from './SourceBadge.svelte';
   import TrackMenu, { type TrackMenuState } from './TrackMenu.svelte';
 
   /** One playlist: its mosaic over a blurred backdrop, a title that is edited in place, play and
@@ -474,8 +436,7 @@
           {/if}
           <p class="meta">
             {#if remote}
-              <!-- The Navidrome source dot; unified with the shared source badge at merge. -->
-              <span class="source"><span class="source-dot" data-source="navidrome"></span>{t('source.navidrome')}</span>
+              <span class="source"><SourceBadge source="navidrome" size={8} />{t('source.navidrome')}</span>
               {#if remote.owner}<span>{t('playlist.owner', { owner: remote.owner })}</span>{/if}
             {/if}
             <span>{tc('view.count.songs', count)}</span>
@@ -493,21 +454,7 @@
             </button>
             {#if remote}
               <span class="readonly" title={t('playlist.readOnlyHint')} aria-describedby="pl-readonly-hint">
-                <svg
-                  class="lock"
-                  width="14"
-                  height="14"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="1.6"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  aria-hidden="true"
-                >
-                  <rect x="5.5" y="10.5" width="13" height="9" rx="2" />
-                  <path d="M8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5" />
-                </svg>
+                <span class="lock"><Icon name="lock" size={14} /></span>
                 {t('playlist.readOnly')}
               </span>
               <span id="pl-readonly-hint" class="sr-only">{t('playlist.readOnlyHint')}</span>
@@ -839,14 +786,6 @@
     color: var(--text);
   }
 
-  .source-dot {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: var(--src-navidrome);
-    box-shadow: 0 0 8px color-mix(in srgb, var(--src-navidrome) 55%, transparent);
-  }
-
   /* The read-only label, as on the Playlists cards: dim text, only the lock in the source color. */
   .readonly {
     display: inline-flex;
@@ -859,6 +798,7 @@
   }
 
   .lock {
+    display: grid;
     color: var(--src-navidrome);
   }
 

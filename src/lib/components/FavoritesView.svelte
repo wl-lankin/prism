@@ -655,10 +655,10 @@
     bottom: -2px;
   }
 
-  /* On the portrait's edge, like a presence dot. */
+  /* On the portrait's edge like a presence dot, lower left: the heart (.pin) holds the lower right. */
   .portrait :global(.source-badge) {
     position: absolute;
-    right: 14px;
+    left: 14px;
     bottom: 14px;
   }
 
