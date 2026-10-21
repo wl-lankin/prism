@@ -44,6 +44,19 @@ pub enum Crossfade {
     Always,
 }
 
+/// What happens at the end of a track and of the queue. Ignored in Flow, which never ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RepeatMode {
+    /// The queue plays once.
+    #[default]
+    Off,
+    /// After the last track the first one follows.
+    All,
+    /// The current track plays again at its end.
+    One,
+}
+
 /// The crossfade length range in milliseconds.
 pub const CROSSFADE_MS_RANGE: std::ops::RangeInclusive<u32> = 1000..=8000;
 
@@ -71,6 +84,9 @@ pub struct Settings {
     /// Global shortcut that shows the mini player.
     pub mini_shortcut: String,
     pub start_with_system: bool,
+    pub repeat: RepeatMode,
+    /// The upcoming part of the queue plays in random order.
+    pub shuffle: bool,
 }
 
 impl Default for Settings {
@@ -87,6 +103,8 @@ impl Default for Settings {
             mini_on_top: false,
             mini_shortcut: "CommandOrControl+Alt+P".to_string(),
             start_with_system: false,
+            repeat: RepeatMode::Off,
+            shuffle: false,
         }
     }
 }
@@ -128,6 +146,8 @@ pub enum Change {
     MiniOnTop(bool),
     MiniShortcut(String),
     StartWithSystem(bool),
+    Repeat(RepeatMode),
+    Shuffle(bool),
 }
 
 /// The differences from `before` to `after` that something has to follow (the language is
@@ -160,6 +180,12 @@ pub fn changes(before: &Settings, after: &Settings) -> Vec<Change> {
     }
     if after.start_with_system != before.start_with_system {
         changes.push(Change::StartWithSystem(after.start_with_system));
+    }
+    if after.repeat != before.repeat {
+        changes.push(Change::Repeat(after.repeat));
+    }
+    if after.shuffle != before.shuffle {
+        changes.push(Change::Shuffle(after.shuffle));
     }
     changes
 }
@@ -622,6 +648,40 @@ mod tests {
                 Change::StartWithSystem(true),
             ]
         );
+    }
+
+    #[test]
+    fn repeat_and_shuffle_are_saved_and_listed_as_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let store = SettingsStore::load(&path);
+        let defaults = store.get();
+        assert_eq!(defaults.repeat, RepeatMode::Off);
+        assert!(!defaults.shuffle);
+
+        let mut applied = Vec::new();
+        let saved = store
+            .update(json!({ "repeat": "all", "shuffle": true }), |changes| {
+                applied.extend_from_slice(changes)
+            })
+            .unwrap();
+        assert_eq!(saved.repeat, RepeatMode::All);
+        assert!(saved.shuffle);
+        assert_eq!(
+            applied,
+            vec![Change::Repeat(RepeatMode::All), Change::Shuffle(true)]
+        );
+        let raw: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(raw["repeat"], "all");
+        assert_eq!(raw["shuffle"], true);
+        let reloaded = SettingsStore::load(&path).get();
+        assert_eq!(reloaded.repeat, RepeatMode::All);
+        assert!(reloaded.shuffle);
+        assert_eq!(
+            store.set(json!({ "repeat": "one" })).unwrap().repeat,
+            RepeatMode::One
+        );
+        assert!(store.set(json!({ "repeat": "twice" })).is_err());
     }
 
     #[test]
