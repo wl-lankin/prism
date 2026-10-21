@@ -11,6 +11,9 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 
 use super::model::{Album, Artist, Source, Track};
+use crate::radio::model::Station;
+use crate::radio::store::{station_from_row, STATION_COLUMNS};
+
 use super::query::{
     album_from_row, artist_from_row, artist_select, collect, track_from_row, ALBUM_COLUMNS,
     ARTIST_ID, TRACK_COLUMNS,
@@ -25,6 +28,8 @@ pub enum FavKind {
     Track,
     Album,
     Artist,
+    /// A radio station (`radio:<uuid>`), stored in `radio_stations`.
+    Station,
 }
 
 impl FavKind {
@@ -33,6 +38,7 @@ impl FavKind {
             FavKind::Track => "track",
             FavKind::Album => "album",
             FavKind::Artist => "artist",
+            FavKind::Station => "station",
         }
     }
 
@@ -41,6 +47,7 @@ impl FavKind {
             "track" => Some(FavKind::Track),
             "album" => Some(FavKind::Album),
             "artist" => Some(FavKind::Artist),
+            "station" => Some(FavKind::Station),
             _ => None,
         }
     }
@@ -53,6 +60,7 @@ pub struct FavoriteIds {
     pub tracks: Vec<String>,
     pub albums: Vec<String>,
     pub artists: Vec<String>,
+    pub stations: Vec<String>,
 }
 
 fn now_ms() -> i64 {
@@ -106,7 +114,17 @@ pub fn ids(conn: &Connection) -> anyhow::Result<FavoriteIds> {
         tracks: ids_of(conn, FavKind::Track)?,
         albums: ids_of(conn, FavKind::Album)?,
         artists: ids_of(conn, FavKind::Artist)?,
+        stations: ids_of(conn, FavKind::Station)?,
     })
+}
+
+/// Favorite stations that are stored, newest favorite first.
+pub fn stations(conn: &Connection) -> anyhow::Result<Vec<Station>> {
+    let sql = format!(
+        "SELECT {STATION_COLUMNS} FROM favorites f JOIN radio_stations s ON s.id = f.item_id
+         WHERE f.kind = 'station' ORDER BY f.added_at DESC, f.rowid DESC"
+    );
+    collect(conn, &sql, [], station_from_row)
 }
 
 /// Favorite tracks that are in the index, newest favorite first.
@@ -219,6 +237,7 @@ mod tests {
                 tracks: vec!["same".to_string()],
                 albums: vec!["same".to_string()],
                 artists: vec!["Massive Attack".to_string()],
+                stations: vec![],
             }
         );
         set_changed(&conn, FavKind::Album, "same", false).unwrap();

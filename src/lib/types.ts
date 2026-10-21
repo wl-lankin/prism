@@ -1,6 +1,6 @@
 // Shapes of everything the Rust backend sends (serde camelCase).
 
-export type Source = 'local' | 'navidrome';
+export type Source = 'local' | 'navidrome' | 'radio';
 
 export interface Track {
   id: string;
@@ -67,6 +67,27 @@ export interface FavoriteIds {
   tracks: string[];
   albums: string[];
   artists: string[];
+  stations: string[];
+}
+
+/** An internet radio station as the backend sends it. Its player id is `radio:<uuid>`. */
+export interface Station {
+  id: string;
+  name: string;
+  url: string;
+  urlResolved: string | null;
+  homepage: string | null;
+  favicon: string | null;
+  coverId: string | null;
+  countryCode: string | null;
+  region: string | null;
+  language: string | null;
+  tags: string[];
+  codec: string | null;
+  bitrateKbps: number | null;
+  hls: boolean;
+  lastCheckOk: boolean;
+  distanceKm: number | null;
 }
 
 export interface Playlist {

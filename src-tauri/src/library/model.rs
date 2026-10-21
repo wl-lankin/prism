@@ -8,6 +8,7 @@ use sha1::{Digest, Sha1};
 pub enum Source {
     Local,
     Navidrome,
+    Radio,
 }
 
 impl Source {
@@ -15,12 +16,14 @@ impl Source {
         match self {
             Source::Local => "local",
             Source::Navidrome => "navidrome",
+            Source::Radio => "radio",
         }
     }
 
     pub fn from_db(value: &str) -> Source {
         match value {
             "navidrome" => Source::Navidrome,
+            "radio" => Source::Radio,
             _ => Source::Local,
         }
     }
@@ -203,6 +206,19 @@ pub fn navidrome_cover_raw(id: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_radio_round_trips() {
+        assert_eq!(Source::Radio.as_str(), "radio");
+        assert_eq!(Source::from_db("radio"), Source::Radio);
+        assert_eq!(Source::from_db("navidrome"), Source::Navidrome);
+        assert_eq!(Source::from_db("local"), Source::Local);
+        assert_eq!(serde_json::to_string(&Source::Radio).unwrap(), "\"radio\"");
+        assert_eq!(
+            serde_json::from_str::<Source>("\"radio\"").unwrap(),
+            Source::Radio
+        );
+    }
 
     #[test]
     fn track_id_uses_folder_and_relative_path() {

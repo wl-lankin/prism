@@ -5,7 +5,7 @@
   import { libraryTracksRange } from '../ipc';
   import { playSongsFrom } from '../play';
   import { saveScroll, savedScroll } from '../scroll';
-  import { library } from '../stores/library.svelte';
+  import { countOf, library } from '../stores/library.svelte';
   import { go, nav } from '../stores/nav.svelte';
   import { FAVORITE_KEY, isFavoriteKey, toggleFavorite } from '../stores/favorites.svelte';
   import { player } from '../stores/player.svelte';
@@ -41,7 +41,7 @@
   /** Each source view keeps its own scroll position. */
   const KEY = $derived(`songs:${nav.source ?? 'all'}`);
 
-  const total = $derived((source ? library.trackCounts?.[source] : library.trackCounts?.all) ?? 0);
+  const total = $derived((source ? (library.trackCounts ? countOf(library.trackCounts, source) : undefined) : library.trackCounts?.all) ?? 0);
 
   /** At most this many pages stay cached; the ones farthest from the view are dropped. */
   const MAX_PAGES = 20;
