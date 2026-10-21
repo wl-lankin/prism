@@ -73,7 +73,6 @@
   <div class="seek" class:live>
     {#if live}
       <span class="live-rail" aria-hidden="true"></span>
-      <span class="live-pill"><LivePill size="small" /></span>
     {:else}
       <Slider
         value={duration ? position / duration : 0}
@@ -131,7 +130,11 @@
     <button type="button" class="btn" disabled={idle || live} aria-label={t('transport.next')} title={live ? t('radio.noSkip') : t('transport.next')} onclick={() => playerNext().catch(report('next'))}>
       <Icon name="next" size={20} />
     </button>
-    <span class="time" class:dim={idle}>{live ? '' : formatDuration(duration)}</span>
+    {#if live}
+      <span class="time live-slot"><LivePill size="small" /></span>
+    {:else}
+      <span class="time" class:dim={idle}>{formatDuration(duration)}</span>
+    {/if}
   </div>
 
   <div class="right">
@@ -195,7 +198,8 @@
     z-index: 2;
   }
 
-  /* A station: a steady spectral hairline in place of the seek rail, the pill sits on it. */
+  /* A station: a steady spectral hairline in place of the seek rail; the pill takes the
+     duration's place. */
   .live-rail {
     position: absolute;
     left: 0;
@@ -206,10 +210,9 @@
     opacity: 0.55;
   }
 
-  .live-pill {
-    position: absolute;
-    left: 20px;
-    top: -2px;
+  .live-slot {
+    display: inline-flex;
+    align-items: center;
   }
 
   .now {

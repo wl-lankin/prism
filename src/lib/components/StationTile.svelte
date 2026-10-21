@@ -12,7 +12,7 @@
 <script lang="ts">
   import { coverUrl, type CoverSize } from '../ipc';
 
-  /** A station's logo on a raised square, contained so nothing is cropped. Without a logo, or
+  /** A station's logo filling its square (owner decision). Without a logo, or
    *  when it does not load, the station's initials in radio blue. */
   let {
     name,
@@ -102,9 +102,7 @@
     inset: 0;
     width: 100%;
     height: 100%;
-    padding: max(4px, 8%);
-    box-sizing: border-box;
-    object-fit: contain;
+    object-fit: cover;
     opacity: 0;
     transition: opacity var(--dur) ease-out;
   }

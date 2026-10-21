@@ -81,6 +81,7 @@
   type="button"
   class="ring"
   class:flow={mode === 'flow'}
+  class:live
   class:playing={mode === 'pause'}
   class:metered
   class:bounded={!!reach}
@@ -246,6 +247,12 @@
 
   .flow .arc {
     background: conic-gradient(from var(--spin), var(--c1), var(--c2), var(--c3), var(--c4), var(--c1));
+    mask: radial-gradient(farthest-side, transparent calc(100% - var(--t)), #000 calc(100% - var(--t) + 0.6px));
+  }
+
+  /* A station's ring is always full: the colors run round without a seam at the top. */
+  .live .arc {
+    background: conic-gradient(var(--c1), var(--c2), var(--c3), var(--c4), var(--c1));
     mask: radial-gradient(farthest-side, transparent calc(100% - var(--t)), #000 calc(100% - var(--t) + 0.6px));
   }
 

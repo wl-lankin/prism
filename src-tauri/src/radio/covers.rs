@@ -277,13 +277,27 @@ impl FaviconCovers {
         Attempt::Got(bytes)
     }
 
-    /// The page after redirects and its first [`MAX_HOMEPAGE`] bytes as text.
-    fn homepage(&self, url: &Url) -> Attempt<(Url, String)> {
+    /// The page after redirects and its first [`MAX_HOMEPAGE`] bytes as text; `None` when the
+    /// address answers with something other than a page.
+    fn homepage(&self, url: &Url) -> Attempt<Option<(Url, String)>> {
         let response = match self.get(url, HOMEPAGE_TIMEOUT, "text/html") {
             Attempt::Got(response) => response,
             Attempt::Answered => return Attempt::Answered,
             Attempt::NoAnswer => return Attempt::NoAnswer,
         };
+        // Many directory "homepages" are the stream itself; its server's own favicon (Icecast's
+        // note) is not the station's logo, so only a real page is asked for icons.
+        let html = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| {
+                let value = value.to_ascii_lowercase();
+                value.starts_with("text/html") || value.starts_with("application/xhtml")
+            });
+        if !html {
+            return Attempt::Got(None);
+        }
         let page = response.url().clone();
         let mut bytes = Vec::new();
         // A page cut short still names its icons in the head.
@@ -291,7 +305,7 @@ impl FaviconCovers {
         if read.is_err() && bytes.is_empty() {
             return Attempt::Answered;
         }
-        Attempt::Got((page, String::from_utf8_lossy(&bytes).into_owned()))
+        Attempt::Got(Some((page, String::from_utf8_lossy(&bytes).into_owned())))
     }
 
     /// Tries `url` once per logo; `answered` notes that some host answered.
@@ -366,9 +380,13 @@ impl RemoteCovers for FaviconCovers {
         }
         if let Some(home) = source.homepage.as_deref().and_then(http_url) {
             let candidates = match self.homepage(&home) {
-                Attempt::Got((page, html)) => {
+                Attempt::Got(Some((page, html))) => {
                     answered = true;
                     icon_candidates(&html, &page)
+                }
+                Attempt::Got(None) => {
+                    answered = true;
+                    Vec::new()
                 }
                 Attempt::Answered => {
                     answered = true;
@@ -978,6 +996,17 @@ mod tests {
         let env = Env::new();
         let raw = env.station(None, Some(&web.url("/page")));
         assert_eq!(env.covers.fetch(&raw, 96), Ok(png()));
+    }
+
+    #[test]
+    fn a_stream_as_homepage_gives_no_server_favicon() {
+        let web = FakeWeb::start();
+        web.set("/stream", Page::ok("audio/mpeg", "ID3"));
+        web.set("/favicon.ico", Page::ok("image/x-icon", ico()));
+        let env = Env::new();
+        let raw = env.station(None, Some(&web.url("/stream")));
+        assert_eq!(env.covers.fetch(&raw, 96), Err(ResizeError::Unknown));
+        assert_eq!(web.hits("/favicon.ico"), 0);
     }
 
     #[test]

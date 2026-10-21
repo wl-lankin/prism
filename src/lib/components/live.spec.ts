@@ -124,9 +124,9 @@ describe('transport strip in live mode', () => {
     await settle();
     expect(target.querySelector('.pill')?.textContent?.trim()).toBe('LIVE');
     expect(target.querySelector('[role="slider"][aria-label="Position"]')).toBeNull();
-    // The time heard stays; there is no duration after it.
+    // The time heard stays; the pill takes the duration's place after the controls.
     expect(target.querySelector('.time.elapsed')?.textContent).toBe('1:05');
-    expect(target.querySelectorAll('.time')[1].textContent?.trim()).toBe('');
+    expect(target.querySelectorAll('.time')[1].querySelector('.pill')?.textContent?.trim()).toBe('LIVE');
     expect(target.querySelector('.quality')?.textContent?.trim()).toBe('MP3 128');
     unmount(app);
   });
