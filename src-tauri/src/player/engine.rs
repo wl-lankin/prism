@@ -250,6 +250,8 @@ enum Command {
     Append(Vec<String>),
     Jump(usize),
     Toggle,
+    /// Pauses only what plays (or loads); never resumes.
+    Pause,
     Next,
     Prev,
     Seek(u64),
@@ -382,6 +384,38 @@ impl PlayerHandle {
     /// replaces the shown track when the ids match and publishes a new state.
     pub fn refresh_track(&self, track: Track) -> Result<(), String> {
         self.send(Command::UpdateTrack(Box::new(track)))
+    }
+
+    pub fn toggle(&self) -> Result<(), String> {
+        self.send(Command::Toggle)
+    }
+
+    /// Pauses when playing (a station is held, as a toggle would); while a track loads it
+    /// starts paused. Paused or idle, nothing happens: unlike [`toggle`](Self::toggle) it
+    /// never resumes.
+    pub fn pause(&self) -> Result<(), String> {
+        self.send(Command::Pause)
+    }
+
+    pub fn next(&self) -> Result<(), String> {
+        self.send(Command::Next)
+    }
+
+    /// Restarts the track after [`RESTART_AFTER_MS`], otherwise goes to the previous one.
+    pub fn prev(&self) -> Result<(), String> {
+        self.send(Command::Prev)
+    }
+
+    pub fn seek(&self, ms: u64) -> Result<(), String> {
+        self.send(Command::Seek(ms))
+    }
+
+    /// `volume` is clamped to 0..=1.
+    pub fn set_volume(&self, volume: f32) -> Result<(), String> {
+        if !volume.is_finite() {
+            return Err("The volume must be a number between 0 and 1.".to_string());
+        }
+        self.send(Command::SetVolume(volume))
     }
 
     /// The latest state, as the engine published it.
@@ -531,28 +565,30 @@ impl Player {
     }
 
     pub fn toggle(&self) -> Result<(), String> {
-        self.send(Command::Toggle)
+        self.handle.toggle()
+    }
+
+    /// See [`PlayerHandle::pause`].
+    pub fn pause(&self) -> Result<(), String> {
+        self.handle.pause()
     }
 
     pub fn next(&self) -> Result<(), String> {
-        self.send(Command::Next)
+        self.handle.next()
     }
 
-    /// Restarts the track after [`RESTART_AFTER_MS`], otherwise goes to the previous one.
+    /// See [`PlayerHandle::prev`].
     pub fn prev(&self) -> Result<(), String> {
-        self.send(Command::Prev)
+        self.handle.prev()
     }
 
     pub fn seek(&self, ms: u64) -> Result<(), String> {
-        self.send(Command::Seek(ms))
+        self.handle.seek(ms)
     }
 
-    /// `volume` is clamped to 0..=1.
+    /// See [`PlayerHandle::set_volume`].
     pub fn set_volume(&self, volume: f32) -> Result<(), String> {
-        if !volume.is_finite() {
-            return Err("The volume must be a number between 0 and 1.".to_string());
-        }
-        self.send(Command::SetVolume(volume))
+        self.handle.set_volume(volume)
     }
 
     /// Moves playback to another output (`None` = the system default), keeping the
@@ -1128,6 +1164,7 @@ impl Engine {
                 }
             }
             Command::Toggle => self.toggle(),
+            Command::Pause => self.pause(),
             Command::Next => {
                 self.settle_handover();
                 // Repeat one does not hold a manual next; repeat all goes round.
@@ -1303,16 +1340,28 @@ impl Engine {
         }
     }
 
+    /// Only what is heard (or about to be) is paused; see [`PlayerHandle::pause`].
+    fn pause(&mut self) {
+        match self.status {
+            PlayerStatus::Playing => self.pause_playing(),
+            PlayerStatus::Loading => self.start_paused = true,
+            PlayerStatus::Paused | PlayerStatus::Idle => {}
+        }
+    }
+
+    fn pause_playing(&mut self) {
+        if self.current.as_ref().is_some_and(is_live) {
+            self.pause_live();
+        } else {
+            self.playback.set_paused(true);
+            self.status = PlayerStatus::Paused;
+            self.paused_at = Some(Instant::now());
+        }
+    }
+
     fn toggle(&mut self) {
         match self.status {
-            PlayerStatus::Playing if self.current.as_ref().is_some_and(is_live) => {
-                self.pause_live()
-            }
-            PlayerStatus::Playing => {
-                self.playback.set_paused(true);
-                self.status = PlayerStatus::Paused;
-                self.paused_at = Some(Instant::now());
-            }
+            PlayerStatus::Playing => self.pause_playing(),
             PlayerStatus::Paused if self.held.is_some() => self.resume_held(),
             PlayerStatus::Paused => {
                 self.playback.set_paused(false);
@@ -5322,5 +5371,108 @@ mod tests {
         assert_eq!(details[0].0, STATION);
         assert_eq!(details[0].1, ErrorKind::Track);
         assert!(!back_to_idle(&events), "not idle: {events:#?}");
+    }
+
+    /// Ten seconds of silence per track, opened after `delay`.
+    fn silence_harness(delay: Duration) -> Harness {
+        let mut track = fixture_track("long1", "tagged.flac");
+        track.duration_ms = SILENCE_MS;
+        let opener: Opener = Arc::new(move |_track: &Track, _spec: StreamSpec| {
+            std::thread::sleep(delay);
+            Ok(Box::new(Silence {
+                frames_left: SILENCE_MS * 44_100 / 1000,
+            }) as Box<dyn AudioSource>)
+        });
+        harness(vec![track], FAST, Some(opener))
+    }
+
+    fn statuses(events: &[PlayerEvent]) -> Vec<PlayerStatus> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                PlayerEvent::State(state) => Some(state.status),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn engine_pause_pauses_only_when_playing() {
+        let h = silence_harness(Duration::ZERO);
+        // Idle: nothing to pause, nothing starts.
+        h.player.pause().unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(h.player.state().status, PlayerStatus::Idle);
+        let idle: Vec<PlayerEvent> = h.events.try_iter().collect();
+        assert!(
+            statuses(&idle).iter().all(|s| *s == PlayerStatus::Idle),
+            "{idle:#?}"
+        );
+
+        h.player.play(ids(&["long1"]), 0).unwrap();
+        wait_state(&h.player, |s| {
+            s.status == PlayerStatus::Playing && s.position_ms > 0
+        });
+        h.player.pause().unwrap();
+        let paused = wait_state(&h.player, |s| s.status == PlayerStatus::Paused);
+        // Paused already: a second pause is no toggle.
+        h.player.handle().pause().unwrap();
+        std::thread::sleep(Duration::from_millis(150));
+        let state = h.player.state();
+        assert_eq!(state.status, PlayerStatus::Paused);
+        assert_eq!(state.position_ms, paused.position_ms, "nothing played on");
+        let later: Vec<PlayerEvent> = h.events.try_iter().collect();
+        assert_eq!(changes(&later), ids(&["long1"]), "one play: {later:#?}");
+
+        h.player.toggle().unwrap();
+        wait_state(&h.player, |s| s.status == PlayerStatus::Playing);
+    }
+
+    #[test]
+    fn engine_pause_while_loading_starts_paused() {
+        let h = silence_harness(Duration::from_millis(300));
+        h.player.play(ids(&["long1"]), 0).unwrap();
+        wait_state(&h.player, |s| s.status == PlayerStatus::Loading);
+        h.player.pause().unwrap();
+        // A second pause while loading keeps it paused (toggle would flip it back).
+        h.player.pause().unwrap();
+        let state = wait_state(&h.player, |s| s.status == PlayerStatus::Paused);
+        assert_eq!(state.track.unwrap().id, "long1");
+        std::thread::sleep(Duration::from_millis(150));
+        let state = h.player.state();
+        assert_eq!(state.status, PlayerStatus::Paused);
+        assert_eq!(state.position_ms, 0);
+        let events: Vec<PlayerEvent> = h.events.try_iter().collect();
+        assert!(
+            !statuses(&events).contains(&PlayerStatus::Playing),
+            "{events:#?}"
+        );
+    }
+
+    #[test]
+    fn pause_on_a_station_holds_it() {
+        let server = NetServer::new();
+        let (h, mut events) = play_station(&server);
+        h.player.handle().pause().unwrap();
+        let paused = wait_state(&h.player, |s| s.status == PlayerStatus::Paused);
+        assert_eq!(paused.position_ms, 0);
+        assert_eq!(paused.track.as_ref().unwrap().id, STATION);
+        wait_until("closing the station", || {
+            server.drops().contains(&STATION.to_string())
+        });
+        // Held: pausing again neither reopens nor resumes it.
+        h.player.pause().unwrap();
+        std::thread::sleep(Duration::from_millis(150));
+        assert_eq!(h.player.state().status, PlayerStatus::Paused);
+        assert_eq!(server.opens(), ids(&[STATION]));
+        events.extend(h.events.try_iter());
+        assert!(errors(&events).is_empty(), "no notice: {events:#?}");
+        // Play joins it live again, as the same play.
+        h.player.toggle().unwrap();
+        wait_state(&h.player, |s| playing_track(s, STATION));
+        std::thread::sleep(Duration::from_millis(100));
+        events.extend(h.events.try_iter());
+        assert_eq!(changes(&events), ids(&[STATION]), "{events:#?}");
+        assert_eq!(server.opens(), ids(&[STATION, STATION]));
     }
 }
