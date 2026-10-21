@@ -9,18 +9,27 @@ import type {
   FlowVariant,
   Folder,
   NavidromeStatus,
+  NearResult,
+  NowPlaying,
   PlayerError,
   PlayerState,
   Playlist,
   PlaylistEntry,
+  Place,
   QueueItem,
+  RadioCountry,
+  RadioRegion,
+  RadioTag,
   RemotePlaylist,
+  SavedStations,
   ScanProgress,
   ScanReport,
   SearchResult,
   ServerInfo,
   Settings,
   Source,
+  Station,
+  StationQueryArgs,
   Track,
 } from './types';
 
@@ -106,6 +115,25 @@ export const favoritesIds = () => call<FavoriteIds>('favorites_ids');
 export const favoritesTracks = () => call<Track[]>('favorites_tracks');
 export const favoritesAlbums = () => call<Album[]>('favorites_albums');
 export const favoritesArtists = () => call<Artist[]>('favorites_artists');
+
+// Radio. Views go through `stores/radio.svelte.ts`, not these wrappers directly. The directory calls (`radioSearch`, `radioCountries`, `radioRegions`, `radioTags`)
+// reject with a `RadioFailure`.
+
+export const radioPlace = () => call<Place>('radio_place');
+/** Automatic mode only: forgets the stored place and asks the location service again. */
+export const radioRedetect = () => call<Place>('radio_redetect');
+export const radioNear = (refresh: boolean) => call<NearResult>('radio_near', { refresh });
+export const radioSearch = (query: StationQueryArgs) => call<Station[]>('radio_search', { query });
+export const radioCountries = () => call<RadioCountry[]>('radio_countries');
+export const radioRegions = (countryCode: string) => call<RadioRegion[]>('radio_regions', { countryCode });
+export const radioTags = () => call<RadioTag[]>('radio_tags');
+export const radioSaved = () => call<SavedStations>('radio_saved');
+/** Plays the station as a queue of one. */
+export const radioPlay = (station: Station) => call<void>('radio_play', { station });
+/** Resolves to the new state; stations are favorited here, not through `favoritesSet`. */
+export const radioFavorite = (station: Station, on: boolean) =>
+  call<boolean>('radio_favorite', { station, on });
+export const radioNowPlaying = () => call<NowPlaying | null>('radio_now_playing');
 
 // Playlists.
 
@@ -222,5 +250,8 @@ export const onMiniLayout = (cb: (layout: MiniLayout) => void): Promise<Unlisten
 /** The Navidrome status after every change (state, counts, sync progress, failure). */
 export const onNavidromeStatus = (cb: (status: NavidromeStatus) => void): Promise<UnlistenFn> =>
   listen<NavidromeStatus>('navidrome://status', (event) => cb(event.payload));
+/** The current station and its stream title (null title: none yet, or it ended). */
+export const onRadioNowPlaying = (cb: (now: NowPlaying) => void): Promise<UnlistenFn> =>
+  listen<NowPlaying>('radio://now-playing', (event) => cb(event.payload));
 export const onScanProgress = (cb: (progress: ScanProgress) => void): Promise<UnlistenFn> =>
   listen<ScanProgress>('library://scan-progress', (event) => cb(event.payload));

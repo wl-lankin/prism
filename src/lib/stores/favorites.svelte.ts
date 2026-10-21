@@ -12,6 +12,8 @@ class FavoritesStore {
   tracks = new SvelteSet<string>();
   albums = new SvelteSet<string>();
   artists = new SvelteSet<string>();
+  /** Station ids (`radio:<uuid>`). */
+  stations = new SvelteSet<string>();
   /** Bumped whenever the ids were reloaded, so views showing favorite lists refetch them. */
   version = $state(0);
 }
@@ -19,7 +21,9 @@ class FavoritesStore {
 export const favorites = new FavoritesStore();
 
 function setOf(kind: FavKind): SvelteSet<string> {
-  return kind === 'track' ? favorites.tracks : kind === 'album' ? favorites.albums : favorites.artists;
+  if (kind === 'track') return favorites.tracks;
+  if (kind === 'album') return favorites.albums;
+  return kind === 'station' ? favorites.stations : favorites.artists;
 }
 
 function replace(set: SvelteSet<string>, ids: string[]) {
@@ -36,6 +40,7 @@ function apply(ids: FavoriteIds) {
   replace(favorites.tracks, ids.tracks ?? []);
   replace(favorites.albums, ids.albums ?? []);
   replace(favorites.artists, ids.artists ?? []);
+  replace(favorites.stations, ids.stations ?? []);
   for (const [key, on] of pending) {
     const [kind, id] = key.split('\u0000') as [FavKind, string];
     if (on) setOf(kind).add(id);
@@ -83,6 +88,35 @@ export async function setFavorite(kind: FavKind, id: string, on: boolean): Promi
     // A heart on a Navidrome item while signed out says so in the UI language.
     const text = navidromeErrorText(err);
     notify(text === t('navidrome.notConnected') ? text : t('favorites.failed', { message: text }));
+  } finally {
+    if (pending.get(key) === on) pending.delete(key);
+  }
+}
+
+/** `setFavorite`'s optimistic change for a save that does not go through `favorites_set`
+ *  (stations): shows `on` at once, keeps it pending against reloads, runs `save`, and puts
+ *  the old state back on failure unless a later click changed it again. Rejects with the
+ *  save's error after the undo. */
+export async function changeFavorite(
+  kind: FavKind,
+  id: string,
+  on: boolean,
+  save: () => Promise<unknown>,
+): Promise<void> {
+  const set = setOf(kind);
+  const was = set.has(id);
+  const key = pendingKey(kind, id);
+  pending.set(key, on);
+  if (on) set.add(id);
+  else set.delete(id);
+  try {
+    await save();
+  } catch (err) {
+    if (pending.get(key) === on) {
+      if (was) set.add(id);
+      else set.delete(id);
+    }
+    throw err;
   } finally {
     if (pending.get(key) === on) pending.delete(key);
   }
