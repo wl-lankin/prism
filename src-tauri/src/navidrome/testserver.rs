@@ -63,6 +63,8 @@ pub(crate) enum Fault {
     Search3Empty,
     /// Every request fails with this Subsonic error code.
     Code(u32),
+    /// Every request answers this HTTP status with a Subsonic error body of this code.
+    StatusWithCode { status: u16, code: u32 },
 }
 
 /// How the fake server redirects, as a reverse proxy would.
@@ -113,6 +115,8 @@ pub(crate) struct FakeLibrary {
     /// `(song id, submission, time)` per scrobbled id.
     pub scrobbles: Vec<(String, bool, Option<i64>)>,
     audio: HashMap<String, Audio>,
+    /// Cover bytes served as-is instead of a generated PNG.
+    covers: HashMap<String, Vec<u8>>,
 }
 
 impl FakeLibrary {
@@ -214,6 +218,12 @@ impl FakeLibrary {
     }
 
     /// Serves these bytes as the song's stream.
+    /// Serves these bytes (as `image/jpeg`) for `getCoverArt?id=<cover_id>`.
+    pub fn with_cover(mut self, cover_id: &str, bytes: Vec<u8>) -> FakeLibrary {
+        self.covers.insert(cover_id.to_owned(), bytes);
+        self
+    }
+
     pub fn with_audio(mut self, song_id: &str, bytes: Vec<u8>) -> FakeLibrary {
         self.audio.insert(song_id.to_owned(), Audio::Bytes(bytes));
         self
@@ -287,6 +297,7 @@ struct State {
     fault: Fault,
     redirect: Option<Redirect>,
     gzip: bool,
+    corrupt_gzip: bool,
     gzipped: usize,
     requests: Vec<Recorded>,
 }
@@ -332,6 +343,7 @@ impl FakeServer {
                 fault: Fault::None,
                 redirect: None,
                 gzip: false,
+                corrupt_gzip: false,
                 gzipped: 0,
                 requests: Vec::new(),
             }),
@@ -385,6 +397,11 @@ impl FakeServer {
     /// Gzips JSON responses for clients that accept gzip, as a compressing proxy would.
     pub fn set_gzip(&self, on: bool) {
         self.shared.state().gzip = on;
+    }
+
+    /// Marks JSON responses `Content-Encoding: gzip` without gzipping them (a broken proxy).
+    pub fn set_corrupt_gzip(&self, on: bool) {
+        self.shared.state().corrupt_gzip = on;
     }
 
     /// How many responses went out gzipped.
@@ -627,6 +644,11 @@ fn route(
         Fault::Status(status) => return (Reply::html(status), delivery),
         Fault::Html => return (Reply::html(200), delivery),
         Fault::Code(code) => return (Reply::json(failed(code)), delivery),
+        Fault::StatusWithCode { status, code } => {
+            let mut reply = Reply::json(failed(code));
+            reply.status = status;
+            return (reply, delivery);
+        }
         Fault::WrongPassword => return (Reply::json(failed(40)), delivery),
         Fault::Stall {
             method: stalled,
@@ -652,7 +674,13 @@ fn route(
         return (Reply::json(failed(40)), delivery);
     }
     let mut reply = answer(&mut state, &method, &params, range.as_deref());
-    if state.gzip && accepts_gzip && reply.content_type.contains("json") {
+    if state.corrupt_gzip && reply.content_type.contains("json") {
+        // Claims gzip, sends something else: the client's decoder fails.
+        reply.body = b"this is not gzip at all, just plain bytes".to_vec();
+        reply
+            .headers
+            .push(("Content-Encoding".into(), "gzip".into()));
+    } else if state.gzip && accepts_gzip && reply.content_type.contains("json") {
         let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         encoder.write_all(&reply.body).expect("gzip in memory");
         reply.body = encoder.finish().expect("gzip in memory");
@@ -884,6 +912,9 @@ fn answer(
         }
         "getCoverArt" => {
             let id = param(params, "id").unwrap_or_default();
+            if let Some(bytes) = lib.covers.get(id) {
+                return Reply::new(200, "image/jpeg", bytes.clone());
+            }
             if !lib.is_cover(id) {
                 return not_found();
             }

@@ -31,7 +31,7 @@ pub const API_TIMEOUT: Duration = Duration::from_secs(20);
 /// Page size of the paged calls (`getAlbumList2`, `search3`).
 pub const PAGE: u32 = 500;
 pub const MAX_COVER_BYTES: u64 = 8 * 1024 * 1024;
-/// Redirects followed per request (reqwest's default, pinned here). A reverse proxy commonly
+/// Redirects followed per request (as reqwest's default). See [`check_redirect`]. A reverse proxy commonly
 /// redirects to its base path or from http to https.
 const MAX_REDIRECTS: usize = 10;
 /// TCP keepalive of the stream client, so a dead connection under a paused track is noticed.
@@ -94,7 +94,9 @@ impl NavidromeError {
         }
     }
 
-    /// Replaces every occurrence of the given secrets in the error's text with `***`.
+    /// Replaces every occurrence of the given secrets in the error's text with `***`. Callers pass
+    /// the password only when it is at least [`MIN_SCRUBBED_PASSWORD`] chars long (see
+    /// [`scrub_secrets`]); token and salt always.
     fn scrub(self, secrets: &[&str]) -> NavidromeError {
         let clean = |mut text: String| {
             for secret in secrets.iter().filter(|s| !s.is_empty()) {
@@ -187,6 +189,12 @@ pub fn normalize_url(input: &str) -> Result<String, NavidromeError> {
         return Err(NavidromeError::InvalidUrl(
             "the address must not contain a user or password".into(),
         ));
+    }
+    // Users paste the API root (`.../rest`); calls append `/rest/<method>` themselves.
+    let mut url = url;
+    let path = url.path().trim_end_matches('/').to_owned();
+    if let Some(prefix) = path.strip_suffix("/rest") {
+        url.set_path(prefix);
     }
     let mut normalized = url.to_string();
     while normalized.ends_with('/') {
@@ -410,14 +418,103 @@ fn from_code(code: u32, message: String) -> NavidromeError {
     }
 }
 
-/// Maps a non-2xx HTTP status. A reverse proxy answers 502 / 503 / 504 while Navidrome behind
-/// it is down: that is the server being unreachable, not a foreign server.
-fn from_status(status: StatusCode) -> NavidromeError {
-    match status.as_u16() {
-        401 => NavidromeError::WrongCredentials,
-        502..=504 => NavidromeError::Unreachable(format!("HTTP {}", status.as_u16())),
+/// Maps a non-2xx response. A reverse proxy answers 502 / 503 / 504 while Navidrome behind it
+/// is down: that is the server being unreachable, not a foreign server. A 401 is
+/// `WrongCredentials` only when its body is a Subsonic response; a 401 from the proxy's own
+/// authentication (an HTML or empty body) is `NotSubsonic("HTTP 401")`.
+fn status_error(response: Response) -> NavidromeError {
+    let status = response.status().as_u16();
+    match status {
+        401 => {
+            let body = response.bytes().unwrap_or_default();
+            match envelope(&body) {
+                Ok(_) => NavidromeError::WrongCredentials,
+                Err(NavidromeError::NotSubsonic(_)) => {
+                    NavidromeError::NotSubsonic("HTTP 401".into())
+                }
+                Err(err) => err,
+            }
+        }
+        502..=504 => NavidromeError::Unreachable(format!("HTTP {status}")),
         n => NavidromeError::NotSubsonic(format!("HTTP {n}")),
     }
+}
+
+/// Why a redirect was not followed. Carries no URL.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RedirectRefusal {
+    OtherHost,
+    Downgrade,
+    TooMany,
+}
+
+impl fmt::Display for RedirectRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            RedirectRefusal::OtherHost => "redirect to another host",
+            RedirectRefusal::Downgrade => "redirect to http",
+            RedirectRefusal::TooMany => "too many redirects",
+        })
+    }
+}
+
+impl StdError for RedirectRefusal {}
+
+/// Whether a redirect to `next` may be followed: only to the account's host (any port), never
+/// from https down to http, at most [`MAX_REDIRECTS`] hops. The credentials ride in the query,
+/// so a redirect elsewhere would hand them to another server.
+fn check_redirect(host: &str, previous: &[Url], next: &Url) -> Result<(), RedirectRefusal> {
+    if previous.len() > MAX_REDIRECTS {
+        return Err(RedirectRefusal::TooMany);
+    }
+    if !next
+        .host_str()
+        .is_some_and(|h| h.eq_ignore_ascii_case(host))
+    {
+        return Err(RedirectRefusal::OtherHost);
+    }
+    if next.scheme() != "https" && previous.iter().any(|u| u.scheme() == "https") {
+        return Err(RedirectRefusal::Downgrade);
+    }
+    Ok(())
+}
+
+fn redirect_policy(host: String) -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(move |attempt| {
+        match check_redirect(&host, attempt.previous(), attempt.url()) {
+            Ok(()) => attempt.follow(),
+            Err(refusal) => attempt.error(refusal),
+        }
+    })
+}
+
+/// Passwords shorter than this are not scrubbed from error text: replacing every "a" or "12"
+/// would garble the message and hide nothing worth hiding.
+const MIN_SCRUBBED_PASSWORD: usize = 4;
+
+/// The secrets to scrub from an error of one request.
+fn scrub_secrets<'a>(password: &'a str, token: &'a str, salt: &'a str) -> Vec<&'a str> {
+    let mut secrets = vec![token, salt];
+    if password.chars().count() >= MIN_SCRUBBED_PASSWORD {
+        secrets.push(password);
+    }
+    secrets
+}
+
+/// Replaces every word that looks like a URL or carries a query parameter with `<redacted>`.
+/// A second line of defense behind `without_url()`, for URLs nested in an error chain.
+fn redact_urls(text: &str) -> String {
+    text.split(' ')
+        .map(|word| {
+            let query = word.trim_end_matches(['?', ')', '.', ',']).contains('?');
+            if word.contains("://") || word.contains('=') || query {
+                "<redacted>"
+            } else {
+                word
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// The text of an error and its sources, without repeating a source its parent already prints.
@@ -435,13 +532,21 @@ fn chain_text(err: &(dyn StdError + 'static)) -> String {
     text
 }
 
-/// Classifies a transport error. A chain that mentions a certificate is `Tls`, a redirect loop
-/// is `NotSubsonic`, everything else (connect, DNS, timeout, a dropped connection) is
-/// `Unreachable`. Callers strip the URL from a reqwest error before handing it in.
+/// Classifies a transport error. A chain that mentions a certificate is `Tls`; a refused or
+/// looping redirect and an undecodable body (not a timeout) are `NotSubsonic`; everything else
+/// (connect, DNS, timeout, a dropped connection) is `Unreachable`. Words that look like URLs or
+/// query parameters are redacted from the text. For a reqwest error use [`classify_reqwest`].
 pub(crate) fn classify(err: &(dyn StdError + 'static)) -> NavidromeError {
-    let text = chain_text(err);
+    let text = redact_urls(&chain_text(err));
     if text.to_lowercase().contains("certificate") {
         return NavidromeError::Tls(text);
+    }
+    let mut current = Some(err);
+    while let Some(inner) = current {
+        if let Some(refusal) = inner.downcast_ref::<RedirectRefusal>() {
+            return NavidromeError::NotSubsonic(refusal.to_string());
+        }
+        current = inner.source();
     }
     let mut current = Some(err);
     while let Some(inner) = current {
@@ -449,14 +554,37 @@ pub(crate) fn classify(err: &(dyn StdError + 'static)) -> NavidromeError {
             if reqwest_err.is_redirect() {
                 return NavidromeError::NotSubsonic("too many redirects".into());
             }
+            if reqwest_err.is_decode() && !reqwest_err.is_timeout() {
+                return NavidromeError::NotSubsonic("the response could not be decoded".into());
+            }
         }
         current = inner.source();
     }
     NavidromeError::Unreachable(text)
 }
 
-fn transport(err: reqwest::Error) -> NavidromeError {
+/// The only safe way to turn a reqwest error into a [`NavidromeError`]: strips the request URL
+/// (which carries the token and salt), redacts anything URL-like left in the chain, then
+/// classifies. Stream code (Task 7) must use this, never `to_string()` of a reqwest error.
+pub(crate) fn classify_reqwest(err: reqwest::Error) -> NavidromeError {
     let err = err.without_url();
+    classify(&err)
+}
+
+/// Classifies an I/O error from reading a response body; a reqwest error inside it goes through
+/// [`classify_reqwest`].
+fn classify_io(err: std::io::Error) -> NavidromeError {
+    if err
+        .get_ref()
+        .is_some_and(|inner| inner.is::<reqwest::Error>())
+    {
+        if let Some(inner) = err.into_inner() {
+            if let Ok(reqwest_err) = inner.downcast::<reqwest::Error>() {
+                return classify_reqwest(*reqwest_err);
+            }
+        }
+        return NavidromeError::Unreachable("the connection failed".into());
+    }
     classify(&err)
 }
 
@@ -501,7 +629,7 @@ fn field<T: DeserializeOwned + Default>(
 pub struct SubsonicClient {
     account: Account,
     http: Client,
-    connect_timeout: Duration,
+    stream: Client,
 }
 
 impl SubsonicClient {
@@ -514,18 +642,34 @@ impl SubsonicClient {
         connect: Duration,
         api: Duration,
     ) -> anyhow::Result<SubsonicClient> {
-        Url::parse(&account.url).context("the server address is not a valid URL")?;
+        let host = Url::parse(&account.url)
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_owned))
+            .context("the server address is not a valid URL")?;
+        let user_agent = format!("{CLIENT_NAME}/{}", env!("CARGO_PKG_VERSION"));
         let http = Client::builder()
-            .user_agent(format!("{CLIENT_NAME}/{}", env!("CARGO_PKG_VERSION")))
+            .user_agent(&user_agent)
             .connect_timeout(connect)
             .timeout(api)
-            .redirect(reqwest::redirect::Policy::limited(MAX_REDIRECTS))
+            .redirect(redirect_policy(host.clone()))
             .build()
             .context("building the HTTP client")?;
+        // Streams: no total timeout (a track streams for minutes, and a buffering proxy can be
+        // slow to the first byte), keepalive to notice a dead connection, no transparent
+        // decompression (byte offsets must stay the file's).
+        let stream = Client::builder()
+            .user_agent(&user_agent)
+            .connect_timeout(connect)
+            .timeout(None)
+            .tcp_keepalive(STREAM_KEEPALIVE)
+            .no_gzip()
+            .redirect(redirect_policy(host))
+            .build()
+            .context("building the stream HTTP client")?;
         Ok(SubsonicClient {
             account,
             http,
-            connect_timeout: connect,
+            stream,
         })
     }
 
@@ -567,19 +711,24 @@ impl SubsonicClient {
             .query(&auth)
             .query(params)
             .send()
-            .map_err(transport)
+            .map_err(classify_reqwest)
             .and_then(read);
-        result.map_err(|err| err.scrub(&[self.account.password.expose(), &token, &salt]))
+        result.map_err(|err| {
+            err.scrub(&scrub_secrets(
+                self.account.password.expose(),
+                &token,
+                &salt,
+            ))
+        })
     }
 
     /// One API call: a 2xx JSON `subsonic-response` with status `ok`.
     fn call(&self, method: &str, params: &[(&str, String)]) -> Result<Value, NavidromeError> {
         self.request(method, params, |response| {
-            let status = response.status();
-            if !status.is_success() {
-                return Err(from_status(status));
+            if !response.status().is_success() {
+                return Err(status_error(response));
             }
-            let body = response.bytes().map_err(transport)?;
+            let body = response.bytes().map_err(classify_reqwest)?;
             envelope(&body)
         })
     }
@@ -686,7 +835,7 @@ impl SubsonicClient {
                     return Err(NavidromeError::NotFound);
                 }
                 if !status.is_success() {
-                    return Err(from_status(status));
+                    return Err(status_error(response));
                 }
                 let content_type = response
                     .headers()
@@ -699,7 +848,7 @@ impl SubsonicClient {
                 response
                     .take(MAX_COVER_BYTES + 1)
                     .read_to_end(&mut bytes)
-                    .map_err(|err| classify(&err))?;
+                    .map_err(classify_io)?;
                 if content_type.contains("json") {
                     envelope(&bytes)?;
                     return Err(NavidromeError::NotSubsonic("expected an image".into()));
@@ -748,19 +897,11 @@ impl SubsonicClient {
         SecretUrl::new(String::from(url))
     }
 
-    /// An HTTP client for streams: the connect timeout and keepalive, no total timeout (a track
-    /// streams for minutes, and a buffering proxy can be slow to the first byte), no transparent
-    /// decompression (byte offsets must stay the file's).
+    /// The HTTP client for streams (built once): the connect timeout and keepalive, no total
+    /// timeout, no transparent decompression, the same redirect rules as API calls. Map its
+    /// errors with [`classify_reqwest`].
     pub fn stream_http(&self) -> reqwest::blocking::Client {
-        Client::builder()
-            .user_agent(format!("{CLIENT_NAME}/{}", env!("CARGO_PKG_VERSION")))
-            .connect_timeout(self.connect_timeout)
-            .timeout(None)
-            .tcp_keepalive(STREAM_KEEPALIVE)
-            .no_gzip()
-            .redirect(reqwest::redirect::Policy::limited(MAX_REDIRECTS))
-            .build()
-            .unwrap_or_else(|_| Client::new())
+        self.stream.clone()
     }
 }
 
@@ -853,6 +994,26 @@ mod tests {
                 "{bad:?} should be rejected"
             );
         }
+        assert_eq!(
+            normalize_url("https://host/music/rest").unwrap(),
+            "https://host/music"
+        );
+        assert_eq!(
+            normalize_url("https://host/music/rest/").unwrap(),
+            "https://host/music"
+        );
+        assert_eq!(normalize_url("https://host/rest").unwrap(), "https://host");
+        // Only one segment, and only a whole one.
+        assert_eq!(
+            normalize_url("https://host/rest/rest").unwrap(),
+            "https://host/rest"
+        );
+        assert_eq!(
+            normalize_url("https://host/forest").unwrap(),
+            "https://host/forest"
+        );
+        assert_eq!(normalize_url("https://rest").unwrap(), "https://rest");
+        assert_eq!(normalize_url("[::1]:4533").unwrap(), "https://[::1]:4533");
         let err = normalize_url("https://demo:demo-pass@h").unwrap_err();
         assert!(!err.to_string().contains("demo-pass"));
     }
@@ -930,6 +1091,136 @@ mod tests {
     }
 
     #[test]
+    fn redirect_to_another_host_is_refused() {
+        let server = FakeServer::start(FakeLibrary::synthetic(1, 1));
+        let port = server.url().rsplit(':').next().unwrap().to_owned();
+        // Same port, other host name: the token must not follow it.
+        server.set_redirect(Some(Redirect::To(302, format!("http://localhost:{port}"))));
+        let client = client(&server);
+        let err = client.ping().unwrap_err();
+        assert_eq!(
+            err,
+            NavidromeError::NotSubsonic("redirect to another host".into())
+        );
+        assert!(!err.is_offline());
+        assert_clean(&err, &server);
+        // Nothing reached a method: the redirect was not followed.
+        assert!(server.requests().is_empty());
+
+        // The stream client follows the same rules.
+        let url = client.stream_url("tr-0", StreamQuality::Original, None);
+        let err = client.stream_http().get(url.expose()).send().unwrap_err();
+        let err = classify_reqwest(err);
+        assert_eq!(
+            err,
+            NavidromeError::NotSubsonic("redirect to another host".into())
+        );
+        assert_clean(&err, &server);
+    }
+
+    #[test]
+    fn redirect_policy_decisions() {
+        let url = |s: &str| Url::parse(s).unwrap();
+        let from_https = [url("https://music.example/rest/ping")];
+        let from_http = [url("http://music.example/rest/ping")];
+        // Same host, other port or path: followed.
+        assert_eq!(
+            check_redirect(
+                "music.example",
+                &from_https,
+                &url("https://music.example:8443/music/rest/ping")
+            ),
+            Ok(())
+        );
+        // Upgrade to https: followed.
+        assert_eq!(
+            check_redirect(
+                "music.example",
+                &from_http,
+                &url("https://music.example/rest/ping")
+            ),
+            Ok(())
+        );
+        // Downgrade to http, also later in the chain: refused.
+        assert_eq!(
+            check_redirect(
+                "music.example",
+                &from_https,
+                &url("http://music.example/rest/ping")
+            ),
+            Err(RedirectRefusal::Downgrade)
+        );
+        let chain = [
+            url("https://music.example/rest/ping"),
+            url("https://music.example/music/rest/ping"),
+        ];
+        assert_eq!(
+            check_redirect(
+                "music.example",
+                &chain,
+                &url("http://music.example/x/rest/ping")
+            ),
+            Err(RedirectRefusal::Downgrade)
+        );
+        // Another host: refused.
+        assert_eq!(
+            check_redirect(
+                "music.example",
+                &from_https,
+                &url("https://evil.example/rest/ping")
+            ),
+            Err(RedirectRefusal::OtherHost)
+        );
+        // Hop limit.
+        let many: Vec<Url> = (0..=MAX_REDIRECTS)
+            .map(|i| url(&format!("https://music.example/{i}")))
+            .collect();
+        assert_eq!(
+            check_redirect("music.example", &many, &url("https://music.example/x")),
+            Err(RedirectRefusal::TooMany)
+        );
+        assert_eq!(RedirectRefusal::Downgrade.to_string(), "redirect to http");
+    }
+
+    #[test]
+    fn corrupt_gzip_maps_to_not_subsonic() {
+        let server = FakeServer::start(FakeLibrary::synthetic(1, 1));
+        server.set_corrupt_gzip(true);
+        let err = client(&server).ping().unwrap_err();
+        assert_eq!(
+            err,
+            NavidromeError::NotSubsonic("the response could not be decoded".into())
+        );
+        assert_clean(&err, &server);
+    }
+
+    #[test]
+    fn short_passwords_are_not_scrubbed() {
+        assert_eq!(scrub_secrets("abc", "tok", "salt"), ["tok", "salt"]);
+        assert_eq!(
+            scrub_secrets("demo-pass", "tok", "salt"),
+            ["tok", "salt", "demo-pass"]
+        );
+        let err = NavidromeError::Unreachable("an error near tok and salt".into());
+        assert_eq!(
+            err.scrub(&scrub_secrets("an", "tok", "salt")),
+            NavidromeError::Unreachable("an error near *** and ***".into())
+        );
+    }
+
+    #[test]
+    fn redact_urls_hides_url_like_words() {
+        assert_eq!(
+            redact_urls("error for url (http://h/rest/ping?u=demo&t=abc&s=def): refused"),
+            "error for url <redacted> refused"
+        );
+        assert_eq!(
+            redact_urls("tcp connect error (os error 10061)"),
+            "tcp connect error (os error 10061)"
+        );
+    }
+
+    #[test]
     fn wrong_password_maps_to_wrong_credentials() {
         let server = FakeServer::start(FakeLibrary::synthetic(1, 1));
         server.set_fault(Fault::WrongPassword);
@@ -948,12 +1239,26 @@ mod tests {
     }
 
     #[test]
-    fn http_401_maps_to_wrong_credentials() {
+    fn http_401_maps_by_body() {
         let server = FakeServer::start(FakeLibrary::synthetic(1, 1));
-        server.set_fault(Fault::Status(401));
+        // A Subsonic error body with 401: the server's verdict.
+        server.set_fault(Fault::StatusWithCode {
+            status: 401,
+            code: 40,
+        });
         assert_eq!(
             client(&server).ping().unwrap_err(),
             NavidromeError::WrongCredentials
+        );
+        // The proxy's own authentication (HTML body): not the Navidrome password.
+        server.set_fault(Fault::Status(401));
+        assert_eq!(
+            client(&server).ping().unwrap_err(),
+            NavidromeError::NotSubsonic("HTTP 401".into())
+        );
+        assert_eq!(
+            client(&server).cover_art("al-0_cover", 64).unwrap_err(),
+            NavidromeError::NotSubsonic("HTTP 401".into())
         );
     }
 
@@ -1176,11 +1481,29 @@ mod tests {
                 method: "ping",
                 after_bytes: 5,
             },
+            Fault::CutOnce {
+                method: "getCoverArt",
+                after_bytes: 5,
+            },
+            Fault::Stall {
+                method: "getCoverArt",
+                after_bytes: 0,
+                wait: Duration::from_secs(1),
+            },
+            Fault::Stall {
+                method: "getCoverArt",
+                after_bytes: 10,
+                wait: Duration::from_secs(1),
+            },
             Fault::Code(0),
             Fault::Code(40),
             Fault::Code(41),
             Fault::Code(50),
             Fault::Code(70),
+            Fault::StatusWithCode {
+                status: 401,
+                code: 40,
+            },
         ];
         for fault in faults {
             let server = FakeServer::start(FakeLibrary::synthetic(1, 1));
@@ -1191,13 +1514,75 @@ mod tests {
                 Duration::from_millis(300),
             )
             .unwrap();
-            let err = client.ping().unwrap_err();
-            assert_clean(&err, &server);
-            // The cover call reads its body differently.
-            if let Err(err) = client.cover_art("al-0_cover", 64) {
-                assert_clean(&err, &server);
+            // The cover call reads its body differently (io::Read over the response).
+            let errors: Vec<NavidromeError> = [
+                client.ping().err(),
+                client.cover_art("al-0_cover", 64).err(),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+            assert!(!errors.is_empty(), "{fault:?} produced no error");
+            for err in &errors {
+                assert_clean(err, &server);
             }
         }
+
+        // Corrupt gzip and a refused redirect, on both call paths.
+        let server = FakeServer::start(FakeLibrary::synthetic(1, 1));
+        server.set_corrupt_gzip(true);
+        assert_clean(&client(&server).ping().unwrap_err(), &server);
+        server.set_corrupt_gzip(false);
+        server.set_redirect(Some(Redirect::To(
+            302,
+            format!("http://localhost:{}", dead_port()),
+        )));
+        assert_clean(&client(&server).ping().unwrap_err(), &server);
+        assert_clean(
+            &client(&server).cover_art("al-0_cover", 64).unwrap_err(),
+            &server,
+        );
+    }
+
+    #[test]
+    fn cover_size_cap() {
+        let cap = MAX_COVER_BYTES as usize;
+        let lib = FakeLibrary::synthetic(1, 1)
+            .with_cover("exact", vec![7u8; cap])
+            .with_cover("over", vec![7u8; cap + 1]);
+        let server = FakeServer::start(lib);
+        let client = client(&server);
+        assert_eq!(client.cover_art("exact", 600).unwrap().len(), cap);
+        assert_eq!(
+            client.cover_art("over", 600).unwrap_err(),
+            NavidromeError::NotSubsonic("the cover is too large".into())
+        );
+    }
+
+    #[test]
+    fn cover_cut_and_stall_map_to_unreachable() {
+        let server = FakeServer::start(FakeLibrary::synthetic(1, 1));
+        let client = SubsonicClient::with_timeouts(
+            server.account(),
+            Duration::from_millis(500),
+            Duration::from_millis(300),
+        )
+        .unwrap();
+        server.set_fault(Fault::CutOnce {
+            method: "getCoverArt",
+            after_bytes: 5,
+        });
+        let err = client.cover_art("al-0_cover", 64).unwrap_err();
+        assert!(err.is_offline(), "{err:?}");
+        assert_clean(&err, &server);
+        server.set_fault(Fault::Stall {
+            method: "getCoverArt",
+            after_bytes: 10,
+            wait: Duration::from_secs(1),
+        });
+        let err = client.cover_art("al-0_cover", 64).unwrap_err();
+        assert!(err.is_offline(), "{err:?}");
+        assert_clean(&err, &server);
     }
 
     #[test]
