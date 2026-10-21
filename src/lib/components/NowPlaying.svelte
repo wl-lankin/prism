@@ -1,6 +1,6 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import { formatDuration, isLive, liveLines, sourceQualityLabel, streamedFrom } from '../format';
+  import { formatDuration, isLive, liveLines, sourceQualityLabel, streamedFrom, ytmIdle, ytmLines } from '../format';
   import { t } from '../i18n';
   import { coverUrl, playerJump, playerQueueRange } from '../ipc';
   import { evictPages, pagesFor } from '../pages';
@@ -9,6 +9,7 @@
   import { player } from '../stores/player.svelte';
   import { currentTitle, findStation, toggleStationFavorite } from '../stores/radio.svelte';
   import { settings } from '../stores/settings.svelte';
+  import { ytm } from '../stores/ytm.svelte';
   import type { FlowVariant, QueueItem, Track } from '../types';
   import { visibleRange } from '../virtual';
   import Backdrop from './Backdrop.svelte';
@@ -29,7 +30,9 @@
   const HOLD_MS = 5000;
 
   const track = $derived(player.track);
-  const idle = $derived(player.status === 'idle' || !track);
+  /** YouTube Music answers the transport: this view shows its state, and the queue is its own. */
+  const yt = $derived(player.active === 'ytm');
+  const idle = $derived(yt ? ytmIdle(ytm.state) : player.status === 'idle' || !track);
   const total = $derived(player.queueLength);
   const current = $derived(player.queueIndex);
   /** Dropped files ("file:" ids) are not in the library: no album, no artist page, no heart. */
@@ -49,7 +52,9 @@
     const fill = getComputedStyle(document.documentElement).getPropertyValue('--src-radio').trim() || '#4da6ff';
     return `data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"><rect width="4" height="4" fill="${fill}"/></svg>`)}`;
   }
-  const backdrop = $derived(coverUrl(track?.coverId ?? null, 96) ?? (live ? blueTile() : null));
+  const backdrop = $derived(
+    yt ? coverUrl(ytm.state.coverId, 96) : (coverUrl(track?.coverId ?? null, 96) ?? (live ? blueTile() : null)),
+  );
 
   const flow = $derived((player.flow ?? null) as FlowVariant | null);
   const heading = $derived(flow ? t('nowPlaying.flow', { variant: variantName(flow) }) : t('nowPlaying.queue'));
@@ -239,13 +244,36 @@
     <Backdrop src={backdrop} spread={1.15} />
   {/if}
 
-  {#if idle || !track}
+  {#if idle || (!yt && !track)}
     <div class="empty">
       <span class="empty-art" aria-hidden="true"><Icon name="songs" size={40} /></span>
       <h1>{t('transport.idleTitle')}</h1>
       <p>{t('nowPlaying.emptyLead')}</p>
     </div>
-  {:else}
+  {:else if yt}
+    {@const yl = ytmLines(ytm.state)}
+    <div class="stage">
+      <div class="art">
+        <Cover coverId={ytm.state.coverId} fluid cache={600} radius="18px" alt={ytm.state.album} />
+      </div>
+    </div>
+
+    <div class="side">
+      <header class="info">
+        <h1>{yl.title}</h1>
+        <p class="byline">
+          {#if yl.sub}<span class="artist">{yl.sub}</span>{/if}
+          {#if ytm.state.album}<span class="album">{ytm.state.album}</span>{/if}
+        </p>
+        <div class="source">
+          <span class="quality" style="--dot:var(--src-youtube)" title={t('ytm.noHeart')}>
+            <span class="qtext">{t('ytm.source')}</span>
+          </span>
+        </div>
+      </header>
+      <p class="ytm-note">{t('ytm.queueNote')}</p>
+    </div>
+  {:else if track}
     <div class="stage">
       <div class="art">
         {#if live}
@@ -441,6 +469,14 @@
 
   .info {
     padding: 6px 0 22px;
+  }
+
+  .ytm-note {
+    margin: 0;
+    max-width: 38ch;
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--text-dim);
   }
 
   h1 {

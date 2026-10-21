@@ -31,6 +31,7 @@
   import { t, tc } from '../i18n';
   import { isFavorite, setFavorite } from '../stores/favorites.svelte';
   import { go } from '../stores/nav.svelte';
+  import { closeOverlay, openOverlay } from '../stores/overlays.svelte';
   import { addToPlaylist, createWithTracks, playlists, suggestName } from '../stores/playlists.svelte';
   import { openHomepage, toggleStationFavorite } from '../stores/radio.svelte';
   import type { Playlist } from '../types';
@@ -53,6 +54,12 @@
     station,
     onclose,
   }: TrackMenuState & { onclose: () => void } = $props();
+
+  // The YouTube Music view is a native view above the page: it steps aside while a menu is open.
+  $effect(() => {
+    untrack(() => openOverlay('track-menu'));
+    return () => untrack(() => closeOverlay('track-menu'));
+  });
 
   let root = $state<HTMLDivElement>();
   // Placed where it was opened; onMount then keeps it inside the card.

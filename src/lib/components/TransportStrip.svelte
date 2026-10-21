@@ -1,7 +1,8 @@
 <script lang="ts">
-  import { formatDuration, isLive, liveLines, qualityLabel, streamedFrom } from '../format';
+  import { formatDuration, isLive, liveLines, qualityLabel, streamedFrom, ytmIdle, ytmLines } from '../format';
   import { t } from '../i18n';
-  import { playerNext, playerPrev, playerSeek, playerSetVolume } from '../ipc';
+  import { playerNext, playerPrev, playerSeek, playerSetVolume, ytmControl } from '../ipc';
+  import { ytm } from '../stores/ytm.svelte';
   import { back, go, nav } from '../stores/nav.svelte';
   import { player } from '../stores/player.svelte';
   import { currentTitle } from '../stores/radio.svelte';
@@ -21,12 +22,17 @@
    *  in the strip (maximized window) instead of on the card's bottom edge. */
   let { ringGap = 132, ringInside = false }: { ringGap?: number; ringInside?: boolean } = $props();
 
-  const track = $derived(player.track);
-  const idle = $derived(player.status === 'idle' || !track);
-  const duration = $derived(player.durationMs || track?.durationMs || 0);
+  /** YouTube Music answers the transport: the strip shows its state, not the engine's. */
+  const yt = $derived(player.active === 'ytm');
+  const track = $derived(yt ? null : player.track);
+  const idle = $derived(yt ? ytmIdle(ytm.state) : player.status === 'idle' || !track);
+  const duration = $derived(yt ? ytm.state.durationMs : player.durationMs || track?.durationMs || 0);
   /** A station: no seek bar, no duration, no next or previous. */
-  const live = $derived(!idle && isLive(track));
-  const lines = $derived(track ? liveLines(track, live ? currentTitle(track) : null) : null);
+  const live = $derived(!yt && !idle && isLive(track));
+  const lines = $derived(yt ? ytmLines(ytm.state) : track ? liveLines(track, live ? currentTitle(track) : null) : null);
+  const coverId = $derived(yt ? ytm.state.coverId : (track?.coverId ?? null));
+  const canPrev = $derived(yt ? ytm.state.canPrev : true);
+  const canNext = $derived(yt ? ytm.state.canNext : true);
 
   /** How the track plays; a Navidrome transcode names the file behind it in the tooltip. */
   const quality = $derived(track ? qualityLabel(track, settings.navidromeQuality) : '');
@@ -37,7 +43,7 @@
 
   // While the seek bar is dragged it shows the drag position, not the engine's.
   let seeking = $state<number | null>(null);
-  const position = $derived(seeking ?? player.positionMs);
+  const position = $derived(seeking ?? (yt ? ytm.state.positionMs : player.positionMs));
 
   let lastVolume = 0.8;
   const muted = $derived(player.volume <= 0.001);
@@ -85,6 +91,11 @@
         oncancel={() => (seeking = null)}
         oncommit={(v) => {
           seeking = null;
+          if (yt) {
+            ytm.state.positionMs = v * duration;
+            ytmControl('seek', { positionMs: Math.round(v * duration) }).catch(report('seeking'));
+            return;
+          }
           player.positionMs = v * duration;
           playerSeek(v * duration).catch(report('seeking'));
         }}
@@ -94,14 +105,14 @@
 
   <div class="now">
     {#if idle}
-      <Cover coverId={track?.coverId ?? null} size={48} alt="" />
+      <Cover coverId={coverId} size={48} alt="" />
     {:else}
       <!-- The title below is the keyboard stop; the cover is the same target for the pointer. -->
       <button type="button" class="open cover" tabindex="-1" aria-label={openLabel} title={openLabel} onclick={toggleNowPlaying}>
         {#if live && track}
           <StationTile name={track.title} coverId={track.coverId} size={48} radius="var(--radius-s)" />
         {:else}
-          <Cover coverId={track?.coverId ?? null} size={48} alt="" />
+          <Cover coverId={coverId} size={48} alt="" />
         {/if}
       </button>
     {/if}
@@ -109,6 +120,9 @@
       {#if idle}
         <div class="title">{t('transport.idleTitle')}</div>
         <div class="sub">{t('transport.idleHint')}</div>
+      {:else if yt && lines}
+        <button type="button" class="open title" title={openLabel} aria-pressed={nav.view === 'nowplaying'} onclick={toggleNowPlaying}>{lines.title}</button>
+        <div class="sub" title={lines.sub}>{lines.sub}</div>
       {:else if track && lines}
         <button type="button" class="open title" title={openLabel} aria-pressed={nav.view === 'nowplaying'} onclick={toggleNowPlaying}>{lines.title}</button>
         <div class="sub" title={lines.sub}>
@@ -116,18 +130,20 @@
         </div>
       {/if}
     </div>
-    {#if !idle && track}
+    {#if yt && !idle}
+      <span class="quality" style="--dot:var(--src-youtube)">{t('ytm.source')}</span>
+    {:else if !idle && track}
       <span class="quality" style="--dot:var(--src-{track.source})" title={streamNote}>{quality}</span>
     {/if}
   </div>
 
   <div class="center">
     <span class="time elapsed" class:dim={idle} title={live ? t('radio.liveHeard', { time: formatDuration(position) }) : undefined}>{formatDuration(position)}</span>
-    <button type="button" class="btn" disabled={idle || live} aria-label={t('transport.previous')} title={live ? t('radio.noSkip') : t('transport.previous')} onclick={() => playerPrev().catch(report('previous'))}>
+    <button type="button" class="btn" disabled={idle || live || !canPrev} aria-label={t('transport.previous')} title={live ? t('radio.noSkip') : t('transport.previous')} onclick={() => playerPrev().catch(report('previous'))}>
       <Icon name="prev" size={20} />
     </button>
     <span class="ring-space" aria-hidden="true"></span>
-    <button type="button" class="btn" disabled={idle || live} aria-label={t('transport.next')} title={live ? t('radio.noSkip') : t('transport.next')} onclick={() => playerNext().catch(report('next'))}>
+    <button type="button" class="btn" disabled={idle || live || !canNext} aria-label={t('transport.next')} title={live ? t('radio.noSkip') : t('transport.next')} onclick={() => playerNext().catch(report('next'))}>
       <Icon name="next" size={20} />
     </button>
     {#if live}
@@ -138,7 +154,7 @@
   </div>
 
   <div class="right">
-    <PlayModes />
+    {#if !yt}<PlayModes />{/if}
     <button
       type="button"
       id={QUEUE_TOGGLE_ID}
@@ -154,7 +170,7 @@
     </button>
     <span class="divider" aria-hidden="true"></span>
     <!-- Dropped files ("file:" ids) are not in the library; a favorite of one would be an orphan. -->
-    {#if !idle && track && !track.id.startsWith('file:')}
+    {#if !yt && !idle && track && !track.id.startsWith('file:')}
       <Heart kind={live ? 'station' : 'track'} id={track.id} label={t('favorites.toggleItem', { name: track.title })} />
     {/if}
     <button type="button" class="btn small" aria-label={muted ? t('transport.unmute') : t('transport.mute')} title={muted ? t('transport.unmute') : t('transport.mute')} onclick={toggleMute}>

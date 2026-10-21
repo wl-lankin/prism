@@ -1,8 +1,9 @@
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
   import { playFlow, sameFlow } from '../flow';
   import { t } from '../i18n';
   import { libraryGenres } from '../ipc';
+  import { closeOverlay, openOverlay } from '../stores/overlays.svelte';
   import { player } from '../stores/player.svelte';
   import type { FlowVariant } from '../types';
   import Icon from './Icon.svelte';
@@ -30,6 +31,11 @@
   } = $props();
 
   const MARGIN = 8;
+
+  $effect(() => {
+    untrack(() => openOverlay('flow-menu'));
+    return () => untrack(() => closeOverlay('flow-menu'));
+  });
 
   let menu: HTMLDivElement | undefined = $state();
   let filterInput: HTMLInputElement | undefined = $state();

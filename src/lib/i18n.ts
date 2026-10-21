@@ -420,6 +420,11 @@ const en = {
   'settings.radio.region': 'Region',
   'settings.radio.anyRegion': 'Any region',
 
+  // YouTube Music player (M5 Task 9)
+  'ytm.source': 'YouTube Music',
+  'ytm.queueNote': 'The queue belongs to YouTube Music. Change it in the YouTube Music view.',
+  'ytm.noHeart': 'Favorites and playlists are not available for YouTube Music',
+
   // YouTube Music (M5 Task 8)
   'ytm.title': 'YouTube Music',
   'ytm.signInHint': 'Sign in with your Google account to see your library.',
@@ -881,6 +886,11 @@ const de: Record<Key, string> = {
   'settings.radio.country': 'Land',
   'settings.radio.region': 'Region',
   'settings.radio.anyRegion': 'Alle Regionen',
+
+  // YouTube Music player (M5 Task 9)
+  'ytm.source': 'YouTube Music',
+  'ytm.queueNote': 'Die Warteschlange gehört YouTube Music. Ändere sie in der Ansicht YouTube Music.',
+  'ytm.noHeart': 'Favoriten und Playlists gibt es für YouTube Music nicht',
 
   // YouTube Music (M5 Task 8)
   'ytm.title': 'YouTube Music',

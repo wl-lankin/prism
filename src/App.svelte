@@ -1,5 +1,6 @@
 <script lang="ts">
   import { getCurrentWindow } from '@tauri-apps/api/window';
+  import { untrack } from 'svelte';
   import About from './lib/components/About.svelte';
   import AlbumGrid from './lib/components/AlbumGrid.svelte';
   import HomeStations from './lib/components/HomeStations.svelte';
@@ -36,7 +37,9 @@
   import { albumsOf, artistsOf, countOf, hasMixedSources, initLibrary, library } from './lib/stores/library.svelte';
   import { failureText, initNavidrome, navidrome } from './lib/stores/navidrome.svelte';
   import { initRadio, radio } from './lib/stores/radio.svelte';
-  import { initYtm } from './lib/stores/ytm.svelte';
+  import { initYtm, ytm } from './lib/stores/ytm.svelte';
+  import { closeOverlay, openOverlay } from './lib/stores/overlays.svelte';
+  import { ytmIdle } from './lib/format';
   import { go, nav, overlays, type View } from './lib/stores/nav.svelte';
   import { notice, notify } from './lib/stores/notice.svelte';
   import { followPlayerErrors, initPlayer, player } from './lib/stores/player.svelte';
@@ -282,13 +285,47 @@
     }
   }
 
+  /** YouTube Music answers the transport while it is the active player. */
+  const yt = $derived(player.active === 'ytm');
+  const ytIdle = $derived(ytmIdle(ytm.state));
   const mode: RingMode = $derived(
-    player.status === 'idle' ? 'flow' : player.status === 'playing' ? 'pause' : 'play',
+    yt
+      ? ytIdle
+        ? 'flow'
+        : ytm.state.status === 'playing'
+          ? 'pause'
+          : 'play'
+      : player.status === 'idle'
+        ? 'flow'
+        : player.status === 'playing'
+          ? 'pause'
+          : 'play',
   );
-  const progress = $derived(player.durationMs > 0 ? player.positionMs / player.durationMs : 0);
+  const progress = $derived(
+    yt
+      ? ytm.state.durationMs > 0
+        ? ytm.state.positionMs / ytm.state.durationMs
+        : 0
+      : player.durationMs > 0
+        ? player.positionMs / player.durationMs
+        : 0,
+  );
+
+  // The notice and the drop overlay sit inside the content area, above the YouTube Music
+  // view, so each hides it while it shows. The registry reads the set it writes: untrack.
+  $effect(() => {
+    if (!notice.text) return;
+    untrack(() => openOverlay('notice'));
+    return () => untrack(() => closeOverlay('notice'));
+  });
+  $effect(() => {
+    if (!dragging) return;
+    untrack(() => openOverlay('drop'));
+    return () => untrack(() => closeOverlay('drop'));
+  });
 
   async function activate() {
-    if (player.status !== 'idle') {
+    if (yt ? !ytIdle : player.status !== 'idle') {
       playerToggle().catch((err) => notify(t('flow.failed', { message: String(err) })));
       return;
     }

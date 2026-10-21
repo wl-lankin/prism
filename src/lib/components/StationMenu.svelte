@@ -33,12 +33,18 @@
   import { onMount, untrack } from 'svelte';
   import { t } from '../i18n';
   import { isFavorite } from '../stores/favorites.svelte';
+  import { closeOverlay, openOverlay } from '../stores/overlays.svelte';
   import { openHomepage, startStation, toggleStationFavorite } from '../stores/radio.svelte';
   import Icon from './Icon.svelte';
 
   /** The station context menu: play, favorite, open the homepage. A menu in the WAI-ARIA
    *  sense like the track menu: arrows move, Esc and Tab close, a press elsewhere closes. */
   let { station, x, y, onclose }: StationMenuState & { onclose: () => void } = $props();
+
+  $effect(() => {
+    untrack(() => openOverlay('station-menu'));
+    return () => untrack(() => closeOverlay('station-menu'));
+  });
 
   let root = $state<HTMLDivElement>();
   let left = $state(untrack(() => x));
