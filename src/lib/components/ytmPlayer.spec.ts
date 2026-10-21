@@ -46,8 +46,8 @@ const { default: TrackMenu } = await import('./TrackMenu.svelte');
 const { default: StationMenu } = await import('./StationMenu.svelte');
 const { default: FlowMenu } = await import('./FlowMenu.svelte');
 const { player } = await import('../stores/player.svelte');
-const { ytm, reportRect, hideView } = await import('../stores/ytm.svelte');
-const { overlayOpen } = await import('../stores/overlays.svelte');
+const { ytm, reportRect, hideView, setOverlayOpen } = await import('../stores/ytm.svelte');
+const { overlayOpen, setOverlayListener } = await import('../stores/overlays.svelte');
 const { queuePanel } = await import('../stores/queue.svelte');
 const { notice } = await import('../stores/notice.svelte');
 const { setLang } = await import('../i18n');
@@ -171,6 +171,8 @@ describe('a replaced notice', () => {
     vi.stubGlobal('requestAnimationFrame', (cb: () => void) => setTimeout(cb, 0));
     show(App);
     await settle();
+    // As the mounted YouTubeView does.
+    setOverlayListener(setOverlayOpen);
     reportRect({ x: 1, y: 2, width: 300, height: 200 });
     await vi.waitFor(() => expect(calls('ytm_show')).toHaveLength(1));
     notice.text = 'First';
@@ -185,6 +187,7 @@ describe('a replaced notice', () => {
     await settle();
     await vi.waitFor(() => expect(calls('ytm_show')).toHaveLength(2));
     hideView();
+    setOverlayListener(null);
     vi.unstubAllGlobals();
   });
 });

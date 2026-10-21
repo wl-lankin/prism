@@ -27,7 +27,9 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: (...args: unknown[]) => invoke(
 
 const { ytm, reportRect, hideView, control, signIn, signOut, initYtm, setOverlayOpen } = await import('./ytm.svelte');
 const { player, initPlayer } = await import('./player.svelte');
-const { openOverlay, closeOverlay, anyOverlay } = await import('./overlays.svelte');
+const { openOverlay, closeOverlay, anyOverlay, setOverlayListener } = await import('./overlays.svelte');
+// YouTubeView sets this while it is mounted; here the store is driven without it.
+setOverlayListener(setOverlayOpen);
 
 const idle: YtmState = {
   status: 'idle',
