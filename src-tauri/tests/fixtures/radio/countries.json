@@ -1,0 +1,7 @@
+[
+  {"name": "Germany", "iso_3166_1": "DE", "stationcount": 5200},
+  {"name": "Austria", "iso_3166_1": "AT", "stationcount": 610},
+  {"name": "Testland Republic", "iso_3166_1": "TL", "stationcount": "42"},
+  {"name": "", "iso_3166_1": "XX", "stationcount": 1},
+  {"name": "Nowhere", "iso_3166_1": "", "stationcount": 1}
+]

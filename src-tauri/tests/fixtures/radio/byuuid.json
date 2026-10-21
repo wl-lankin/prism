@@ -1,0 +1,21 @@
+[
+  {
+    "stationuuid": "00000000-0000-4000-8000-000000000021",
+    "name": "Demo Radio 21",
+    "url": "http://stream.example.org/demo21.mp3",
+    "url_resolved": "http://stream.example.org/demo21.mp3",
+    "homepage": "https://www.example.org/demo21",
+    "favicon": "",
+    "tags": "oldies,70s",
+    "countrycode": "DE",
+    "state": "Testland",
+    "codec": "MP3",
+    "bitrate": 128,
+    "hls": 0,
+    "lastcheckok": 1,
+    "clickcount": 5,
+    "votes": 0,
+    "geo_lat": 50.0,
+    "geo_long": 10.0
+  }
+]
