@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { emitTo, listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type {
+  ActivePlayer,
   Album,
   Artist,
   FavKind,
@@ -31,6 +32,8 @@ import type {
   Station,
   StationQueryArgs,
   Track,
+  YtmRect,
+  YtmState,
 } from './types';
 
 export type CoverSize = 96 | 300 | 600;
@@ -115,6 +118,17 @@ export const favoritesIds = () => call<FavoriteIds>('favorites_ids');
 export const favoritesTracks = () => call<Track[]>('favorites_tracks');
 export const favoritesAlbums = () => call<Album[]>('favorites_albums');
 export const favoritesArtists = () => call<Artist[]>('favorites_artists');
+
+// YouTube Music. Views go through `stores/ytm.svelte.ts`, not these wrappers directly.
+
+/** Puts the YouTube Music view at `rect` (created on first use) and shows it. */
+export const ytmShow = (rect: YtmRect) => call<void>('ytm_show', { rect });
+export const ytmHide = () => call<void>('ytm_hide');
+/** `action` is a fixed word the backend knows (`toggle`, `next`, ...). */
+export const ytmControl = (action: string) => call<void>('ytm_control', { action });
+export const ytmState = () => call<YtmState>('ytm_state');
+export const ytmSignIn = () => call<void>('ytm_sign_in');
+export const ytmSignOut = () => call<void>('ytm_sign_out');
 
 // Radio. Views go through `stores/radio.svelte.ts`, not these wrappers directly. The directory calls (`radioSearch`, `radioCountries`, `radioRegions`, `radioTags`)
 // reject with a `RadioFailure`.
@@ -255,5 +269,9 @@ export const onNavidromeStatus = (cb: (status: NavidromeStatus) => void): Promis
 /** The current station and its stream title (null title: none yet, or it ended). */
 export const onRadioNowPlaying = (cb: (now: NowPlaying) => void): Promise<UnlistenFn> =>
   listen<NowPlaying>('radio://now-playing', (event) => cb(event.payload));
+export const onYtmState = (cb: (state: YtmState) => void): Promise<UnlistenFn> =>
+  listen<YtmState>('ytm://state', (event) => cb(event.payload));
+export const onActivePlayer = (cb: (active: ActivePlayer) => void): Promise<UnlistenFn> =>
+  listen<ActivePlayer>('transport://active', (event) => cb(event.payload));
 export const onScanProgress = (cb: (progress: ScanProgress) => void): Promise<UnlistenFn> =>
   listen<ScanProgress>('library://scan-progress', (event) => cb(event.payload));

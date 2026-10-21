@@ -345,3 +345,28 @@ export interface RadioTag {
   name: string;
   stationCount: number;
 }
+
+/** Who answers the transport: Prism's engine or the YouTube Music page. */
+export type ActivePlayer = 'prism' | 'ytm';
+
+export type YtmStatus = 'idle' | 'playing' | 'paused' | 'unavailable';
+
+/** What the YouTube Music page last reported (`ytm://state`). Position and duration are 0
+ *  while unknown. */
+export interface YtmState {
+  status: YtmStatus;
+  title: string;
+  artist: string;
+  album: string;
+  coverId: string | null;
+  positionMs: number;
+  durationMs: number;
+}
+
+/** Where the YouTube Music view goes, in logical pixels of the main window. */
+export interface YtmRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
