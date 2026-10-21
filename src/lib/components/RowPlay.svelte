@@ -132,8 +132,11 @@
       transform var(--dur) ease-out;
   }
 
+  /* Fading out gives the mark its own stacking context, which paints it above the button in
+     the shared grid cell: it must let clicks through, or it takes those on the play icon. */
   .shown .mark {
     opacity: 0;
+    pointer-events: none;
   }
 
   .shown .play {
