@@ -14,6 +14,7 @@
 //! [`NavidromeService::connect`]).
 
 pub mod client;
+pub mod covers;
 pub mod keychain;
 pub mod sync;
 
@@ -111,6 +112,15 @@ pub enum NavidromeEvent {
 }
 
 pub type NavidromeEmit = Arc<dyn Fn(NavidromeEvent) + Send + Sync>;
+
+/// Deletes the cached cover files of the old server after a wipe.
+pub type CoverPurge = Arc<dyn Fn() + Send + Sync>;
+
+/// The cover purge, and whether a wipe happened before it was plugged in (at start).
+struct PurgeSlot {
+    hook: Option<CoverPurge>,
+    pending: bool,
+}
 
 #[derive(Clone, Copy, Debug)]
 pub struct ServiceOptions {
@@ -233,6 +243,7 @@ struct Core {
     online: Arc<AtomicBool>,
     /// Serializes connect and disconnect.
     account: Mutex<()>,
+    cover_purge: Mutex<PurgeSlot>,
     /// Test hook: the next cycle panics.
     #[cfg(test)]
     panic_next: AtomicBool,
@@ -274,6 +285,21 @@ impl Core {
         }
         change(&mut inner.status);
         self.publish(inner);
+    }
+
+    /// Deletes the cached covers of the old server, right after a wipe committed. Runs under
+    /// the account lock like the wipe, and outside `inner` and the database lock.
+    fn purge_covers(&self) {
+        let hook = {
+            let mut slot = guard(&self.cover_purge);
+            if slot.hook.is_none() {
+                slot.pending = true;
+            }
+            slot.hook.clone()
+        };
+        if let Some(hook) = hook {
+            hook();
+        }
     }
 
     fn is_current(&self, epoch: u64) -> bool {
@@ -457,6 +483,7 @@ impl NavidromeService {
         let mut status = NavidromeStatus::off();
         let mut client = None;
         let mut due = None;
+        let mut purge_pending = false;
         // Only a complete account reads the keychain.
         if let (Some(url), Some(user)) = (saved.navidrome_url, saved.navidrome_user) {
             status.configured = true;
@@ -470,7 +497,8 @@ impl NavidromeService {
                         // A hand-edited account is another server: its index is not this one.
                         let key = server_key(&built.account().url, &built.account().user);
                         match ensure_server(&db, &key) {
-                            Ok(_) => {
+                            Ok(wiped) => {
+                                purge_pending = wiped;
                                 client = Some(Arc::new(built));
                                 status.state = LinkState::Syncing;
                                 due = Some(Instant::now() + options.first_delay);
@@ -522,6 +550,10 @@ impl NavidromeService {
             wake: Condvar::new(),
             online,
             account: Mutex::new(()),
+            cover_purge: Mutex::new(PurgeSlot {
+                hook: None,
+                pending: purge_pending,
+            }),
             #[cfg(test)]
             panic_next: AtomicBool::new(false),
         });
@@ -629,6 +661,7 @@ impl NavidromeService {
         }
         let wiped = ensure_server(&core.db, &server_key(&url, &user));
         if matches!(wiped, Ok(true)) {
+            core.purge_covers();
             emit_wiped(core);
         }
         let (tracks, albums, last_sync) = core.counts();
@@ -691,7 +724,10 @@ impl NavidromeService {
             Ok(())
         })();
         match wiped {
-            Ok(()) => emit_wiped(core),
+            Ok(()) => {
+                core.purge_covers();
+                emit_wiped(core);
+            }
             Err(err) => {
                 first_error.get_or_insert(err);
             }
@@ -707,6 +743,20 @@ impl NavidromeService {
         match first_error {
             Some(err) => Err(err),
             None => Ok(()),
+        }
+    }
+
+    /// Plugs in the cover purge every wipe runs after its commit. A wipe at start (a
+    /// hand-edited account) happened before this, so it purges now.
+    pub fn set_cover_purge(&self, hook: CoverPurge) {
+        let _account = guard(&self.core.account);
+        let pending = {
+            let mut slot = guard(&self.core.cover_purge);
+            slot.hook = Some(Arc::clone(&hook));
+            std::mem::take(&mut slot.pending)
+        };
+        if pending {
+            hook();
         }
     }
 

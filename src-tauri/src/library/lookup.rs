@@ -253,7 +253,7 @@ fn candidates(db: &Db, now: i64) -> anyhow::Result<Vec<Candidate>> {
     let mut stmt = conn.prepare(
         "SELECT a.id, a.artist, a.title FROM albums a
          LEFT JOIN cover_lookups l ON l.album_id = a.id
-         WHERE a.cover_id IS NULL AND a.title <> ?1 AND a.artist <> ?2
+         WHERE a.source = 'local' AND a.cover_id IS NULL AND a.title <> ?1 AND a.artist <> ?2
            AND (l.album_id IS NULL OR (l.status = 'notfound' AND l.checked_at <= ?3))
          ORDER BY a.artist COLLATE NOCASE, a.title COLLATE NOCASE, a.id",
     )?;
@@ -708,6 +708,28 @@ mod tests {
         let fetcher = FakeFetcher::cover();
         assert_eq!(f.pass(&fetcher, NOW), 0);
         assert_eq!(fetcher.calls(), 0);
+    }
+
+    #[test]
+    fn server_albums_are_never_looked_up() {
+        let f = fixture();
+        f.db.0
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO albums (id, source, title, artist) VALUES
+                     ('navidrome:al-1', 'navidrome', 'Demo Album', 'Demo Artist')",
+                [],
+            )
+            .unwrap();
+        let fetcher = FakeFetcher::cover();
+        assert_eq!(f.pass(&fetcher, NOW), 0);
+        assert_eq!(fetcher.calls(), 0);
+        let local = f.album("Artist", "Album");
+        assert_eq!(f.pass(&fetcher, NOW), 1);
+        assert_eq!(fetcher.calls(), 1);
+        assert!(f.album_cover(&local).is_some());
+        assert_eq!(f.album_cover("navidrome:al-1"), None);
     }
 
     #[test]
