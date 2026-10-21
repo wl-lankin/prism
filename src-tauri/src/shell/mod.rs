@@ -6,6 +6,7 @@ pub mod shape;
 pub mod shortcut;
 #[cfg(target_os = "windows")]
 pub mod taskbar_win;
+pub mod transport;
 pub mod tray;
 
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};

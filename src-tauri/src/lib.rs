@@ -15,6 +15,7 @@ pub mod startup;
 pub mod thumbs;
 pub mod tools;
 pub mod window;
+pub mod ytm;
 
 use std::sync::{Arc, Mutex, OnceLock};
 
