@@ -5,13 +5,14 @@
   import { playAlbum } from '../play';
   import { notify } from '../stores/notice.svelte';
   import { saveScroll, savedScroll } from '../scroll';
-  import { go } from '../stores/nav.svelte';
+  import { go, nav } from '../stores/nav.svelte';
   import { player } from '../stores/player.svelte';
   import type { Album } from '../types';
   import { anchorOffset, gridLayout, visibleRange } from '../virtual';
   import Cover from './Cover.svelte';
   import Icon from './Icon.svelte';
   import NowPlayingBars from './NowPlayingBars.svelte';
+  import SourceBadge from './SourceBadge.svelte';
   import TrackMenu, { type TrackMenuState } from './TrackMenu.svelte';
 
   /** A card grid of albums, virtualized by rows: only the rows near the viewport exist. */
@@ -19,12 +20,15 @@
     albums,
     scrollKey,
     header,
+    showSource = false,
   }: {
     albums: Album[];
     /** Where the scroll position is remembered. */
     scrollKey: string;
     /** Rendered above the grid, scrolling with it. */
     header?: Snippet;
+    /** Marks each cover with its source; for lists that mix sources. */
+    showSource?: boolean;
   } = $props();
 
   const MIN_CARD = 180;
@@ -132,9 +136,11 @@
         {#each row.albums as album (album.id)}
           {@const playing = playingAlbum === album.id}
           <div class="card" role="none" oncontextmenu={(event) => openMenu(event, album)}>
-            <button type="button" class="open" onclick={() => go('album', album.id)}>
+            <!-- From a source view the album stays inside that source (the sidebar keeps it lit). -->
+            <button type="button" class="open" onclick={() => go('album', album.id, nav.source)}>
               <span class="art">
                 <Cover coverId={album.coverId} size={Math.round(layout.cardWidth)} fluid cache={300} radius="10px" />
+                {#if showSource}<SourceBadge source={album.source} />{/if}
               </span>
               <span class="title">
                 {#if playing}<NowPlayingBars playing={player.status === 'playing'} size={11} />{/if}
@@ -210,6 +216,7 @@
   }
 
   .art {
+    position: relative;
     display: block;
     width: 100%;
     border-radius: 10px;
@@ -219,6 +226,13 @@
 
   .card:hover .art {
     filter: brightness(1.08);
+  }
+
+  /* Bottom left, clear of the play button that rises on the right. */
+  .art :global(.source-badge) {
+    position: absolute;
+    left: 10px;
+    bottom: 10px;
   }
 
   .title {

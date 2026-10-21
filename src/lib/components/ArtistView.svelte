@@ -2,7 +2,7 @@
   import { t, tc } from '../i18n';
   import { libraryAlbumTracks, libraryArtistAlbums } from '../ipc';
   import { playIds, playShuffled } from '../play';
-  import { library } from '../stores/library.svelte';
+  import { hasMixedSources, library } from '../stores/library.svelte';
   import { back } from '../stores/nav.svelte';
   import { notify } from '../stores/notice.svelte';
   import type { Album } from '../types';
@@ -83,7 +83,8 @@
   {#if albums && albums.length === 0}<p class="missing">{t('artist.missing')}</p>{/if}
 {/snippet}
 
-<AlbumGrid albums={albums ?? []} scrollKey="artist:{name}" {header} />
+<!-- One page per name over every source: the cards say which source each album is from. -->
+<AlbumGrid albums={albums ?? []} scrollKey="artist:{name}" {header} showSource={hasMixedSources()} />
 
 <style>
   .back {

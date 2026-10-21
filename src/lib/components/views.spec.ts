@@ -1,6 +1,6 @@
 import { flushSync, mount, tick, unmount } from 'svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Album, Artist, Track } from '../types';
+import type { Album, Artist, NavidromeStatus, Track } from '../types';
 
 const track = (n: number, album = 'a1'): Track => ({
   id: `local:t${n}`,
@@ -950,5 +950,300 @@ describe('Row play button', () => {
     await click(button);
     expect(invoke).toHaveBeenCalledWith('player_toggle', undefined);
     unmount(app);
+  });
+});
+
+// Sources: the sidebar entries, the source views, the source badges and the offline state.
+describe('Sources', () => {
+  const ndAlbum: Album = {
+    ...album,
+    id: 'navidrome:al1',
+    source: 'navidrome',
+    title: 'Night Signals',
+    coverId: 'nd-al1',
+  };
+  const ndArtist: Artist = { ...artist, id: 'navidrome:ar1', source: 'navidrome', albumCount: 2, trackCount: 20 };
+  const ndTrack = (n: number): Track => ({ ...track(n), id: `navidrome:s${n}`, source: 'navidrome', path: null });
+
+  const status = (over: Partial<NavidromeStatus> = {}): NavidromeStatus => ({
+    configured: true,
+    url: null,
+    user: 'demo',
+    state: 'online',
+    lastSync: 1,
+    trackCount: 3,
+    albumCount: 1,
+    progress: null,
+    error: null,
+    ...over,
+  });
+
+  /** What the fake backend serves in this block. */
+  let served = { status: status(), local: 3, navidrome: 3 };
+  let impl: NonNullable<ReturnType<typeof invoke.getMockImplementation>>;
+
+  beforeEach(async () => {
+    served = { status: status(), local: 3, navidrome: 3 };
+    impl = invoke.getMockImplementation()!;
+    invoke.mockImplementation(async (cmd, args) => {
+      const source = (args as { source?: string } | undefined)?.source;
+      switch (cmd) {
+        case 'library_albums':
+          return [album, ndAlbum].filter((a) => (a.source === 'local' ? served.local : served.navidrome) > 0);
+        case 'library_artists':
+          return [artist, ndArtist].filter((a) => (a.source === 'local' ? served.local : served.navidrome) > 0);
+        case 'library_track_count':
+          return source === 'navidrome' ? served.navidrome : source === 'local' ? served.local : served.local + served.navidrome;
+        case 'library_tracks_range': {
+          const { offset, limit } = args as { offset: number; limit: number };
+          return Array.from({ length: limit }, (_, i) => (source === 'navidrome' ? ndTrack(offset + i) : track(offset + i)));
+        }
+        case 'navidrome_status':
+          return served.status;
+        case 'library_search':
+          return { albums: [ndAlbum], artists: [artist, ndArtist], tracks: [ndTrack(2)] };
+      }
+      return impl(cmd, args);
+    });
+    const { navidrome } = await import('../stores/navidrome.svelte');
+    Object.assign(navidrome, served.status);
+    const { go } = await import('../stores/nav.svelte');
+    go('home');
+  });
+
+  afterEach(() => invoke.mockImplementation(impl));
+
+  async function app(configure?: () => void) {
+    configure?.();
+    const { navidrome } = await import('../stores/navidrome.svelte');
+    Object.assign(navidrome, served.status);
+    const { default: App } = await import('../../App.svelte');
+    const mounted = mount(App, { target });
+    await vi.waitFor(async () => {
+      await settle();
+      expect(library.trackCounts?.all).toBe(served.local + served.navidrome);
+    });
+    await settle();
+    return mounted;
+  }
+
+  const entry = (label: string) =>
+    [...target.querySelectorAll<HTMLElement>('.sidebar .item')].find((b) => b.querySelector('.label')?.textContent === label);
+  const cardTitles = () => [...target.querySelectorAll('.card .title .text')].map((el) => el.textContent);
+
+  it('navidrome_entry_is_enabled_and_opens_its_albums', async () => {
+    const mounted = await app();
+    const item = entry('Navidrome')!;
+    expect(item.getAttribute('aria-disabled')).toBeNull();
+    expect(item.textContent).not.toContain('Coming soon');
+    item.click();
+    await settle();
+    expect(nav.view).toBe('albums');
+    expect(nav.source).toBe('navidrome');
+    expect(target.querySelector('.content h1')?.textContent).toBe('Navidrome');
+    expect(entry('Navidrome')!.getAttribute('aria-current')).toBe('page');
+    // The Library entries are lit only for the views of every source.
+    expect(entry('Albums')!.getAttribute('aria-current')).toBeNull();
+    // A switch between the source's albums, artists and songs.
+    const radios = [...target.querySelectorAll<HTMLElement>('.content [role="radio"]')];
+    expect(radios.map((r) => r.textContent?.trim())).toEqual(['Albums', 'Artists', 'Songs']);
+    radios[2].click();
+    await settle();
+    expect(nav.view).toBe('songs');
+    expect(nav.source).toBe('navidrome');
+    unmount(mounted);
+  });
+
+  it('has no YouTube placeholder in the sidebar', async () => {
+    const mounted = await app();
+    expect(entry('YouTube Music')).toBeUndefined();
+    unmount(mounted);
+  });
+
+  it('local_entry_passes_source_local', async () => {
+    const mounted = await app();
+    entry('Local files')!.click();
+    await settle();
+    expect(nav.view).toBe('albums');
+    expect(nav.source).toBe('local');
+    expect(cardTitles()).toEqual(['Glass Tides']);
+    expect(entry('Local files')!.getAttribute('aria-current')).toBe('page');
+    entry('Albums')!.click();
+    await settle();
+    expect(nav.source).toBeUndefined();
+    expect(entry('Albums')!.getAttribute('aria-current')).toBe('page');
+    expect(entry('Local files')!.getAttribute('aria-current')).toBeNull();
+    unmount(mounted);
+  });
+
+  it('navidrome_view_lists_only_navidrome_albums', async () => {
+    const mounted = await app();
+    entry('Albums')!.click();
+    await settle();
+    expect(cardTitles()).toEqual(['Glass Tides', 'Night Signals']);
+    entry('Navidrome')!.click();
+    await settle();
+    expect(cardTitles()).toEqual(['Night Signals']);
+    expect(target.querySelector('.content .viewhead .meta')?.textContent).toBe('1 album');
+    unmount(mounted);
+  });
+
+  it('songs_view_requests_its_source', async () => {
+    library.trackCounts = { all: 330, local: 30, navidrome: 300 };
+    library.version++;
+    const mounted = mount(SongList, { target, props: { source: 'navidrome' } });
+    await frame();
+    await settle();
+    const ranges = invoke.mock.calls.filter(([cmd]) => cmd === 'library_tracks_range');
+    expect(ranges).toEqual([['library_tracks_range', { offset: 0, limit: 200, source: 'navidrome' }]]);
+    expect((target.querySelector('[role="listbox"]') as HTMLElement).style.height).toBe(`${300 * 44}px`);
+    // A double-click queues the rows of the same source.
+    target.querySelectorAll('[role="option"]')[2].dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    await settle();
+    expect(invoke).toHaveBeenCalledWith('library_tracks_range', { offset: 0, limit: 1000, source: 'navidrome' });
+    const play = invoke.mock.calls.find(([cmd]) => cmd === 'player_play');
+    expect((play?.[1] as { trackIds: string[] }).trackIds[2]).toBe('navidrome:s2');
+    unmount(mounted);
+  });
+
+  it('badges_in_all_views_not_in_source_views', async () => {
+    const badges = () => [...target.querySelectorAll<HTMLElement>('.source-badge')];
+    const mounted = await app();
+    entry('Albums')!.click();
+    await settle();
+    expect(badges().map((b) => b.getAttribute('aria-label'))).toEqual(['Local files', 'Navidrome']);
+    expect(badges()[1].getAttribute('title')).toBe('Navidrome');
+    entry('Navidrome')!.click();
+    await settle();
+    expect(badges()).toHaveLength(0);
+
+    // Songs: on in the list of every source, off in a source's own list.
+    const { go } = await import('../stores/nav.svelte');
+    go('songs');
+    await frame();
+    await settle();
+    expect(badges().length).toBeGreaterThan(0);
+    go('songs', undefined, 'navidrome');
+    await frame();
+    await settle();
+    expect(target.querySelector('[role="option"]')).not.toBeNull();
+    expect(badges()).toHaveLength(0);
+    unmount(mounted);
+
+    // The search palette marks every result with its source.
+    vi.useFakeTimers();
+    const { app: open, input } = palette();
+    await search(input, 'night');
+    expect(badges().map((b) => b.getAttribute('aria-label'))).toEqual(['Navidrome', 'Local files', 'Navidrome', 'Navidrome']);
+    unmount(open);
+  });
+
+  it('not_configured_navidrome_offers_settings', async () => {
+    const mounted = await app(() => {
+      served.status = status({ configured: false, state: 'off', user: null, trackCount: 0, albumCount: 0, lastSync: null });
+      served.navidrome = 0;
+    });
+    entry('Navidrome')!.click();
+    await settle();
+    expect(target.querySelector('.content h1')?.textContent).toBe('Connect your Navidrome server');
+    const button = [...target.querySelectorAll<HTMLButtonElement>('.content button')].find((b) =>
+      b.textContent?.includes('Open settings'),
+    )!;
+    button.click();
+    await settle();
+    expect(nav.view).toBe('settings');
+    unmount(mounted);
+  });
+
+  it('shows the first sync with its progress', async () => {
+    const mounted = await app(() => {
+      served.status = status({ state: 'syncing', lastSync: null, trackCount: 0, progress: { done: 12_000, total: 31_204 } });
+      served.navidrome = 0;
+      served.local = 0;
+    });
+    entry('Navidrome')!.click();
+    await settle();
+    expect(target.querySelector('.content h1')?.textContent).toBe('Syncing your Navidrome library');
+    expect(target.querySelector('.content [role="status"]')?.textContent).toContain('12,000 of 31,204 songs');
+    // With no local files yet, the views of every source wait for the sync too.
+    entry('Home')!.click();
+    await settle();
+    expect(target.querySelector('.content h1')?.textContent).toBe('Syncing your Navidrome library');
+    unmount(mounted);
+  });
+
+  it('says calmly that an empty index waits for the server while offline', async () => {
+    const mounted = await app(() => {
+      served.status = status({ state: 'offline', trackCount: 0 });
+      served.navidrome = 0;
+    });
+    entry('Navidrome')!.click();
+    await settle();
+    expect(target.querySelector('.content h1')?.textContent).toBe('Navidrome is not reachable');
+    unmount(mounted);
+  });
+
+  it('offers a sync on an empty server', async () => {
+    const mounted = await app(() => {
+      served.status = status({ trackCount: 0 });
+      served.navidrome = 0;
+    });
+    entry('Navidrome')!.click();
+    await settle();
+    expect(target.querySelector('.content h1')?.textContent).toBe('No music on this server yet');
+    [...target.querySelectorAll<HTMLButtonElement>('.content button')].find((b) => b.textContent?.includes('Sync now'))!.click();
+    await settle();
+    expect(invoke).toHaveBeenCalledWith('navidrome_sync', undefined);
+    unmount(mounted);
+  });
+
+  it('keeps the index browsable while offline, with a hint', async () => {
+    const mounted = await app(() => {
+      served.status = status({ state: 'offline' });
+    });
+    entry('Navidrome')!.click();
+    await settle();
+    expect(cardTitles()).toEqual(['Night Signals']);
+    expect(target.querySelector('.content .source-hint')?.textContent).toContain('Offline');
+    unmount(mounted);
+  });
+
+  it('offline_dot_has_the_offline_label', async () => {
+    const { navidrome } = await import('../stores/navidrome.svelte');
+    const mounted = await app(() => {
+      served.status = status({ state: 'offline' });
+    });
+    const item = entry('Navidrome')!;
+    expect(item.getAttribute('aria-label')).toBe('Navidrome (offline)');
+    expect(item.querySelector('.dot')!.classList.contains('hollow')).toBe(true);
+    navidrome.state = 'error';
+    navidrome.error = { code: 'wrongCredentials', detail: null };
+    flushSync();
+    expect(item.getAttribute('aria-label')).toBe('Navidrome (sync failed)');
+    expect(item.querySelector('.dot')!.classList.contains('hollow')).toBe(true);
+    navidrome.state = 'online';
+    navidrome.error = null;
+    flushSync();
+    expect(item.getAttribute('aria-label')).toBeNull();
+    expect(item.querySelector('.dot')!.classList.contains('hollow')).toBe(false);
+    unmount(mounted);
+  });
+
+  it('artist_rows_keyed_by_id', async () => {
+    const { default: ArtistList } = await import('./ArtistList.svelte');
+    const mounted = mount(ArtistList, { target, props: { artists: [artist, ndArtist], showSource: true } });
+    flushSync();
+    const rows = [...target.querySelectorAll('.list li')];
+    expect(rows).toHaveLength(2);
+    expect(rows.map((r) => r.querySelector('.name')?.textContent)).toEqual(['Lumen Field', 'Lumen Field']);
+    // Two artists of one name read apart: a badge each, and the source in the counts line.
+    expect(rows.map((r) => r.querySelector('.source-badge')?.getAttribute('aria-label'))).toEqual(['Local files', 'Navidrome']);
+    expect(rows[0].querySelector('.counts')?.textContent).toContain('Local files');
+    expect(rows[1].querySelector('.counts')?.textContent).toContain('Navidrome');
+    // Both open the one artist page, a union over the sources.
+    rows[1].querySelector<HTMLButtonElement>('button')!.click();
+    expect(nav.view).toBe('artist');
+    expect(nav.param).toBe('Lumen Field');
+    unmount(mounted);
   });
 });

@@ -2,6 +2,7 @@ import { t } from './i18n';
 import { libraryAlbumTracks, libraryTracksRange, playerPlay, playlistEntries } from './ipc';
 import { notify } from './stores/notice.svelte';
 import { updateSettings } from './stores/settings.svelte';
+import type { Source } from './types';
 
 /** Songs queued around a double-clicked row of the Songs list. */
 export const SONGS_QUEUE = 1000;
@@ -76,11 +77,12 @@ export async function playPlaylist(
   }
 }
 
-/** Plays the Songs list from row `index`: queues the rows around it in list order. */
-export async function playSongsFrom(index: number): Promise<void> {
+/** Plays the Songs list (of one source, or of every source) from row `index`: queues the rows
+ *  around it in list order. */
+export async function playSongsFrom(index: number, source?: Source): Promise<void> {
   const offset = Math.max(0, index - SONGS_BEFORE);
   try {
-    const ids = (await libraryTracksRange(offset, SONGS_QUEUE)).map((track) => track.id);
+    const ids = (await libraryTracksRange(offset, SONGS_QUEUE, source)).map((track) => track.id);
     return playIds(ids, index - offset);
   } catch (err) {
     failed(err);

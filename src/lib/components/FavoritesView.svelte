@@ -11,7 +11,7 @@
   import { favoritesAlbums, favoritesArtists, favoritesTracks, libraryAlbumTracks, libraryArtistAlbums } from '../ipc';
   import { playIds, playShuffled } from '../play';
   import { FAVORITE_KEY, favorites, isFavorite, isFavoriteKey, toggleFavorite } from '../stores/favorites.svelte';
-  import { library } from '../stores/library.svelte';
+  import { hasMixedSources, library } from '../stores/library.svelte';
   import { go } from '../stores/nav.svelte';
   import { notify } from '../stores/notice.svelte';
   import { player } from '../stores/player.svelte';
@@ -24,6 +24,7 @@
   import Icon from './Icon.svelte';
   import NowPlayingBars from './NowPlayingBars.svelte';
   import RowPlay from './RowPlay.svelte';
+  import SourceBadge from './SourceBadge.svelte';
   import ViewHead from './ViewHead.svelte';
 
   /** Favorite songs, albums and artists in three tabs, narrowed by source with the chips. */
@@ -94,6 +95,8 @@
   const current = $derived(tabs.find((x) => x.kind === tab)!);
   const playingId = $derived(player.track?.id ?? null);
   const playingArtist = $derived(player.track?.albumArtist ?? null);
+  /** Items carry their source's dot once the library has more than one source. */
+  const mixed = $derived(hasMixedSources());
 
   function choose(kind: FavKind) {
     tab = kind;
@@ -260,7 +263,7 @@
 <div class="panel" id="fav-panel" role="tabpanel" aria-labelledby="fav-tab-{tab}">
   {#if tab === 'album' && shownAlbums.length}
     {#key source}
-      <AlbumGrid albums={shownAlbums} scrollKey="favorites:albums" {header} />
+      <AlbumGrid albums={shownAlbums} scrollKey="favorites:albums" {header} showSource={mixed} />
     {/key}
   {:else}
     <div class="scroll">
@@ -303,7 +306,10 @@
               <span class="num">
                 <RowPlay number={i + 1} name={track.title} current={playing} revealed={selected === i} onplay={() => play(i)} />
               </span>
-              <Cover coverId={track.coverId} size={38} cache={96} radius="7px" />
+              <span class="art">
+                <Cover coverId={track.coverId} size={38} cache={96} radius="7px" />
+                {#if mixed}<SourceBadge source={track.source} size={9} />{/if}
+              </span>
               <span class="name">
                 <span class="title">{track.title}</span>
                 <button type="button" class="sub link" tabindex="-1" onclick={() => go('artist', track.albumArtist || track.artist)}>
@@ -325,6 +331,7 @@
               <button type="button" class="open" onclick={() => go('artist', artist.name)}>
                 <span class="portrait">
                   <Cover coverId={artist.coverId} size={148} cache={300} radius="50%" alt="" />
+                  {#if mixed}<SourceBadge source={artist.source} size={12} />{/if}
                 </span>
                 <span class="who">
                   {#if playingArtist === artist.name}<NowPlayingBars playing={player.status === 'playing'} size={11} />{/if}
@@ -627,7 +634,28 @@
     outline-offset: 4px;
   }
 
+  .art {
+    position: relative;
+    display: block;
+    width: 38px;
+    height: 38px;
+  }
+
+  .art :global(.source-badge) {
+    position: absolute;
+    right: -2px;
+    bottom: -2px;
+  }
+
+  /* On the portrait's edge, like a presence dot. */
+  .portrait :global(.source-badge) {
+    position: absolute;
+    right: 14px;
+    bottom: 14px;
+  }
+
   .portrait {
+    position: relative;
     display: block;
     border-radius: 50%;
     box-shadow:

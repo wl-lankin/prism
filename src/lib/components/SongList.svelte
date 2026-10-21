@@ -1,4 +1,5 @@
 <script lang="ts">
+  import type { Snippet } from 'svelte';
   import { formatDuration } from '../format';
   import { t, tc } from '../i18n';
   import { libraryTracksRange } from '../ipc';
@@ -8,7 +9,7 @@
   import { go, nav } from '../stores/nav.svelte';
   import { FAVORITE_KEY, isFavoriteKey, toggleFavorite } from '../stores/favorites.svelte';
   import { player } from '../stores/player.svelte';
-  import type { Track } from '../types';
+  import type { Source, Track } from '../types';
   import { evictPages, pagesFor } from '../pages';
   import { visibleRange } from '../virtual';
   import { menuPoint } from '../menu';
@@ -16,16 +17,31 @@
   import TrackMenu, { type TrackMenuState } from './TrackMenu.svelte';
   import Heart from './Heart.svelte';
   import RowPlay from './RowPlay.svelte';
+  import SourceBadge from './SourceBadge.svelte';
   import ViewHead from './ViewHead.svelte';
 
-  /** Every track in one virtualized list. Rows are fetched in pages of 200 when they come
-   *  into view and kept in a cache that is dropped whenever the library changes. */
+  /** Every track (of one source, or of every source) in one virtualized list. Rows are
+   *  fetched in pages of 200 when they come into view and kept in a cache that is dropped
+   *  whenever the library changes. */
+  let {
+    source,
+    showSource = false,
+    header,
+  }: {
+    /** Lists only this source's tracks; none lists every source. */
+    source?: Source;
+    /** Marks each row's cover with its source; for lists that mix sources. */
+    showSource?: boolean;
+    /** Replaces the default heading. */
+    header?: Snippet;
+  } = $props();
+
   const ROW = 44;
   const PAGE = 200;
   /** Each source view keeps its own scroll position. */
   const KEY = $derived(`songs:${nav.source ?? 'all'}`);
 
-  const total = $derived(library.trackCounts?.all ?? 0);
+  const total = $derived((source ? library.trackCounts?.[source] : library.trackCounts?.all) ?? 0);
 
   /** At most this many pages stay cached; the ones farthest from the view are dropped. */
   const MAX_PAGES = 20;
@@ -74,7 +90,7 @@
       if (pages.get(page)?.version === version || pending.has(key)) continue;
       if ((failures.get(key) ?? 0) >= MAX_ATTEMPTS) continue;
       pending.add(key);
-      libraryTracksRange(page * PAGE, PAGE)
+      libraryTracksRange(page * PAGE, PAGE, source)
         .then((tracks) => {
           if (version !== library.version) return;
           pages.set(page, { version, tracks: tracks ?? [] });
@@ -183,7 +199,7 @@
       reveal(selected);
     } else if (event.key === 'Enter' && selected >= 0) {
       event.preventDefault();
-      void playSongsFrom(selected);
+      void playSongsFrom(selected, source);
     } else if (isFavoriteKey(event) && selected >= 0) {
       const track = trackAt(selected);
       if (!track) return;
@@ -194,7 +210,11 @@
 </script>
 
 <div class="scroll" bind:this={scroller} bind:clientHeight={viewport} {onscroll}>
-  <ViewHead title={t('nav.songs')} meta={tc('view.count.songs', total)} />
+  {#if header}
+    {@render header()}
+  {:else}
+    <ViewHead title={t('nav.songs')} meta={tc('view.count.songs', total)} />
+  {/if}
 
   <div class="cols" role="presentation">
     <span class="num">#</span>
@@ -222,7 +242,7 @@
     }}
     ondblclick={(event) => {
       const i = rowIndex(event);
-      if (i !== null) void playSongsFrom(i);
+      if (i !== null) void playSongsFrom(i, source);
     }}
     {@attach (node) => {
       listTop = node.offsetTop;
@@ -250,17 +270,20 @@
                 name={track.title}
                 current={playing}
                 revealed={selected === row.index}
-                onplay={() => void playSongsFrom(row.index)}
+                onplay={() => void playSongsFrom(row.index, source)}
               />
             {:else}
               {row.index + 1}
             {/if}
           </span>
           {#if track}
-            <Cover coverId={track.coverId} size={32} cache={96} radius="6px" />
+            <span class="art">
+              <Cover coverId={track.coverId} size={32} cache={96} radius="6px" />
+              {#if showSource}<SourceBadge source={track.source} size={8} />{/if}
+            </span>
             <span class="cell title">{track.title}</span>
             <span class="cell dim">{track.artist}</span>
-            <button type="button" class="cell dim link" tabindex="-1" onclick={() => go('album', track.albumId)}>
+            <button type="button" class="cell dim link" tabindex="-1" onclick={() => go('album', track.albumId, nav.source)}>
               {track.album}
             </button>
             <Heart kind="track" id={track.id} size={16} tabindex={-1} ghost revealed={selected === row.index} label={t('favorites.toggleItem', { name: track.title })} />
@@ -409,6 +432,19 @@
     text-decoration: underline;
     text-underline-offset: 3px;
     text-decoration-color: rgba(243, 243, 245, 0.35);
+  }
+
+  .art {
+    position: relative;
+    display: block;
+    width: 32px;
+    height: 32px;
+  }
+
+  .art :global(.source-badge) {
+    position: absolute;
+    right: -2px;
+    bottom: -2px;
   }
 
   .ghost-cover,
