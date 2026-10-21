@@ -2,8 +2,7 @@
   import { formatDuration, qualityLabel } from '../format';
   import { t, tc } from '../i18n';
   import { coverUrl, libraryAlbumTracks } from '../ipc';
-  import { playIds } from '../play';
-  import { shuffle } from '../flow';
+  import { playIds, playShuffled } from '../play';
   import { library } from '../stores/library.svelte';
   import { back, go } from '../stores/nav.svelte';
   import { FAVORITE_KEY, isFavoriteKey, toggleFavorite } from '../stores/favorites.svelte';
@@ -147,7 +146,7 @@
               <Icon name="play" size={16} filled />
               {t('album.play')}
             </button>
-            <button type="button" class="btn ghost" disabled={!ids.length} onclick={() => playIds(shuffle([...ids]), 0)}>
+            <button type="button" class="btn ghost" disabled={!ids.length} onclick={() => playShuffled(ids)}>
               <Icon name="shuffle" size={16} />
               {t('album.shuffle')}
             </button>

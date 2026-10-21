@@ -1,8 +1,7 @@
 <script lang="ts">
   import { t, tc } from '../i18n';
   import { libraryAlbumTracks, libraryArtistAlbums } from '../ipc';
-  import { playIds } from '../play';
-  import { shuffle } from '../flow';
+  import { playIds, playShuffled } from '../play';
   import { library } from '../stores/library.svelte';
   import { back } from '../stores/nav.svelte';
   import { notify } from '../stores/notice.svelte';
@@ -49,7 +48,7 @@
       notify(t('flow.failed', { message: String(err) }));
       return;
     }
-    await playIds(shuffled ? shuffle(ids) : ids, 0);
+    await (shuffled ? playShuffled(ids) : playIds(ids, 0));
   }
 </script>
 
