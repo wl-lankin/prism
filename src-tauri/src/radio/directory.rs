@@ -513,6 +513,8 @@ impl Directory {
         path: &str,
         params: &[(&str, String)],
     ) -> Result<Vec<u8>, DirectoryError> {
+        #[cfg(test)]
+        crate::radio::testserver::assert_loopback(base);
         let host = host_of(base);
         let response = self
             .client

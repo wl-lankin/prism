@@ -93,6 +93,35 @@ export async function setFavorite(kind: FavKind, id: string, on: boolean): Promi
   }
 }
 
+/** `setFavorite`'s optimistic change for a save that does not go through `favorites_set`
+ *  (stations): shows `on` at once, keeps it pending against reloads, runs `save`, and puts
+ *  the old state back on failure unless a later click changed it again. Rejects with the
+ *  save's error after the undo. */
+export async function changeFavorite(
+  kind: FavKind,
+  id: string,
+  on: boolean,
+  save: () => Promise<unknown>,
+): Promise<void> {
+  const set = setOf(kind);
+  const was = set.has(id);
+  const key = pendingKey(kind, id);
+  pending.set(key, on);
+  if (on) set.add(id);
+  else set.delete(id);
+  try {
+    await save();
+  } catch (err) {
+    if (pending.get(key) === on) {
+      if (was) set.add(id);
+      else set.delete(id);
+    }
+    throw err;
+  } finally {
+    if (pending.get(key) === on) pending.delete(key);
+  }
+}
+
 /** Flips one favorite. */
 export function toggleFavorite(kind: FavKind, id: string): Promise<void> {
   return setFavorite(kind, id, !isFavorite(kind, id));

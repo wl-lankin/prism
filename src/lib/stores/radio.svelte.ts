@@ -24,7 +24,7 @@ import type {
   Station,
   StationQueryArgs,
 } from '../types';
-import { favorites } from './favorites.svelte';
+import { changeFavorite, favorites } from './favorites.svelte';
 import { notify } from './notice.svelte';
 
 /** Results per search page ("Show more" asks for the next one). */
@@ -118,6 +118,7 @@ export async function redetectPlace(): Promise<void> {
 
 let searchRun = 0;
 let searchTimer: ReturnType<typeof setTimeout> | undefined;
+let searchPending = false;
 
 const hasFilter = (query: StationQueryArgs) =>
   Boolean(query.name?.trim() || query.countryCode || query.region || query.tag);
@@ -148,19 +149,25 @@ export function runSearch(query: StationQueryArgs): void {
   clearTimeout(searchTimer);
   const run = ++searchRun;
   radio.search.query = query;
+  // The old query's "more" must not page into the new one while the debounce waits.
+  radio.search.more = false;
+  searchPending = true;
   if (!hasFilter(query)) {
+    searchPending = false;
     radio.search.stations = [];
-    radio.search.more = false;
     radio.search.error = null;
     radio.search.loading = false;
     return;
   }
-  searchTimer = setTimeout(() => void fetchSearch(run, query, 0), SEARCH_DEBOUNCE_MS);
+  searchTimer = setTimeout(() => {
+    searchPending = false;
+    void fetchSearch(run, query, 0);
+  }, SEARCH_DEBOUNCE_MS);
 }
 
 /** Appends the next page of the current search. */
 export async function searchMore(): Promise<void> {
-  if (!radio.search.more || radio.search.loading) return;
+  if (searchPending || !radio.search.more || radio.search.loading) return;
   await fetchSearch(++searchRun, radio.search.query, radio.search.stations.length);
 }
 
@@ -180,21 +187,16 @@ export function playStation(station: Station): Promise<void> {
   return radioPlay(station);
 }
 
-/** Flips a station's heart: shown at once, saved through `radio_favorite`, and the saved
- *  lists reload afterwards. A failure puts the old state back with a notice. */
+/** Flips a station's heart: shown at once and saved through `radio_favorite`; the saved
+ *  lists reload on `favorites://changed`. A failure puts the old state back with a notice. */
 export async function toggleStationFavorite(station: Station): Promise<void> {
-  const was = favorites.stations.has(station.id);
-  if (was) favorites.stations.delete(station.id);
-  else favorites.stations.add(station.id);
+  const on = !favorites.stations.has(station.id);
   try {
-    await radioFavorite(station, !was);
+    await changeFavorite('station', station.id, on, () => radioFavorite(station, on));
   } catch (err) {
-    if (was) favorites.stations.add(station.id);
-    else favorites.stations.delete(station.id);
     notify(t('favorites.failed', { message: errorText(err) }));
-    return;
   }
-  await loadSaved();
+  // The saved lists reload on the `favorites://changed` event the backend sends.
 }
 
 /** The country's name in the UI language ("DE" -> "Germany"); the code when it is unknown. */

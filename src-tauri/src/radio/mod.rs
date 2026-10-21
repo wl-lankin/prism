@@ -35,7 +35,7 @@ use directory::{
     clean_text, Country, Directory, DirectoryError, MirrorSource, Region, StationQuery, TagCount,
     MIRROR_TTL,
 };
-use location::{place_from_json, place_to_json, resolve_place, Locator, Place, PlaceOrigin};
+use location::{place_from_json, place_to_json, resolve_place_with, Locator, Place, PlaceOrigin};
 use model::{clean_name, clean_tags, http_url, station_uuid, Station, RADIO_PREFIX};
 use near::{NEAR_MAX, NEAR_RADIUS_KM};
 
@@ -51,9 +51,12 @@ const TOP_TAGS: u32 = 40;
 const STATE_PLACE: &str = "place";
 const STATE_MIRRORS: &str = "mirrors";
 const STATE_NEAR: &str = "near:";
+/// Near lists of this many places stay cached (home, a manual choice, one more).
+const NEAR_KEEP: usize = 3;
 
-/// Receives the stream titles of the station that plays (`None`: no title, or a new station).
-pub type TitleSink = Arc<dyn Fn(Option<String>) + Send + Sync>;
+pub use crate::audio::live::TitleSink;
+/// Receives every title change of the current station, with its id (for the media controls).
+pub type OnTitle = Arc<dyn Fn(&str, Option<String>) + Send + Sync>;
 /// A stored station by id, for the radio opener.
 pub type StationLookup = Arc<dyn Fn(&str) -> Option<Station> + Send + Sync>;
 /// The system locale (`de-DE`), asked only when no other place is known.
@@ -332,7 +335,7 @@ pub struct RadioService {
     locale_source: LocaleSource,
     locale: OnceLock<String>,
     emit: RadioEmit,
-    on_title: TitleSink,
+    on_title: OnTitle,
     options: RadioOptions,
     countries: Mutex<Option<Vec<Country>>>,
     regions: Mutex<HashMap<String, Vec<Region>>>,
@@ -341,6 +344,12 @@ pub struct RadioService {
     mirrors_checked: AtomicBool,
     /// True once [`RadioService::shutdown`] ran; wakes the refresh thread.
     stop: Arc<(Mutex<bool>, Condvar)>,
+}
+
+impl Drop for RadioService {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
 }
 
 impl RadioService {
@@ -352,7 +361,7 @@ impl RadioService {
         locator: Arc<dyn Locator>,
         locale: LocaleSource,
         emit: RadioEmit,
-        on_title: TitleSink,
+        on_title: OnTitle,
     ) -> Arc<RadioService> {
         RadioService::spawn_with_options(
             db,
@@ -374,7 +383,7 @@ impl RadioService {
         locator: Arc<dyn Locator>,
         locale: LocaleSource,
         emit: RadioEmit,
-        on_title: TitleSink,
+        on_title: OnTitle,
         options: RadioOptions,
     ) -> Arc<RadioService> {
         let service = Arc::new_cyclic(|me| RadioService {
@@ -407,6 +416,8 @@ impl RadioService {
     }
 
     fn locale(&self) -> &str {
+        // Only the locale fallback of `resolve` asks, so macOS spawns `defaults` at most once
+        // and only when nothing else names a country.
         self.locale.get_or_init(|| (self.locale_source)())
     }
 
@@ -447,11 +458,11 @@ impl RadioService {
             }),
             _ => stored.clone(),
         };
-        let (place, store_it) = resolve_place(
+        let (place, store_it) = resolve_place_with(
             &setting,
             cached,
             self.locator.as_ref(),
-            self.locale(),
+            &|| self.locale().to_owned(),
             now_ms(),
         );
         if store_it {
@@ -495,6 +506,7 @@ impl RadioService {
                 .unwrap_or_default();
                 let written = lock(&self.db).and_then(|conn| {
                     store::state_set(&conn, &key, &json)?;
+                    store::prune_near_state(&conn, STATE_NEAR, NEAR_KEEP)?;
                     store::remember_favicons(&conn, &stations)
                 });
                 if let Err(err) = written {
@@ -718,22 +730,34 @@ impl RadioService {
         }
     }
 
-    /// Where the opener sends stream titles: kept for the current station, emitted as
-    /// `radio://now-playing` and handed to `on_title`. An unchanged title is not sent again.
-    pub fn title_sink(&self) -> TitleSink {
+    /// Where the opener of `station_id` sends its stream titles. A title counts only while
+    /// that station is the current one (a stream still closing never titles the next
+    /// station); it is kept, emitted as `radio://now-playing` and handed to `on_title`. An
+    /// unchanged title is not sent again.
+    pub fn title_sink_for(&self, station_id: &str) -> TitleSink {
         let me = self.me.clone();
+        let station_id = station_id.to_owned();
         Arc::new(move |title: Option<String>| {
             if let Some(service) = me.upgrade() {
-                service.stream_title(title);
+                service.stream_title(&station_id, title);
             }
         })
     }
 
-    fn stream_title(&self, title: Option<String>) {
+    /// [`RadioService::title_sink_for`] as a factory, for the radio opener.
+    pub fn title_sinks(&self) -> Arc<dyn Fn(&str) -> TitleSink + Send + Sync> {
+        let me = self.me.clone();
+        Arc::new(move |station_id: &str| match me.upgrade() {
+            Some(service) => service.title_sink_for(station_id),
+            None => Arc::new(|_| {}),
+        })
+    }
+
+    fn stream_title(&self, station_id: &str, title: Option<String>) {
         let title = title.filter(|title| !title.trim().is_empty());
         let event = {
             let mut current = guard(&self.current);
-            let Some(now) = current.as_mut() else {
+            let Some(now) = current.as_mut().filter(|now| now.station_id == station_id) else {
                 return;
             };
             if now.title == title {
@@ -743,7 +767,7 @@ impl RadioService {
             now.clone()
         };
         (self.emit)(RadioEvent::NowPlaying(event));
-        (self.on_title)(title);
+        (self.on_title)(station_id, title);
     }
 
     /// The current station and its title, for windows that load later.
@@ -789,15 +813,23 @@ impl RadioService {
             .collect();
         let written = lock(&self.db).and_then(|conn| {
             let now = now_ms();
+            let mut updated = 0;
             for station in &changed {
-                store::upsert_station(&conn, station, now)?;
+                // A station pruned while the directory answered stays gone.
+                if store::station(&conn, &station.id)?.is_some() {
+                    store::upsert_station(&conn, station, now)?;
+                    updated += 1;
+                }
             }
-            Ok(())
+            Ok(updated)
         });
-        if let Err(err) = written {
-            eprintln!("writing refreshed stations failed: {err:#}");
+        match written {
+            Ok(updated) => Ok(updated),
+            Err(err) => {
+                eprintln!("writing refreshed stations failed: {err:#}");
+                Ok(0)
+            }
         }
-        Ok(changed.len())
     }
 
     /// Refreshes the mirror list in the background the first time the directory is used in

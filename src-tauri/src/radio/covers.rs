@@ -4,13 +4,19 @@
 //! Every fetch is capped (size, time, redirects) and decoded with bounds before the gate sees
 //! the bytes. A logo that no candidate delivers is remembered as missing for 7 days, so a
 //! scrolling list does not ask again; a host that does not answer at all is not remembered
-//! (the user may just be offline).
+//! (the user may just be offline). Logo URLs come from directory data, so no fetch, redirect or
+//! resolved host name may reach a private network; such a URL counts as missing.
 
+use std::future::Future;
 use std::io::{Cursor, Read};
-use std::sync::Arc;
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use reqwest::blocking::Client;
+use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use reqwest::redirect::Policy;
 use reqwest::Url;
 
@@ -52,31 +58,182 @@ enum Attempt<T> {
     NoAnswer,
 }
 
+/// A logo URL that points into a private network (the user's router, the machine itself):
+/// directory data must never make Prism ask there.
+#[derive(Debug)]
+struct PrivateAddress;
+
+impl std::fmt::Display for PrivateAddress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("a logo address in a private network")
+    }
+}
+
+impl std::error::Error for PrivateAddress {}
+
+/// True for an address on the public internet: not loopback, private, link local, shared
+/// (100.64/10), unspecified, multicast, broadcast or unique local; IPv4-mapped IPv6 counts as
+/// its IPv4 address.
+pub(crate) fn is_public(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let [a, b, ..] = v4.octets();
+            !(v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_multicast()
+                || v4.is_broadcast()
+                || a == 0
+                || (a == 100 && (64..128).contains(&b)))
+        }
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => is_public(IpAddr::V4(v4)),
+            None => {
+                let first = v6.segments()[0];
+                !(v6.is_loopback()
+                    || v6.is_unspecified()
+                    || v6.is_multicast()
+                    || (first & 0xffc0) == 0xfe80
+                    || (first & 0xfe00) == 0xfc00)
+            }
+        },
+    }
+}
+
+/// False for a URL whose host is a literal non-public address. Host names are checked by
+/// [`PublicResolver`] after the lookup.
+fn url_allowed(url: &Url, allow_private: bool) -> bool {
+    let literal = url
+        .host_str()
+        .map(|host| host.trim_start_matches('[').trim_end_matches(']'))
+        .and_then(|host| host.parse::<IpAddr>().ok());
+    allow_private || literal.is_none_or(is_public)
+}
+
+fn refused_as_private(err: &reqwest::Error) -> bool {
+    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(err);
+    while let Some(cause) = source {
+        if cause.is::<PrivateAddress>() {
+            return true;
+        }
+        source = cause.source();
+    }
+    false
+}
+
+type Lookup = Result<Addrs, Box<dyn std::error::Error + Send + Sync>>;
+
+/// Resolves with the system resolver and keeps only public addresses; none left is an error.
+/// The system lookup blocks, so it runs on a thread of its own.
+struct PublicResolver;
+
+impl Resolve for PublicResolver {
+    fn resolve(&self, name: Name) -> Resolving {
+        Box::pin(BlockingLookup::start(name.as_str().to_owned()))
+    }
+}
+
+struct BlockingLookup {
+    slot: Arc<Mutex<(Option<Lookup>, Option<Waker>)>>,
+}
+
+impl BlockingLookup {
+    fn start(host: String) -> BlockingLookup {
+        let slot: Arc<Mutex<(Option<Lookup>, Option<Waker>)>> = Arc::default();
+        let filled = Arc::clone(&slot);
+        let finish = move |result: Lookup| {
+            let mut slot = filled.lock().unwrap_or_else(|e| e.into_inner());
+            slot.0 = Some(result);
+            if let Some(waker) = slot.1.take() {
+                waker.wake();
+            }
+        };
+        let spawned = std::thread::Builder::new()
+            .name("prism-logo-dns".into())
+            .spawn({
+                let finish = finish.clone();
+                move || finish(public_addrs(&host))
+            });
+        if let Err(err) = spawned {
+            finish(Err(Box::new(err)));
+        }
+        BlockingLookup { slot }
+    }
+}
+
+impl Future for BlockingLookup {
+    type Output = Lookup;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Lookup> {
+        let mut slot = self.slot.lock().unwrap_or_else(|e| e.into_inner());
+        match slot.0.take() {
+            Some(result) => Poll::Ready(result),
+            None => {
+                slot.1 = Some(cx.waker().clone());
+                Poll::Pending
+            }
+        }
+    }
+}
+
+fn public_addrs(host: &str) -> Lookup {
+    let all: Vec<SocketAddr> = (host, 0).to_socket_addrs()?.collect();
+    if all.is_empty() {
+        return Err(Box::new(std::io::Error::from(std::io::ErrorKind::NotFound)));
+    }
+    let public: Vec<SocketAddr> = all.into_iter().filter(|a| is_public(a.ip())).collect();
+    if public.is_empty() {
+        return Err(Box::new(PrivateAddress));
+    }
+    Ok(Box::new(public.into_iter()))
+}
+
 pub struct FaviconCovers {
     db: Arc<Db>,
     client: Client,
+    /// Only the tests, whose hosts are on 127.0.0.1, allow private addresses.
+    allow_private: bool,
 }
 
 impl FaviconCovers {
     pub fn new(db: Arc<Db>) -> anyhow::Result<FaviconCovers> {
-        let client = Client::builder()
+        FaviconCovers::with_private(db, false)
+    }
+
+    pub(crate) fn with_private(db: Arc<Db>, allow_private: bool) -> anyhow::Result<FaviconCovers> {
+        let mut builder = Client::builder()
             .user_agent(USER_AGENT)
             .connect_timeout(CONNECT_TIMEOUT)
-            .redirect(Policy::custom(|attempt| {
+            .redirect(Policy::custom(move |attempt| {
                 // `previous` holds every URL asked so far, the first one included.
                 if attempt.previous().len() > MAX_REDIRECTS {
                     attempt.error("too many redirects")
-                } else if matches!(attempt.url().scheme(), "http" | "https") {
-                    attempt.follow()
-                } else {
+                } else if !matches!(attempt.url().scheme(), "http" | "https") {
                     attempt.stop()
+                } else if !url_allowed(attempt.url(), allow_private) {
+                    attempt.error(PrivateAddress)
+                } else {
+                    attempt.follow()
                 }
-            }))
-            .build()?;
-        Ok(FaviconCovers { db, client })
+            }));
+        if !allow_private {
+            builder = builder.dns_resolver(Arc::new(PublicResolver));
+        }
+        Ok(FaviconCovers {
+            db,
+            client: builder.build()?,
+            allow_private,
+        })
     }
 
     fn get(&self, url: &Url, timeout: Duration, accept: &str) -> Attempt<Response> {
+        #[cfg(test)]
+        crate::radio::testserver::assert_loopback(url.as_str());
+        // Refused like a host that answered with nothing: remembered as missing.
+        if !url_allowed(url, self.allow_private) {
+            return Attempt::Answered;
+        }
         match self
             .client
             .get(url.clone())
@@ -86,7 +243,9 @@ impl FaviconCovers {
         {
             Ok(response) if response.status().is_success() => Attempt::Got(response),
             Ok(_) => Attempt::Answered,
-            Err(err) if err.is_redirect() || err.is_status() => Attempt::Answered,
+            Err(err) if err.is_redirect() || err.is_status() || refused_as_private(&err) => {
+                Attempt::Answered
+            }
             Err(_) => Attempt::NoAnswer,
         }
     }
@@ -663,7 +822,7 @@ mod tests {
     impl Env {
         fn new() -> Env {
             let db = Arc::new(Db::open_in_memory().unwrap());
-            let covers = FaviconCovers::new(Arc::clone(&db)).unwrap();
+            let covers = FaviconCovers::with_private(Arc::clone(&db), true).unwrap();
             Env { db, covers }
         }
 
@@ -759,7 +918,10 @@ mod tests {
         // The gate encodes it like any cover.
         let dir = tempfile::tempdir().unwrap();
         let gate = ResizeGate::new(2);
-        attach(&gate, &env.db).unwrap();
+        gate.set_remote_for(
+            RADIO_COVER_PREFIX,
+            Arc::new(FaviconCovers::with_private(Arc::clone(&env.db), true).unwrap()),
+        );
         let store = crate::library::covers::CoverStore::new(dir.path().join("original"));
         let id = format!("{RADIO_COVER_PREFIX}{raw}");
         for size in SIZES {
@@ -849,6 +1011,136 @@ mod tests {
         );
         assert_eq!(env.covers.fetch(&raw, 96), Err(ResizeError::Unreachable));
         assert_eq!(env.missing_until(&raw), None);
+    }
+
+    #[test]
+    fn private_addresses_are_refused() {
+        let web = FakeWeb::start();
+        web.set("/logo.png", Page::ok("image/png", png()));
+        web.set(
+            "/",
+            Page::ok("text/html", r#"<link rel="icon" href="/logo.png">"#),
+        );
+        let env = Env::new();
+        let covers = FaviconCovers::new(Arc::clone(&env.db)).unwrap();
+        let port = web
+            .url("/")
+            .split(':')
+            .nth(2)
+            .unwrap()
+            .trim_end_matches('/')
+            .to_owned();
+        for (favicon, homepage) in [
+            (Some(web.url("/logo.png")), None),
+            (None, Some(web.url("/"))),
+            // A host name that resolves to this machine.
+            (Some(format!("http://localhost:{port}/logo.png")), None),
+            (Some(format!("http://[::1]:{port}/logo.png")), None),
+            (
+                Some(format!("http://[::ffff:127.0.0.1]:{port}/logo.png")),
+                None,
+            ),
+        ] {
+            let raw = env.station(favicon.as_deref(), homepage.as_deref());
+            assert_eq!(
+                covers.fetch(&raw, 96),
+                Err(ResizeError::Unknown),
+                "{favicon:?} {homepage:?}"
+            );
+            assert!(env.missing_until(&raw).is_some(), "remembered as missing");
+        }
+        assert_eq!(
+            web.hits("/logo.png") + web.hits("/") + web.hits("/favicon.ico"),
+            0
+        );
+        // A redirect into a private network is refused like a first request.
+        for target in [
+            "http://127.0.0.1/logo.png",
+            "http://10.0.0.1/",
+            "http://192.168.1.1/",
+            "http://172.16.0.1/",
+            "http://169.254.169.254/",
+            "http://100.64.0.1/",
+            "http://0.0.0.0/",
+            "http://255.255.255.255/",
+            "http://224.0.0.1/",
+            "http://[::1]/",
+            "http://[::]/",
+            "http://[fe80::1]/",
+            "http://[fd00::1]/",
+            "http://[ff02::1]/",
+            "http://[::ffff:10.0.0.1]/",
+        ] {
+            assert!(
+                !url_allowed(&Url::parse(target).unwrap(), false),
+                "{target}"
+            );
+            assert!(url_allowed(&Url::parse(target).unwrap(), true), "{target}");
+        }
+        for public in [
+            "https://radio.example.org/",
+            "http://93.184.216.34/",
+            "http://[2001:db8::1]/",
+        ] {
+            assert!(url_allowed(&Url::parse(public).unwrap(), false), "{public}");
+        }
+    }
+
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut crc = 0xffff_ffffu32;
+        for byte in bytes {
+            crc ^= u32::from(*byte);
+            for _ in 0..8 {
+                crc = if crc & 1 == 1 {
+                    (crc >> 1) ^ 0xedb8_8320
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        !crc
+    }
+
+    /// A PNG whose header claims `side` x `side` pixels, with no image data.
+    fn png_claiming(side: u32) -> Vec<u8> {
+        let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+        let mut chunk = |kind: &[u8], data: &[u8]| {
+            out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            let mut body = kind.to_vec();
+            body.extend_from_slice(data);
+            out.extend_from_slice(&body);
+            out.extend_from_slice(&crc32(&body).to_be_bytes());
+        };
+        let mut header = side.to_be_bytes().to_vec();
+        header.extend_from_slice(&side.to_be_bytes());
+        header.extend_from_slice(&[8, 6, 0, 0, 0]);
+        chunk(b"IHDR", &header);
+        chunk(b"IEND", &[]);
+        out
+    }
+
+    #[test]
+    fn decompression_bombs_are_unknown() {
+        let bomb = png_claiming(100_000);
+        let mut ico = vec![0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 1, 0, 32, 0];
+        ico.extend_from_slice(&(bomb.len() as u32).to_le_bytes());
+        ico.extend_from_slice(&22u32.to_le_bytes());
+        ico.extend_from_slice(&bomb);
+        let web = FakeWeb::start();
+        web.set("/bomb.png", Page::ok("image/png", bomb));
+        web.set("/bomb.ico", Page::ok("image/x-icon", ico));
+        let env = Env::new();
+        for path in ["/bomb.png", "/bomb.ico"] {
+            let raw = env.station(Some(&web.url(path)), None);
+            assert_eq!(
+                env.covers.fetch(&raw, 96),
+                Err(ResizeError::Unknown),
+                "{path}"
+            );
+            assert_eq!(web.hits(path), 1);
+        }
+        // Refused by the dimension bound, before anything is allocated for the pixels.
+        assert!(!decodes(&png_claiming(100_000)));
     }
 
     #[test]

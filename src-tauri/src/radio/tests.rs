@@ -96,7 +96,7 @@ impl Env {
                 Arc::clone(&locator) as Arc<dyn Locator>,
                 Arc::new(|| "de-DE".to_owned()),
                 Arc::new(move |event| events.lock().unwrap().push(event)),
-                Arc::new(move |title| titles.lock().unwrap().push(title)),
+                Arc::new(move |_: &str, title| titles.lock().unwrap().push(title)),
                 options,
             )
         };
@@ -572,13 +572,14 @@ fn old_mirror_lists_are_refreshed_and_cached() {
 #[test]
 fn titles_emit_and_reset() {
     let env = Env::start(vec![FakeStation::new(1), FakeStation::new(2)]);
-    let sink = env.service.title_sink();
+    let first = found(&env, 1);
+    let sink = (env.service.title_sinks())(&first.id);
     // No station yet: nothing to attach a title to.
     sink(Some("Nobody - Nothing".into()));
     assert!(env.events.lock().unwrap().is_empty());
     assert_eq!(env.service.now_playing(), None);
 
-    let one = env.service.play_prepared(found(&env, 1)).unwrap();
+    let one = env.service.play_prepared(first).unwrap();
     sink(None);
     sink(Some("A - One".into()));
     sink(Some("A - One".into()));
@@ -618,7 +619,13 @@ fn titles_emit_and_reset() {
             title: None
         })
     );
-    sink(Some("C - Three".into()));
+    // The first station's stream is still closing: its title changes nothing.
+    let events = env.events.lock().unwrap().len();
+    sink(Some("Late - Title".into()));
+    assert_eq!(env.events.lock().unwrap().len(), events);
+    assert_eq!(env.service.now_playing().unwrap().title, None);
+
+    env.service.title_sink_for(&two.id)(Some("C - Three".into()));
     assert_eq!(
         env.events.lock().unwrap().last(),
         Some(&RadioEvent::NowPlaying(NowPlaying {
@@ -626,6 +633,128 @@ fn titles_emit_and_reset() {
             title: Some("C - Three".into())
         }))
     );
+    assert_eq!(
+        env.titles.lock().unwrap().last(),
+        Some(&Some("C - Three".to_owned()))
+    );
+}
+
+#[test]
+fn a_pruned_station_is_not_brought_back_by_a_refresh() {
+    /// Prunes every station while the directory "answers".
+    struct Pruning {
+        inner: Directory,
+        db: Arc<Db>,
+    }
+    impl DirectoryApi for Pruning {
+        fn search(&self, query: &StationQuery) -> Result<Vec<Station>, DirectoryError> {
+            self.inner.search(query)
+        }
+        fn by_uuids(&self, uuids: &[&str]) -> Result<Vec<Station>, DirectoryError> {
+            let conn = self.db.0.lock().unwrap();
+            conn.execute("DELETE FROM radio_stations", []).unwrap();
+            drop(conn);
+            self.inner.by_uuids(uuids)
+        }
+        fn countries(&self) -> Result<Vec<Country>, DirectoryError> {
+            self.inner.countries()
+        }
+        fn states(&self, name: &str) -> Result<Vec<Region>, DirectoryError> {
+            self.inner.states(name)
+        }
+        fn top_tags(&self, limit: u32) -> Result<Vec<TagCount>, DirectoryError> {
+            self.inner.top_tags(limit)
+        }
+        fn click(&self, uuid: &str) -> Result<(), DirectoryError> {
+            self.inner.click(uuid)
+        }
+        fn refresh_mirrors(&self) -> Result<Vec<String>, DirectoryError> {
+            self.inner.refresh_mirrors()
+        }
+    }
+
+    let fake = FakeDirectory::start(vec![FakeStation::new(1)]);
+    let dir = tempfile::tempdir().unwrap();
+    let db = Arc::new(Db::open_in_memory().unwrap());
+    let service = RadioService::spawn_with_options(
+        Arc::clone(&db),
+        Arc::new(SettingsStore::load(&dir.path().join("settings.json"))),
+        Arc::new(Pruning {
+            inner: Directory::new(MirrorSource::Fixed(vec![fake.url()])).unwrap(),
+            db: Arc::clone(&db),
+        }),
+        Arc::new(FakeLocator {
+            calls: AtomicUsize::new(0),
+            fail: AtomicBool::new(true),
+        }),
+        Arc::new(|| "de-DE".to_owned()),
+        Arc::new(|_| {}),
+        Arc::new(|_: &str, _| {}),
+        RadioOptions {
+            first_refresh: Duration::from_secs(3600),
+            ..RadioOptions::default()
+        },
+    );
+    let mut station = service.search(StationQuery::default()).unwrap().remove(0);
+    station.name = "Old Name".into();
+    let id = service.play_prepared(station).unwrap();
+    // The directory knows a changed station, but it was pruned meanwhile.
+    assert_eq!(service.refresh_stations(), Ok(0));
+    let conn = db.0.lock().unwrap();
+    assert_eq!(store::station(&conn, &id).unwrap(), None);
+}
+
+#[test]
+fn the_locale_is_read_only_as_the_last_resort() {
+    let asked = Arc::new(AtomicUsize::new(0));
+    let fake = FakeDirectory::start(Vec::new());
+    let directory = Directory::new(MirrorSource::Fixed(vec![fake.url()])).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let locator = Arc::new(FakeLocator {
+        calls: AtomicUsize::new(0),
+        fail: AtomicBool::new(false),
+    });
+    let counted = Arc::clone(&asked);
+    let service = RadioService::spawn(
+        Arc::new(Db::open_in_memory().unwrap()),
+        Arc::new(SettingsStore::load(&dir.path().join("settings.json"))),
+        Arc::new(directory),
+        Arc::clone(&locator) as Arc<dyn Locator>,
+        Arc::new(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+            "de-AT".to_owned()
+        }),
+        Arc::new(|_| {}),
+        Arc::new(|_: &str, _| {}),
+    );
+    assert_eq!(service.place().origin, PlaceOrigin::Detected);
+    assert_eq!(asked.load(Ordering::SeqCst), 0);
+    locator.fail.store(true, Ordering::SeqCst);
+    assert_eq!(
+        service.redetect().origin,
+        PlaceOrigin::Detected,
+        "the stored place stays"
+    );
+    assert_eq!(asked.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn near_lists_of_three_places_stay_cached() {
+    let env = Env::start(around_testhausen());
+    for country in ["DE", "AT", "CH", "FR"] {
+        env.manual(country, None);
+        env.service.near(true);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let conn = env.db.0.lock().unwrap();
+    let keys: Vec<String> = conn
+        .prepare("SELECT key FROM radio_state WHERE key LIKE 'near:%' ORDER BY key")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(keys, vec!["near:AT||-", "near:CH||-", "near:FR||-"]);
 }
 
 #[test]

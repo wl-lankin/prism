@@ -116,7 +116,7 @@ export const favoritesTracks = () => call<Track[]>('favorites_tracks');
 export const favoritesAlbums = () => call<Album[]>('favorites_albums');
 export const favoritesArtists = () => call<Artist[]>('favorites_artists');
 
-// Radio. The directory calls (`radioSearch`, `radioCountries`, `radioRegions`, `radioTags`)
+// Radio. Views go through `stores/radio.svelte.ts`, not these wrappers directly. The directory calls (`radioSearch`, `radioCountries`, `radioRegions`, `radioTags`)
 // reject with a `RadioFailure`.
 
 export const radioPlace = () => call<Place>('radio_place');

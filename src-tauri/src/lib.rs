@@ -88,6 +88,7 @@ fn radio_service(
     db: &Arc<db::Db>,
     settings: &Arc<SettingsStore>,
     handle: tauri::AppHandle,
+    media: Arc<MediaBridge>,
 ) -> Arc<RadioService> {
     #[cfg(debug_assertions)]
     let (fixed, geo) = (
@@ -110,8 +111,7 @@ fn radio_service(
         locator,
         Arc::new(startup::system_locale),
         radio_emit(handle),
-        // The media controls show the station name until they take live titles.
-        Arc::new(|_| {}),
+        Arc::new(move |station_id: &str, title| media.set_live_title(station_id.to_owned(), title)),
         RadioOptions {
             discover_mirrors,
             ..RadioOptions::default()
@@ -261,7 +261,7 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
         navidrome_emit(handle.clone()),
     );
     // Before the player: its resolver reads stations from the radio store.
-    let radio = radio_service(&library.db, &settings, handle.clone());
+    let radio = radio_service(&library.db, &settings, handle.clone(), Arc::clone(&media));
     let player = Player::spawn_with_options(
         Arc::new(CpalOutputFactory),
         radio::resolver(

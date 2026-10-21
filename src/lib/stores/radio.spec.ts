@@ -59,6 +59,16 @@ const near = (patch: Partial<NearResult>): NearResult => ({
   ...patch,
 });
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 /** Calls to one command, in order. */
 const calls = (command: string) => invoke.mock.calls.filter((call) => call[0] === command);
 
@@ -206,10 +216,16 @@ it('favorite_toggle_reloads_saved', async () => {
     if (command === 'radio_saved') return Promise.resolve(saved);
     return Promise.resolve(undefined);
   });
+  const stop = await initRadio();
   await toggleStationFavorite(station(1));
   expect(calls('radio_favorite')[0][1]).toEqual({ station: station(1), on: true });
   expect(favorites.stations.has(station(1).id)).toBe(true);
-  expect(calls('radio_saved')).toHaveLength(1);
+  // The toggle itself does not reload; the backend's event does.
+  expect(calls('radio_saved')).toHaveLength(0);
+  const changed = () =>
+    listeners.get('favorites://changed')!({ event: 'favorites://changed', id: 1, payload: null });
+  changed();
+  await vi.advanceTimersByTimeAsync(0);
   expect(radio.saved.favorites).toEqual(saved.favorites);
 
   // Off again.
@@ -217,7 +233,59 @@ it('favorite_toggle_reloads_saved', async () => {
   await toggleStationFavorite(station(1));
   expect(calls('radio_favorite')[1][1]).toEqual({ station: station(1), on: false });
   expect(favorites.stations.has(station(1).id)).toBe(false);
+  changed();
+  await vi.advanceTimersByTimeAsync(0);
   expect(radio.saved.favorites).toEqual([]);
+  stop();
+});
+
+it('two fast heart clicks: the failed first call does not undo the second', async () => {
+  const first = deferred<boolean>();
+  invoke.mockImplementationOnce(() => first.promise).mockResolvedValueOnce(true);
+  const a = toggleStationFavorite(station(1));
+  expect(favorites.stations.has(station(1).id)).toBe(true);
+  const b = toggleStationFavorite(station(1));
+  expect(favorites.stations.has(station(1).id)).toBe(false);
+  await b;
+  first.reject('late failure');
+  await a;
+  // The later click (off) stands; the first call's undo must not turn the heart on again.
+  expect(favorites.stations.has(station(1).id)).toBe(false);
+});
+
+it('a favorites reload does not undo a station heart that is still saving', async () => {
+  const save = deferred<boolean>();
+  invoke.mockImplementation((command: string) => {
+    if (command === 'radio_favorite') return save.promise;
+    if (command === 'favorites_ids')
+      return Promise.resolve({ tracks: [], albums: [], artists: [], stations: [] });
+    return Promise.resolve(undefined);
+  });
+  const { initFavorites } = await import('./favorites.svelte');
+  const stop = await initFavorites();
+  const pendingClick = toggleStationFavorite(station(1));
+  listeners.get('favorites://changed')!({ event: 'favorites://changed', id: 1, payload: null });
+  await vi.advanceTimersByTimeAsync(0);
+  expect(favorites.stations.has(station(1).id)).toBe(true);
+  save.resolve(true);
+  await pendingClick;
+  stop();
+});
+
+it('show more is off while a new search waits for its debounce', async () => {
+  const page = Array.from({ length: 100 }, (_, i) => station(i));
+  invoke.mockResolvedValue(page);
+  runSearch({ name: 'jazz' });
+  await vi.advanceTimersByTimeAsync(300);
+  expect(radio.search.more).toBe(true);
+
+  runSearch({ name: 'rock' });
+  expect(radio.search.more).toBe(false);
+  await searchMore();
+  expect(calls('radio_search')).toHaveLength(1);
+  await vi.advanceTimersByTimeAsync(300);
+  expect(calls('radio_search')).toHaveLength(2);
+  expect(calls('radio_search')[1][1]).toEqual({ query: { name: 'rock', offset: 0, limit: 100 } });
 });
 
 it('a failed favorite goes back with a notice', async () => {

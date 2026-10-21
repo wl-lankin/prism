@@ -168,6 +168,18 @@ pub fn claim_click(
     Ok(changed > 0)
 }
 
+/// Keeps the newest `keep` state rows whose key starts with `prefix`, by their JSON `at`
+/// (unreadable rows go first); returns how many went.
+pub fn prune_near_state(conn: &Connection, prefix: &str, keep: usize) -> anyhow::Result<usize> {
+    Ok(conn.execute(
+        "DELETE FROM radio_state WHERE substr(key, 1, length(?1)) = ?1 AND key NOT IN (
+            SELECT key FROM radio_state WHERE substr(key, 1, length(?1)) = ?1
+            ORDER BY CASE WHEN json_valid(value) THEN json_extract(value, '$.at') END DESC
+            LIMIT ?2)",
+        params![prefix, keep as i64],
+    )?)
+}
+
 /// Every stored station, oldest first.
 pub fn all(conn: &Connection) -> anyhow::Result<Vec<Station>> {
     let sql = format!("SELECT {STATION_COLUMNS} FROM radio_stations s ORDER BY s.rowid");
@@ -329,6 +341,23 @@ mod tests {
         assert_eq!(all(&conn).unwrap(), vec![one.clone()]);
         let cover = favicon_cover_id("https://example.test/logo.png").unwrap();
         assert_eq!(favicon_missing_until(&conn, &cover).unwrap(), None);
+    }
+
+    #[test]
+    fn only_the_newest_near_lists_stay() {
+        let db = Db::open_in_memory().unwrap();
+        let conn = db.0.lock().unwrap();
+        for (key, at) in [("a", 5), ("b", 1), ("c", 9), ("d", 3)] {
+            state_set(&conn, &format!("near:{key}"), &format!(r#"{{"at":{at}}}"#)).unwrap();
+        }
+        state_set(&conn, "near:broken", "not json").unwrap();
+        state_set(&conn, "place", r#"{"at":0}"#).unwrap();
+        assert_eq!(prune_near_state(&conn, "near:", 3).unwrap(), 2);
+        for key in ["near:a", "near:c", "near:d", "place"] {
+            assert!(state_get(&conn, key).unwrap().is_some(), "{key}");
+        }
+        assert_eq!(state_get(&conn, "near:b").unwrap(), None);
+        assert_eq!(state_get(&conn, "near:broken").unwrap(), None);
     }
 
     fn station_of(conn: &Connection, id: &str) -> Station {
