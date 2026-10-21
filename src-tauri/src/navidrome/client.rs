@@ -464,6 +464,9 @@ impl StdError for RedirectRefusal {}
 /// from https down to http, at most [`MAX_REDIRECTS`] hops. The credentials ride in the query,
 /// so a redirect elsewhere would hand them to another server.
 fn check_redirect(host: &str, previous: &[Url], next: &Url) -> Result<(), RedirectRefusal> {
+    // `previous` holds the original URL and every URL already redirected to, not `next`: with
+    // 1 + 9 entries this is the 10th redirect (followed), with 1 + 10 the 11th (refused). The
+    // same count as reqwest's `Policy::limited(10)`.
     if previous.len() > MAX_REDIRECTS {
         return Err(RedirectRefusal::TooMany);
     }
@@ -554,13 +557,30 @@ pub(crate) fn classify(err: &(dyn StdError + 'static)) -> NavidromeError {
             if reqwest_err.is_redirect() {
                 return NavidromeError::NotSubsonic("too many redirects".into());
             }
-            if reqwest_err.is_decode() && !reqwest_err.is_timeout() {
+            // reqwest wraps every body error (a cut connection too) in Kind::Decode; only
+            // invalid data (a broken gzip stream) means the server answered garbage.
+            if reqwest_err.is_decode() && !reqwest_err.is_timeout() && has_invalid_data(err) {
                 return NavidromeError::NotSubsonic("the response could not be decoded".into());
             }
         }
         current = inner.source();
     }
     NavidromeError::Unreachable(text)
+}
+
+/// True when an `io::Error` of kind `InvalidData` is in the chain.
+fn has_invalid_data(err: &(dyn StdError + 'static)) -> bool {
+    let mut current = Some(err);
+    while let Some(inner) = current {
+        if inner
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::InvalidData)
+        {
+            return true;
+        }
+        current = inner.source();
+    }
+    false
 }
 
 /// The only safe way to turn a reqwest error into a [`NavidromeError`]: strips the request URL
@@ -1179,7 +1199,62 @@ mod tests {
             check_redirect("music.example", &many, &url("https://music.example/x")),
             Err(RedirectRefusal::TooMany)
         );
+        assert_eq!(
+            check_redirect(
+                "music.example",
+                &many[..MAX_REDIRECTS],
+                &url("https://music.example/x")
+            ),
+            Ok(()),
+            "the 10th redirect is followed"
+        );
         assert_eq!(RedirectRefusal::Downgrade.to_string(), "redirect to http");
+    }
+
+    #[test]
+    fn api_body_cut_maps_to_unreachable() {
+        for gzip in [false, true] {
+            let server = FakeServer::start(FakeLibrary::synthetic(20, 10));
+            server.set_gzip(gzip);
+            let client = client(&server);
+
+            server.set_fault(Fault::CutOnce {
+                method: "ping",
+                after_bytes: 5,
+            });
+            let err = client.ping().unwrap_err();
+            assert!(err.is_offline(), "gzip {gzip}: {err:?}");
+            assert_clean(&err, &server);
+
+            server.set_fault(Fault::CutOnce {
+                method: "search3",
+                after_bytes: 50,
+            });
+            let err = client.search3_songs(0, PAGE).unwrap_err();
+            assert!(err.is_offline(), "gzip {gzip}: {err:?}");
+            assert_clean(&err, &server);
+
+            // The cut was once: the next call goes through.
+            assert_eq!(client.search3_songs(0, PAGE).unwrap().len(), 200);
+            assert_eq!(server.gzipped_responses() > 0, gzip);
+        }
+    }
+
+    #[test]
+    fn stream_body_cut_maps_to_unreachable() {
+        let lib = FakeLibrary::synthetic(1, 1)
+            .with_audio("tr-0", (0..=255u8).cycle().take(10_000).collect());
+        let server = FakeServer::start(lib);
+        server.set_fault(Fault::CutOnce {
+            method: "stream",
+            after_bytes: 100,
+        });
+        let client = client(&server);
+        let url = client.stream_url("tr-0", StreamQuality::Original, None);
+        let response = client.stream_http().get(url.expose()).send().unwrap();
+        let err = classify_reqwest(response.bytes().unwrap_err());
+        assert!(err.is_offline(), "{err:?}");
+        assert_clean(&err, &server);
     }
 
     #[test]
