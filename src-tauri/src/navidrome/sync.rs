@@ -108,9 +108,10 @@ const LIMITS: Limits = Limits {
     max_pages: MAX_PAGES,
 };
 
-/// The key of a server account: the lowercased URL and the user.
+/// The key of a server account: the lowercased URL and the lowercased user.
 pub fn server_key(url: &str, user: &str) -> String {
-    format!("{}\u{1f}{user}", url.to_lowercase())
+    // Lowercased like the keychain target: retyping the user's case is no server change.
+    format!("{}\u{1f}{}", url.to_lowercase(), user.to_lowercase())
 }
 
 fn state(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
@@ -1092,12 +1093,13 @@ mod tests {
     }
 
     #[test]
-    fn server_key_lowercases_the_url_only() {
+    fn server_key_ignores_case() {
         assert_eq!(
             server_key("https://NAS.example:4533/Music", "Demo"),
-            "https://nas.example:4533/music\u{1f}Demo"
+            "https://nas.example:4533/music\u{1f}demo"
         );
-        assert_ne!(server_key("https://h", "a"), server_key("https://h", "A"));
+        assert_eq!(server_key("https://h", "a"), server_key("https://H", "A"));
+        assert_ne!(server_key("https://h", "a"), server_key("https://h", "b"));
     }
 
     #[test]

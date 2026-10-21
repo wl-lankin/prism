@@ -9,7 +9,9 @@
 //! Connect and disconnect wipe the index of the old account. Each of them first bumps the
 //! account epoch, then takes the database lock to wipe. A running cycle checks the epoch under
 //! the same lock before every write, so once the wipe holds the lock nothing of the old pass
-//! (rows, `lastModified`, status) is written after it.
+//! (rows, `lastModified`, status) is written after it. The connect and disconnect commands
+//! never wait for the old cycle; the next account's first cycle does (see
+//! [`NavidromeService::connect`]).
 
 pub mod client;
 pub mod keychain;
@@ -34,7 +36,7 @@ use crate::settings::{Settings, SettingsStore};
 use client::{
     normalize_url, Account, NavidromeError, NavidromeFailure, ServerInfo, SubsonicClient,
 };
-use keychain::CredentialStore;
+use keychain::{account_key, CredentialStore};
 use sync::{
     ensure_server, server_key, sync_library_cancellable, wipe_navidrome, SyncError, SyncProgress,
     SyncReport,
@@ -181,6 +183,30 @@ fn index_counts(conn: &Connection) -> rusqlite::Result<(u32, u32, Option<i64>)> 
     ))
 }
 
+/// Whether the server answers with these credentials: syncing, online, or an error the
+/// server's answers do not cause (a refused pass, the local database). Off, offline and
+/// credential, TLS, not-Subsonic or keychain errors are not.
+fn answers(status: &NavidromeStatus) -> bool {
+    match status.state {
+        LinkState::Syncing | LinkState::Online => true,
+        LinkState::Error => status
+            .error
+            .as_ref()
+            .is_some_and(|e| e.code == FAILURE_SYNC_REFUSED || e.code == FAILURE_DATABASE),
+        LinkState::Off | LinkState::Offline => false,
+    }
+}
+
+/// Ends a cycle worker: clears `running` and wakes the scheduler, also when the cycle panics.
+struct CycleDone<'a>(&'a Core);
+
+impl Drop for CycleDone<'_> {
+    fn drop(&mut self) {
+        self.0.inner().running = false;
+        self.0.wake.notify_all();
+    }
+}
+
 /// Everything the scheduler, the cycle workers and the commands share.
 struct Inner {
     status: NavidromeStatus,
@@ -207,6 +233,9 @@ struct Core {
     online: Arc<AtomicBool>,
     /// Serializes connect and disconnect.
     account: Mutex<()>,
+    /// Test hook: the next cycle panics.
+    #[cfg(test)]
+    panic_next: AtomicBool,
 }
 
 fn guard<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -231,10 +260,7 @@ impl Core {
     /// Updates the online flag, releases the lock and emits the status.
     fn publish(&self, inner: MutexGuard<'_, Inner>) -> NavidromeStatus {
         let status = inner.status.clone();
-        self.online.store(
-            matches!(status.state, LinkState::Syncing | LinkState::Online),
-            Ordering::SeqCst,
-        );
+        self.online.store(answers(&status), Ordering::SeqCst);
         drop(inner);
         (self.emit)(NavidromeEvent::Status(status.clone()));
         status
@@ -296,9 +322,9 @@ impl Core {
             let spawned = std::thread::Builder::new()
                 .name("prism-navidrome-cycle".into())
                 .spawn(move || {
+                    // Also on a panic: a stuck `running` would stop every later cycle.
+                    let _done = CycleDone(&core);
                     core.run_cycle(&client, epoch, ping_first);
-                    core.inner().running = false;
-                    core.wake.notify_all();
                 });
             if let Err(err) = spawned {
                 eprintln!("starting the Navidrome sync failed: {err}");
@@ -327,6 +353,10 @@ impl Core {
     /// The steps of one cycle, in this order: flush stars, library, import stars, playlists,
     /// flush scrobbles. Later tasks add their steps here.
     fn cycle(&self, client: &SubsonicClient, epoch: u64) -> Result<SyncReport, SyncError> {
+        #[cfg(test)]
+        if self.panic_next.swap(false, Ordering::SeqCst) {
+            panic!("test panic in the Navidrome cycle");
+        }
         let last_progress: Cell<Option<Instant>> = Cell::new(None);
         let progress = |progress: SyncProgress| {
             let finished = progress.total.is_some_and(|total| progress.done >= total);
@@ -442,7 +472,7 @@ impl NavidromeService {
                         match ensure_server(&db, &key) {
                             Ok(_) => {
                                 client = Some(Arc::new(built));
-                                status.state = LinkState::Online;
+                                status.state = LinkState::Syncing;
                                 due = Some(Instant::now() + options.first_delay);
                             }
                             Err(err) => {
@@ -473,10 +503,7 @@ impl NavidromeService {
                 status.last_sync = last_sync;
             }
         }
-        let online = Arc::new(AtomicBool::new(matches!(
-            status.state,
-            LinkState::Syncing | LinkState::Online
-        )));
+        let online = Arc::new(AtomicBool::new(answers(&status)));
         let core = Arc::new(Core {
             db,
             settings,
@@ -495,6 +522,8 @@ impl NavidromeService {
             wake: Condvar::new(),
             online,
             account: Mutex::new(()),
+            #[cfg(test)]
+            panic_next: AtomicBool::new(false),
         });
         let scheduler = Arc::clone(&core);
         let thread = std::thread::Builder::new()
@@ -534,6 +563,14 @@ impl NavidromeService {
 
     /// Signs in: pings with the given password and only then stores the password in the
     /// keychain, saves url and user, wipes the index of another account and starts a cycle.
+    ///
+    /// The command itself never waits on a running cycle: the old account's cycle is
+    /// cancelled, not joined. Its worker can still be in a network call, though, and the new
+    /// account's first cycle starts only once that call returns (at most `API_TIMEOUT`).
+    ///
+    /// When the wipe (`ensure_server`) fails, the account is already switched (keychain and
+    /// settings) but no client is kept: the status is `Error` with `database` until the next
+    /// connect or app start.
     pub fn connect(
         &self,
         url: &str,
@@ -551,9 +588,13 @@ impl NavidromeService {
 
         let before = core.settings.get();
         let previous = before.navidrome_url.zip(before.navidrome_user);
+        // The same keychain entry: Windows Credential Manager matches targets ignoring case,
+        // so `Demo` after `demo` replaced the entry, and deleting the "old" one would delete
+        // the new password.
+        let new_key = account_key(&url, &user);
         let same = previous
             .as_ref()
-            .is_some_and(|(u, n)| *u == url && *n == user);
+            .is_some_and(|(u, n)| account_key(u, n).eq_ignore_ascii_case(&new_key));
         core.creds
             .set(&url, &user, &account.password)
             .map_err(|err| failure(FAILURE_KEYCHAIN, format!("{err:#}")))?;

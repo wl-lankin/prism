@@ -737,7 +737,8 @@ fn authenticated(params: &[(String, String)]) -> bool {
     else {
         return false;
     };
-    user == FAKE_USER && t == token(FAKE_PASSWORD, s)
+    // Navidrome finds the user ignoring case.
+    user.eq_ignore_ascii_case(FAKE_USER) && t == token(FAKE_PASSWORD, s)
 }
 
 fn base_response() -> Map<String, Value> {

@@ -319,6 +319,7 @@ fn credential_errors_are_not_retried() {
         env.service.status().error.map(|e| e.code),
         Some("wrongCredentials")
     );
+    assert!(!env.service.online_flag().load(Ordering::SeqCst));
     let calls = server.requests().len();
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(server.requests().len(), calls);
@@ -337,6 +338,8 @@ fn refused_pass_is_a_visible_error() {
     env.service.sync_now();
     env.wait_state(LinkState::Error);
     env.wait_idle();
+    // The server answers with these credentials: Navidrome tracks stay playable.
+    assert!(env.service.online_flag().load(Ordering::SeqCst));
     let status = env.service.status();
     let error = status.error.expect("a failure");
     assert_eq!(error.code, FAILURE_SYNC_REFUSED);
@@ -609,4 +612,113 @@ fn incomplete_account_never_reads_the_keychain() {
     std::thread::sleep(Duration::from_millis(100));
     assert_eq!(creds.reads.load(Ordering::SeqCst), 0);
     service.shutdown();
+}
+
+/// A keychain that matches entries ignoring case, as Windows Credential Manager does.
+#[derive(Default)]
+struct FoldingStore {
+    entries: Mutex<std::collections::HashMap<String, Secret>>,
+}
+
+impl CredentialStore for FoldingStore {
+    fn get(&self, url: &str, user: &str) -> anyhow::Result<Option<Secret>> {
+        let key = account_key(url, user).to_lowercase();
+        Ok(guard(&self.entries).get(&key).cloned())
+    }
+
+    fn set(&self, url: &str, user: &str, password: &Secret) -> anyhow::Result<()> {
+        let key = account_key(url, user).to_lowercase();
+        guard(&self.entries).insert(key, password.clone());
+        Ok(())
+    }
+
+    fn delete(&self, url: &str, user: &str) -> anyhow::Result<()> {
+        let key = account_key(url, user).to_lowercase();
+        guard(&self.entries).remove(&key);
+        Ok(())
+    }
+}
+
+#[test]
+fn reconnect_in_other_case_keeps_the_password_and_the_index() {
+    let server = FakeServer::start(FakeLibrary::synthetic(2, 3));
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.json");
+    let db = Arc::new(Db::open_in_memory().unwrap());
+    let creds = Arc::new(FoldingStore::default());
+    let events: Arc<Mutex<Vec<NavidromeEvent>>> = Arc::default();
+    let spawn = |events: Arc<Mutex<Vec<NavidromeEvent>>>| {
+        NavidromeService::spawn_with_options(
+            Arc::clone(&db),
+            Arc::new(SettingsStore::load(&path)),
+            Arc::clone(&creds) as Arc<dyn CredentialStore>,
+            Arc::new(move |event| guard(&events).push(event)),
+            options(),
+        )
+    };
+    let service = spawn(Arc::clone(&events));
+    service
+        .connect(&server.url(), "demo", Secret::new(FAKE_PASSWORD))
+        .unwrap();
+    assert!(service.wait_idle(WAIT));
+    guard(&events).clear();
+
+    // The same account, the user typed in another case.
+    service
+        .connect(&server.url(), "DEMO", Secret::new(FAKE_PASSWORD))
+        .unwrap();
+    assert!(service.wait_idle(WAIT));
+    assert!(creds.get(&server.url(), "DEMO").unwrap().is_some());
+    // No server change: nothing was wiped.
+    assert!(!guard(&events)
+        .iter()
+        .any(|e| matches!(e, NavidromeEvent::FavoritesChanged)));
+    {
+        let conn = db.0.lock().unwrap();
+        let tracks: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM tracks WHERE source = 'navidrome'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(tracks, 6);
+    }
+    service.shutdown();
+
+    // The next start finds the password.
+    let restarted = spawn(Arc::default());
+    let status = restarted.status();
+    assert_eq!(status.user.as_deref(), Some("DEMO"));
+    assert_ne!(status.state, LinkState::Error, "{:?}", status.error);
+    restarted.shutdown();
+}
+
+#[test]
+fn saved_account_starts_syncing() {
+    let server = FakeServer::start(FakeLibrary::synthetic(1, 2));
+    server.set_fault(Fault::Stall {
+        method: "getIndexes",
+        after_bytes: 0,
+        wait: Duration::from_millis(300),
+    });
+    let env = start(saved_account(&server, true));
+    assert_eq!(env.service.status().state, LinkState::Syncing);
+    assert!(env.service.online_flag().load(Ordering::SeqCst));
+    env.wait_state(LinkState::Online);
+}
+
+#[test]
+fn a_panicking_cycle_does_not_stop_the_scheduler() {
+    let server = FakeServer::start(FakeLibrary::synthetic(1, 2));
+    let env = start(|_, _| {});
+    env.service.core.panic_next.store(true, Ordering::SeqCst);
+    env.connect(&server);
+    // The panicking cycle ends; the scheduler is free for the next one.
+    env.wait_idle();
+    assert_eq!(env.nd_tracks(), 0);
+    env.service.sync_now();
+    env.wait_idle();
+    env.wait_state(LinkState::Online);
+    assert_eq!(env.nd_tracks(), 2);
 }
