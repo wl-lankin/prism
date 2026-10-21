@@ -6,6 +6,7 @@
   import { evictPages, pagesFor } from '../pages';
   import { dragTarget, firstRow, QUEUE_TOGGLE_ID, stepAside, type QueueDrag } from '../queue';
   import { FAVORITE_KEY, isFavoriteKey, toggleFavorite } from '../stores/favorites.svelte';
+  import { closeOverlay, openOverlay } from '../stores/overlays.svelte';
   import { player } from '../stores/player.svelte';
   import { findStation, toggleStationFavorite } from '../stores/radio.svelte';
   import { queuePanel, toggleQueuePanel } from '../stores/queue.svelte';
@@ -32,13 +33,22 @@
   const SCROLL_EDGE = 40;
 
   const open = $derived(queuePanel.open);
+  /** YouTube Music keeps its own queue; this panel only says so. */
+  const yt = $derived(player.active === 'ytm');
+
+  // The sheet lies over the content, above the YouTube Music view while it is open.
+  $effect(() => {
+    if (!open) return;
+    untrack(() => openOverlay('queue'));
+    return () => untrack(() => closeOverlay('queue'));
+  });
   const total = $derived(player.queueLength);
   const current = $derived(player.queueIndex);
   const idle = $derived(player.status === 'idle' || !player.track);
   const empty = $derived(idle || total === 0);
   /** A station is a queue of one: no "up next" count and no tail note. */
   const live = $derived(!idle && isLive(player.track));
-  const flow = $derived((player.flow ?? null) as FlowVariant | null);
+  const flow = $derived(yt ? null : ((player.flow ?? null) as FlowVariant | null));
   const upcoming = $derived(Math.max(0, total - current - 1));
 
   let showPlayed = $state(false);
@@ -354,7 +364,7 @@
   <header class="head">
     <div class="titles">
       <h2 id="upnext-heading" class:flow={!!flow}>{heading}</h2>
-      {#if !empty && !flow && !live}
+      {#if !yt && !empty && !flow && !live}
         <p class="sub">{tc('queue.count', upcoming)}</p>
       {/if}
     </div>
@@ -363,7 +373,12 @@
     </button>
   </header>
 
-  {#if empty}
+  {#if yt}
+    <div class="empty">
+      <span class="empty-art" aria-hidden="true"><Icon name="queue" size={28} /></span>
+      <p>{t('ytm.queueNote')}</p>
+    </div>
+  {:else if empty}
     <div class="empty">
       <span class="empty-art" aria-hidden="true"><Icon name="queue" size={28} /></span>
       <strong>{t('queue.emptyTitle')}</strong>

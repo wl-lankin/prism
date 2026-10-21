@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { isLive, liveLines, sourceQualityLabel, streamedFrom } from '../format';
+  import { isLive, liveLines, sourceQualityLabel, streamedFrom, ytmIdle, ytmLines } from '../format';
   import { holdToOpen } from '../flow';
   import { t } from '../i18n';
   import {
@@ -22,6 +22,7 @@
   import { currentTitle, initRadio } from '../stores/radio.svelte';
   import { initRing, ring } from '../stores/ring.svelte';
   import { followSettings, initSettings, settings } from '../stores/settings.svelte';
+  import { initYtm, ytm } from '../stores/ytm.svelte';
   import type { FlowVariant } from '../types';
   import shape from '../window-shape.json';
   import Cover from './Cover.svelte';
@@ -52,6 +53,18 @@
     initPlayer()
       .then((unlisten) => (gone ? unlisten() : (stop = unlisten)))
       .catch((err) => console.error('connecting to the player failed', err));
+    return () => {
+      gone = true;
+      stop?.();
+    };
+  });
+
+  $effect(() => {
+    let stop: (() => void) | undefined;
+    let gone = false;
+    initYtm()
+      .then((unlisten) => (gone ? unlisten() : (stop = unlisten)))
+      .catch((err) => console.error('connecting to YouTube Music failed', err));
     return () => {
       gone = true;
       stop?.();
@@ -149,15 +162,26 @@
     };
   });
 
-  const track = $derived(player.track);
-  const idle = $derived(player.status === 'idle' || !track);
-  const mode: RingMode = $derived(player.status === 'idle' ? 'flow' : player.status === 'playing' ? 'pause' : 'play');
-  const progress = $derived(player.durationMs > 0 ? player.positionMs / player.durationMs : 0);
-  const live = $derived(!idle && isLive(track));
+  /** YouTube Music answers the transport: the card shows its state. */
+  const yt = $derived(player.active === 'ytm');
+  const track = $derived(yt ? null : player.track);
+  const idle = $derived(yt ? ytmIdle(ytm.state) : player.status === 'idle' || !track);
+  const status = $derived(yt ? ytm.state.status : player.status);
+  const mode: RingMode = $derived((yt ? idle : status === 'idle') ? 'flow' : status === 'playing' ? 'pause' : 'play');
+  const progress = $derived(
+    yt
+      ? ytm.state.durationMs > 0 ? ytm.state.positionMs / ytm.state.durationMs : 0
+      : player.durationMs > 0 ? player.positionMs / player.durationMs : 0,
+  );
+  const live = $derived(!yt && !idle && isLive(track));
   const byline = $derived(track ? [track.artist, track.album].filter(Boolean).join(' · ') : '');
   /** A station shows the stream title over its name; a track its title over the byline. */
   const lines = $derived(
-    track && live ? liveLines(track, currentTitle(track)) : { title: track?.title ?? '', sub: byline },
+    yt
+      ? ytmLines(ytm.state)
+      : track && live
+        ? liveLines(track, currentTitle(track))
+        : { title: track?.title ?? '', sub: byline },
   );
   const source = $derived(track ? sourceQualityLabel(track, (s) => t(`source.${s}`), settings.navidromeQuality) : '');
   /** The line's tooltip also names the file behind a transcode; the line itself stays short. */
@@ -211,7 +235,7 @@
   }
 
   function activate() {
-    if (player.status !== 'idle') {
+    if (yt ? !idle : player.status !== 'idle') {
       playerToggle().catch((err) => notify(t('flow.failed', { message: String(err) })));
       return;
     }
@@ -272,7 +296,17 @@
     <span class="wash" aria-hidden="true"></span>
 
     <div class="now" class:hearted={!idle && track && !track.id.startsWith('file:')}>
-      {#if !idle && track}
+      {#if yt && !idle}
+        <button
+          type="button"
+          class="cover-button"
+          aria-label={t('mini.openNowPlaying')}
+          title={t('mini.openNowPlaying')}
+          onclick={openNowPlaying}
+        >
+          <Cover coverId={ytm.state.coverId} size={COVER} alt="" />
+        </button>
+      {:else if !idle && track}
         <button
           type="button"
           class="cover-button"
@@ -292,6 +326,14 @@
           <div class="title">{t('mini.idleTitle')}</div>
           <div class="lines">
             <div class="sub wrap">{t('mini.idleHint')}</div>
+          </div>
+        {:else if yt}
+          <div class="title" title={lines.title}>{lines.title}</div>
+          <div class="lines">
+            <div class="sub" title={lines.sub}>{lines.sub}</div>
+            <div class="source" style="--dot:var(--src-youtube)">
+              <span>{t('ytm.source')}</span>
+            </div>
           </div>
         {:else if track}
           <div class="title" title={lines.title}>{lines.title}</div>
@@ -316,7 +358,7 @@
       <button
         type="button"
         class="btn"
-        disabled={idle || live}
+        disabled={idle || live || (yt && !ytm.state.canPrev)}
         aria-label={t('transport.previous')}
         title={live ? t('radio.noSkip') : t('transport.previous')}
         onclick={() => playerPrev().catch(report('previous'))}
@@ -326,14 +368,14 @@
       <button
         type="button"
         class="btn"
-        disabled={idle || live}
+        disabled={idle || live || (yt && !ytm.state.canNext)}
         aria-label={t('transport.next')}
         title={live ? t('radio.noSkip') : t('transport.next')}
         onclick={() => playerNext().catch(report('next'))}
       >
         <Icon name="next" size={16} />
       </button>
-      <PlayModes compact />
+      {#if !yt}<PlayModes compact />{/if}
       <div class="volume" {onwheel}>
         <button
           type="button"

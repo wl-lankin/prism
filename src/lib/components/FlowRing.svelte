@@ -55,10 +55,12 @@
 
   // A station has no progress: the arc stays full and steady (the window and the mini player
   // both mount this ring, so it reads the player itself instead of taking a prop from each).
-  const live = $derived(mode !== 'flow' && isLive(player.track));
+  // Web audio has no level to follow: YouTube Music gets a steady glow, neither metered nor breathing.
+  const web = $derived(player.active === 'ytm');
+  const live = $derived(mode !== 'flow' && !web && isLive(player.track));
   const p = $derived(mode === 'flow' || live ? 1 : Math.min(Math.max(progress || 0, 0), 1));
   const thickness = $derived(Math.max(3, Math.round(size / 17)));
-  const metered = $derived(level !== undefined && mode === 'pause');
+  const metered = $derived(level !== undefined && mode === 'pause' && !web);
   const loud = $derived(metered ? Math.min(Math.max(level || 0, 0), 1) : 0);
   const label = $derived(mode === 'flow' ? t('ring.flowHint') : mode === 'pause' ? t('ring.pause') : t('ring.play'));
   const style = $derived(
@@ -84,6 +86,7 @@
   class:live
   class:playing={mode === 'pause'}
   class:metered
+  class:steady={web && mode === 'pause'}
   class:bounded={!!reach}
   {style}
   aria-label={label}
@@ -332,7 +335,7 @@
       animation: spin 14s linear infinite;
     }
 
-    .playing:not(.metered) .glow {
+    .playing:not(.metered):not(.steady) .glow {
       animation: breathe 3.6s ease-in-out infinite;
     }
   }
