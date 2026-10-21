@@ -231,7 +231,10 @@ mod tests {
     fn down_gate() -> (ResizeGate, Arc<DownServer>) {
         let server = Arc::new(DownServer::default());
         let gate = gate();
-        gate.set_remote(server.clone());
+        gate.set_remote_for(
+            crate::library::model::NAVIDROME_COVER_PREFIX,
+            server.clone(),
+        );
         (gate, server)
     }
 
