@@ -74,9 +74,16 @@ describe('streamed quality', () => {
     expect(qualityLabel(nd({ bitDepth: 24, sampleRate: 96000 }), '192')).toBe('MP3 192');
   });
 
-  it('keeps the original label when the file is already below the cap', () => {
+  it('keeps the original label only for an MP3 at or below the cap', () => {
     expect(qualityLabel(nd({ format: 'mp3', bitrateKbps: 128 }), '320')).toBe('MP3 128');
     expect(qualityLabel(nd({ format: 'mp3', bitrateKbps: 320 }), '320')).toBe('MP3 320');
+  });
+
+  it('shows the cap for another lossy codec, even below the cap', () => {
+    const aac = nd({ format: 'm4a', bitrateKbps: 256 });
+    expect(qualityLabel(aac, '320')).toBe('MP3 320');
+    expect(streamedFrom(aac, '320')).toBe('AAC 256');
+    expect(qualityLabel(nd({ format: 'ogg', bitrateKbps: 96 }), '128')).toBe('MP3 128');
   });
 
   it('shows the cap when the bitrate is above it or unknown', () => {

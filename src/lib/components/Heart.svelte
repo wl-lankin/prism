@@ -1,6 +1,7 @@
 <script lang="ts">
   import { t } from '../i18n';
   import { favorites, heartable, isFavorite, setFavorite } from '../stores/favorites.svelte';
+  import { notify } from '../stores/notice.svelte';
   import type { FavKind } from '../types';
   import Icon from './Icon.svelte';
 
@@ -10,7 +11,8 @@
    *  `id` may name several items that stand for one thing (an artist found in more than one
    *  source): the heart is on when any of them is a favorite, and a click sets all of them to
    *  the new state. Navidrome ids drop out while no account is signed in (the backend refuses
-   *  them); a heart left with nothing to change is disabled and says why. */
+   *  them); a heart left with nothing to change is `aria-disabled`, dimmed, and a click on it
+   *  says why instead of changing anything. */
   let {
     kind,
     id,
@@ -57,7 +59,10 @@
 
   function toggle(event: MouseEvent) {
     event.stopPropagation();
-    if (disabled) return;
+    if (disabled) {
+      notify(t('navidrome.notConnected'));
+      return;
+    }
     const next = !on;
     if (next) bursts++;
     // Only the items not already in the new state, so nothing is queued for nothing.
@@ -71,11 +76,12 @@
   class:on
   class:round
   class:hidden
+  class:muted={disabled}
+  aria-disabled={disabled ? 'true' : undefined}
   aria-hidden={hidden ? 'true' : undefined}
   aria-pressed={on}
   aria-label={label ?? t('favorites.toggle')}
   title={disabled ? t('navidrome.notConnected') : on ? t('favorites.remove') : t('favorites.add')}
-  {disabled}
   {tabindex}
   onclick={toggle}
   onfocus={() => (focused = true)}
@@ -125,7 +131,7 @@
     pointer-events: none;
   }
 
-  .heart:hover:enabled {
+  .heart:hover:not(.muted) {
     color: var(--text);
     background: rgba(255, 255, 255, 0.07);
   }
@@ -134,11 +140,11 @@
     color: var(--spec-1);
   }
 
-  .heart.on:hover:enabled {
+  .heart.on:hover:not(.muted) {
     color: color-mix(in srgb, var(--spec-1) 82%, #fff);
   }
 
-  .heart:active .glyph {
+  .heart:active:not(.muted) .glyph {
     transform: scale(0.88);
   }
 
@@ -155,7 +161,7 @@
     color: var(--text);
   }
 
-  .round:hover:enabled {
+  .round:hover:not(.muted) {
     background: rgba(255, 255, 255, 0.1);
   }
 
@@ -164,18 +170,18 @@
     box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--spec-1) 38%, transparent);
   }
 
-  .round.on:hover:enabled {
+  .round.on:hover:not(.muted) {
     background: color-mix(in srgb, var(--spec-1) 20%, transparent);
   }
 
-  /* Signed out of Navidrome: it still shows the state, quietly and without a pointer. Dimmed
-     by color, not opacity, so the rows' hover reveal (which sets the opacity) keeps working. */
-  .heart:disabled {
+  /* Signed out of Navidrome: it still shows the state, quietly. Dimmed by color, not opacity,
+     so the rows' hover reveal (which sets the opacity) keeps working. */
+  .heart.muted {
     color: rgba(243, 243, 245, 0.26);
     cursor: default;
   }
 
-  .heart.on:disabled {
+  .heart.on.muted {
     color: color-mix(in srgb, var(--spec-1) 45%, transparent);
   }
 

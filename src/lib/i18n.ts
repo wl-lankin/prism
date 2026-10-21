@@ -602,7 +602,7 @@ const de: Record<Key, string> = {
   'navidrome.error.internal': 'Bei der Verbindung zu Navidrome ist etwas schiefgegangen. Bitte versuche es erneut.',
   'navidrome.error.withDetail': '{text} Der Server meldet: {detail}',
   'navidrome.notConnected': 'Navidrome ist nicht verbunden. Melde dich in den Einstellungen wieder an.',
-  'navidrome.offlineNotice': 'Navidrome ist nicht erreichbar. Später weiter mit Abspielen.',
+  'navidrome.offlineNotice': 'Navidrome ist nicht erreichbar. Später mit Abspielen fortsetzen.',
 
   'quality.streamedFrom': 'Gestreamt als {stream} aus {file}',
   'quality.from': '{stream} aus {file}',

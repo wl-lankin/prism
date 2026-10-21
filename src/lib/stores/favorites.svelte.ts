@@ -2,7 +2,7 @@ import { SvelteSet } from 'svelte/reactivity';
 import { t } from '../i18n';
 import { favoritesIds, favoritesSet, onFavoritesChanged } from '../ipc';
 import type { FavKind, FavoriteIds } from '../types';
-import { navidrome, navidromeErrorText } from './navidrome.svelte';
+import { navidrome, navidromeErrorText, navidromeStatusKnown } from './navidrome.svelte';
 import { notify } from './notice.svelte';
 
 /** Every favorite id, by kind. Track, album and artist ids (a local artist's id is its name,
@@ -58,9 +58,10 @@ export function isFavorite(kind: FavKind, id: string): boolean {
 
 /** Whether a heart may change `id` now. A Navidrome item needs a signed-in account (online,
  *  offline or failing alike: the backend queues the star); while signed out the backend
- *  refuses it. */
+ *  refuses it. Before the first status answer every id counts as heartable, so nothing flashes
+ *  dimmed at startup; a real refusal then comes back as "not connected" with its notice. */
 export function heartable(id: string): boolean {
-  return !id.startsWith('navidrome:') || navidrome.state !== 'off';
+  return !id.startsWith('navidrome:') || !navidromeStatusKnown.loaded || navidrome.state !== 'off';
 }
 
 /** Shows the change at once, then saves it; a failure puts the old state back with a notice. */

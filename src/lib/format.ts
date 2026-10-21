@@ -39,15 +39,15 @@ function fileLabel(track: QualityInput): string {
 }
 
 /** The MP3 bitrate a Navidrome track streams at under `stream`, or null when it streams the
- *  file as it is. A cap transcodes a lossless file, a file of unknown bitrate and one above
- *  the cap; a file at or below the cap keeps its own label. Local tracks never transcode. */
+ *  file as it is. Navidrome sends the raw file only when it already is an MP3 at or below the
+ *  cap; everything else (lossless, another codec, a higher or unknown bitrate) is transcoded
+ *  to MP3 at the cap. Local tracks never transcode. */
 function transcodeKbps(track: QualityInput, stream: StreamQuality | undefined): number | null {
   if (track.source !== 'navidrome' || !stream || stream === 'original') return null;
   const cap = Number(stream);
-  const format = track.format.toLowerCase();
   const { bitrateKbps } = track;
-  if (isLossless(format, track.bitDepth) || !bitrateKbps || bitrateKbps > cap) return cap;
-  return null;
+  const passthrough = track.format.toLowerCase() === 'mp3' && !!bitrateKbps && bitrateKbps <= cap;
+  return passthrough ? null : cap;
 }
 
 /** "FLAC 24/96", "MP3 320", "OPUS": how the track sounds as it plays. A Navidrome track that

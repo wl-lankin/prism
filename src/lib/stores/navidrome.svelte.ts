@@ -46,8 +46,13 @@ const WITH_DETAIL = new Set<NavidromeErrorCode>(['server', 'notSubsonic']);
  *  text the Rust tests pin. */
 export const NAVIDROME_NOT_CONNECTED = 'Navidrome is not connected';
 
+/** Whether `navidrome` holds an answer yet: set by the first status answer, the first event,
+ *  or a failed load. Until then `state: 'off'` is only the starting value, not a sign-out. */
+export const navidromeStatusKnown = $state({ loaded: false });
+
 function apply(status: NavidromeStatus): void {
   Object.assign(navidrome, status);
+  navidromeStatusKnown.loaded = true;
 }
 
 /** Loads the status, then follows `navidrome://status`. Resolves with the cleanup. */
@@ -70,6 +75,8 @@ export async function initNavidrome(): Promise<() => void> {
   } catch (err) {
     console.error('loading the Navidrome status failed', err);
   }
+  // Also after a failed or empty answer: the hearts then go by the starting state.
+  navidromeStatusKnown.loaded = true;
   return () => stop?.();
 }
 

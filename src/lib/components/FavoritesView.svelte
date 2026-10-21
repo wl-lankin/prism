@@ -123,15 +123,16 @@
     if (tab === 'track') return play(0, shuffled);
     const ids: string[] = [];
     try {
-      // An artist's albums come from every source; an artist listed once per source counts once,
-      // and the chosen chip narrows the albums too.
+      // An artist's albums come from every source. Only those of a shown favorite artist of the
+      // same source play: a local favorite does not pull in that name's Navidrome albums.
+      const pair = (name: string, source: Source) => `${name}\u0000${source}`;
+      const pairs = new Set(shownArtists.map((x) => pair(x.name, x.source)));
       const names = [...new Set(shownArtists.map((x) => x.name))];
       const albumIds =
         tab === 'album'
           ? shownAlbums.map((x) => x.id)
-          : (await Promise.all(names.map((name) => libraryArtistAlbums(name))))
-              .flat()
-              .filter(keepSource)
+          : (await Promise.all(names.map(async (name) => ({ name, list: await libraryArtistAlbums(name) }))))
+              .flatMap(({ name, list }) => (list ?? []).filter((x) => pairs.has(pair(name, x.source))))
               .map((x) => x.id);
       for (const list of await Promise.all(albumIds.map((id) => libraryAlbumTracks(id)))) {
         for (const track of list) ids.push(track.id);
