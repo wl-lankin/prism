@@ -1,8 +1,5 @@
 <script lang="ts" module>
-  import type { FavKind as AnyFavKind } from '../types';
-
-  /** The library tabs; stations have their own section (Task 11), not a tab. */
-  type FavKind = Exclude<AnyFavKind, 'station'>;
+  import type { FavKind } from '../types';
 
   /** The tab stays where it was left while the app runs. */
   let lastTab: FavKind = 'track';
@@ -33,7 +30,7 @@
   import StationList from './StationList.svelte';
   import ViewHead from './ViewHead.svelte';
 
-  /** Favorite songs, albums and artists in three tabs, narrowed by source with the chips. */
+  /** Favorite songs, albums, artists and stations in four tabs, narrowed by source with the chips. */
   type Filter = 'all' | Source;
 
   let tab = $state<FavKind>(lastTab);
@@ -71,10 +68,7 @@
   const STATIONS_VIRTUAL_FROM = 50;
 
   // A station un-hearted here leaves the list at once, like the other kinds.
-  const shownStations = $derived(
-    source === 'all' || source === 'radio' ? radio.saved.favorites.filter((x) => favorites.stations.has(x.id)) : [],
-  );
-  const hasStations = $derived(radio.saved.favorites.some((x) => favorites.stations.has(x.id)));
+  const shownStations = $derived(radio.saved.favorites.filter((x) => favorites.stations.has(x.id)));
 
   // An item un-hearted here leaves the list at once, before the backend confirms it.
   const keepSource = <T extends { source: Source }>(item: T) => source === 'all' || item.source === source;
@@ -84,11 +78,12 @@
   // one), so an artist found in both sources is listed once per source.
   const shownArtists = $derived((artists ?? []).filter((x) => isFavorite('artist', x.id) && keepSource(x)));
 
-  /** All, then every source that has favorites, Local files always among them. */
-  const sources = $derived.by(() => {
+  /** All, then every source that has favorites, Local files always among them. Stations are only Radio. */
+  const sources = $derived.by((): Source[] => {
+    if (tab === 'station') return ['radio'];
     const present = new Set<Source>(['local']);
     for (const item of [...(tracks ?? []), ...(albums ?? []), ...(artists ?? [])]) present.add(item.source);
-    if (hasStations) present.add('radio');
+    present.delete('radio');
     return [...present];
   });
 
@@ -96,25 +91,22 @@
     track: shownTracks.length,
     album: shownAlbums.length,
     artist: shownArtists.length,
+    station: shownStations.length,
   });
   const loaded = $derived(tracks !== null);
   /** True when the tab has favorites, only none from the chosen source. */
   const hiddenBySource = $derived.by(() => {
-    if (source === 'all') return false;
+    if (source === 'all' || tab === 'station') return false;
     if (tab === 'track') return (tracks ?? []).some((x) => isFavorite('track', x.id));
     if (tab === 'album') return (albums ?? []).some((x) => isFavorite('album', x.id));
     return (artists ?? []).some((x) => isFavorite('artist', x.id));
   });
 
-  // The last station un-hearted under the Radio chip takes the chip with it.
-  $effect(() => {
-    if (source === 'radio' && !hasStations) source = 'all';
-  });
-
-  const tabs: { kind: FavKind; label: Key; count: Key; icon: 'songs' | 'album' | 'artist' }[] = [
+  const tabs: { kind: FavKind; label: Key; count: Key; icon: 'songs' | 'album' | 'artist' | 'radio' }[] = [
     { kind: 'track', label: 'nav.songs', count: 'view.count.songs', icon: 'songs' },
     { kind: 'album', label: 'nav.albums', count: 'view.count.albums', icon: 'album' },
     { kind: 'artist', label: 'nav.artists', count: 'view.count.artists', icon: 'artist' },
+    { kind: 'station', label: 'favorites.stations', count: 'favorites.count.station', icon: 'radio' },
   ];
   const current = $derived(tabs.find((x) => x.kind === tab)!);
   const playingId = $derived(player.track?.id ?? null);
@@ -126,6 +118,8 @@
     tab = kind;
     lastTab = kind;
     selected = -1;
+    // Radio only exists on the stations tab, and only Radio does there.
+    if ((kind === 'station') !== (source === 'radio') && source !== 'all') source = 'all';
   }
 
   function onTabKey(event: KeyboardEvent) {
@@ -219,22 +213,27 @@
   }
 </script>
 
+{#snippet actions()}
+  <button type="button" class="btn primary" disabled={!counts[tab]} onclick={() => playTab(false)}>
+    <Icon name="play" size={16} filled />
+    {t('album.play')}
+  </button>
+  <button type="button" class="btn ghost" disabled={!counts[tab]} onclick={() => playTab(true)}>
+    <Icon name="shuffle" size={16} />
+    {t('album.shuffle')}
+  </button>
+{/snippet}
+
 {#snippet header()}
-  <ViewHead title={t('nav.favorites')} meta={loaded ? tc(current.count, counts[tab]) : undefined}>
-    {#snippet actions()}
-      <button type="button" class="btn primary" disabled={!counts[tab]} onclick={() => playTab(false)}>
-        <Icon name="play" size={16} filled />
-        {t('album.play')}
-      </button>
-      <button type="button" class="btn ghost" disabled={!counts[tab]} onclick={() => playTab(true)}>
-        <Icon name="shuffle" size={16} />
-        {t('album.shuffle')}
-      </button>
-    {/snippet}
-  </ViewHead>
+  <!-- Stations cannot be queued, so their tab has no Play and Shuffle. -->
+  <ViewHead
+    title={t('nav.favorites')}
+    meta={loaded ? tc(current.count, counts[tab]) : undefined}
+    actions={tab === 'station' ? undefined : actions}
+  />
 
   <div class="bar">
-    <div class="tabs" role="tablist" aria-label={t('favorites.kinds')} tabindex="-1" onkeydown={onTabKey} hidden={source === 'radio'}>
+    <div class="tabs" role="tablist" aria-label={t('favorites.kinds')} tabindex="-1" onkeydown={onTabKey}>
       {#each tabs as item (item.kind)}
         <button
           type="button"
@@ -273,15 +272,6 @@
 
   {#if failed}<p class="failed">{t('favorites.loadFailed', { message: failed })}</p>{/if}
 
-  {#if shownStations.length}
-    <section class="stations" id="fav-stations" aria-labelledby="fav-stations-title">
-      <h2 id="fav-stations-title">
-        {t('favorites.stations')}
-        <span class="count">{shownStations.length.toLocaleString()}</span>
-      </h2>
-      <StationList stations={shownStations} virtual={shownStations.length >= STATIONS_VIRTUAL_FROM} />
-    </section>
-  {/if}
 {/snippet}
 
 {#snippet empty()}
@@ -293,10 +283,17 @@
       <span class="mark" aria-hidden="true"><Icon name="heart" size={26} /></span>
       <h2>{t(`favorites.empty.${tab}`)}</h2>
       <p class="lead">{t(`favorites.empty.${tab}Lead`)}</p>
-      <button type="button" class="btn ghost" onclick={() => go('albums')}>
-        <Icon name="album" size={16} />
-        {t('favorites.browse')}
-      </button>
+      {#if tab === 'station'}
+        <button type="button" class="btn ghost" onclick={() => go('radio', 'near')}>
+          <Icon name="radio" size={16} />
+          {t('favorites.empty.stationAction')}
+        </button>
+      {:else}
+        <button type="button" class="btn ghost" onclick={() => go('albums')}>
+          <Icon name="album" size={16} />
+          {t('favorites.browse')}
+        </button>
+      {/if}
     {/if}
   </div>
 {/snippet}
@@ -310,8 +307,14 @@
     <div class="scroll">
       {@render header()}
 
-      {#if source === 'radio'}
-        <!-- Only the stations show, and they sit under the header. -->
+      {#if tab === 'station'}
+        {#if shownStations.length}
+          <div class="stations">
+            <StationList stations={shownStations} virtual={shownStations.length >= STATIONS_VIRTUAL_FROM} />
+          </div>
+        {:else}
+          {@render empty()}
+        {/if}
       {:else if !loaded}
         <!-- The first load takes a moment; nothing flashes meanwhile. -->
       {:else if counts[tab] === 0}
@@ -430,10 +433,6 @@
     background: rgba(255, 255, 255, 0.04);
     box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.05);
     outline: none;
-  }
-
-  .tabs[hidden] {
-    display: none;
   }
 
   .tab {
@@ -750,18 +749,10 @@
     box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08);
   }
 
-  /* Stations: the radio view's rows under the tabs, flush with the list edge. */
+  /* Stations: the radio view's rows, flush with the song list's edge. */
 
   .stations {
-    margin: 0 -12px 30px;
-  }
-
-  .stations h2 {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    margin: 0 12px 10px;
-    font-size: 17px;
+    margin: 0 -12px;
   }
 
   /* Empty tab: an invitation, aligned with the list it stands in for. */
