@@ -1051,7 +1051,7 @@
   }
 
   /* Not in the library: kept in its place, quiet, skipped when playing. */
-  .row.missing > :global(*) {
+  .row.missing > :global(:not(.grip)) {
     opacity: 0.42;
   }
 
