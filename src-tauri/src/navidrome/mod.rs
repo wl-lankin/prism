@@ -16,6 +16,7 @@
 pub mod client;
 pub mod covers;
 pub mod keychain;
+pub mod playlists;
 pub mod sync;
 
 #[cfg(test)]
@@ -38,6 +39,7 @@ use client::{
     normalize_url, Account, NavidromeError, NavidromeFailure, ServerInfo, SubsonicClient,
 };
 use keychain::{account_key, CredentialStore};
+use playlists::sync_playlists_cancellable;
 use sync::{
     ensure_server, server_key, sync_library_cancellable, wipe_navidrome, SyncError, SyncProgress,
     SyncReport,
@@ -402,7 +404,14 @@ impl Core {
             }
         };
         let cancelled = || !self.is_current(epoch);
-        sync_library_cancellable(&self.db, client, now_ms(), &progress, &changed, &cancelled)
+        let report =
+            sync_library_cancellable(&self.db, client, now_ms(), &progress, &changed, &cancelled)?;
+        if sync_playlists_cancellable(&self.db, client, now_ms(), &cancelled)?
+            && self.is_current(epoch)
+        {
+            (self.emit)(NavidromeEvent::PlaylistsChanged);
+        }
+        Ok(report)
     }
 
     /// The status after a cycle, and when the next one is due.
