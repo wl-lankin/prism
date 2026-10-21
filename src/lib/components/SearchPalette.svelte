@@ -6,10 +6,13 @@
   import { playAlbum } from '../play';
   import { hasMixedSources } from '../stores/library.svelte';
   import { go } from '../stores/nav.svelte';
-  import type { Album, Artist, SearchResult, Track } from '../types';
+  import { findStations, radio } from '../stores/radio.svelte';
+  import type { Album, Artist, SearchResult, Station, Track } from '../types';
   import Cover from './Cover.svelte';
   import Icon from './Icon.svelte';
   import SourceBadge from './SourceBadge.svelte';
+  import StationArt from './StationArt.svelte';
+  import { playStationNotified, stationSub } from './stationUi';
 
   /** Ctrl+K / Cmd+K: search the whole library. Results come in three groups; arrows move
    *  through all of them, Enter opens an album or artist or plays a song with its album. */
@@ -20,11 +23,14 @@
 
   const DEBOUNCE_MS = 120;
   const LIMIT = 8;
+  /** The directory is asked later than the library: it is a network call. */
+  const DIRECTORY_DEBOUNCE_MS = 300;
 
   type Item =
     | { kind: 'album'; album: Album }
     | { kind: 'artist'; artist: Artist }
-    | { kind: 'song'; track: Track };
+    | { kind: 'song'; track: Track }
+    | { kind: 'station'; station: Station };
 
   let query = $state('');
   let result = $state.raw<SearchResult | null>(null);
@@ -34,12 +40,33 @@
   let list = $state<HTMLDivElement>();
   let returnFocus: HTMLElement | null = null;
 
+  /** Directory answers for the typed name; a failed call leaves none. */
+  let directory = $state.raw<Station[]>([]);
+
+  const needle = $derived(query.trim().toLowerCase());
+  const matches = (station: Station) => station.name.toLowerCase().includes(needle);
+  /** Saved stations (favorites, then recent) match at once, without a request. */
+  const savedMatches = $derived.by(() => {
+    if (!needle) return [];
+    const seen = new Set<string>();
+    return [...radio.saved.favorites, ...radio.saved.recent]
+      .filter((station) => matches(station) && !seen.has(station.id) && seen.add(station.id))
+      .slice(0, LIMIT);
+  });
+  const stations = $derived.by(() => {
+    const saved = new Set(savedMatches.map((station) => station.id));
+    // An answer for a shorter query stays only while it still fits what is typed.
+    return [...savedMatches, ...directory.filter((station) => !saved.has(station.id) && matches(station))];
+  });
+
   const groups = $derived.by(() => {
     const out: { label: Key; items: Item[] }[] = [];
-    if (!result) return out;
-    if (result.albums.length) out.push({ label: 'nav.albums', items: result.albums.map((album) => ({ kind: 'album', album })) });
-    if (result.artists.length) out.push({ label: 'nav.artists', items: result.artists.map((artist) => ({ kind: 'artist', artist })) });
-    if (result.tracks.length) out.push({ label: 'nav.songs', items: result.tracks.map((track) => ({ kind: 'song', track })) });
+    if (result) {
+      if (result.albums.length) out.push({ label: 'nav.albums', items: result.albums.map((album) => ({ kind: 'album', album })) });
+      if (result.artists.length) out.push({ label: 'nav.artists', items: result.artists.map((artist) => ({ kind: 'artist', artist })) });
+      if (result.tracks.length) out.push({ label: 'nav.songs', items: result.tracks.map((track) => ({ kind: 'song', track })) });
+    }
+    if (stations.length) out.push({ label: 'search.stations', items: stations.map((station) => ({ kind: 'station', station })) });
     return out;
   });
   const items = $derived(groups.flatMap((group) => group.items));
@@ -80,6 +107,28 @@
     return () => clearTimeout(timer);
   });
 
+  let directorySeq = 0;
+
+  $effect(() => {
+    const q = query.trim();
+    const mine = ++directorySeq;
+    if (!q || !open) {
+      directory = [];
+      return;
+    }
+    const timer = setTimeout(() => {
+      findStations(q, LIMIT)
+        .then((found) => {
+          if (mine === directorySeq) directory = found ?? [];
+        })
+        .catch(() => {
+          // The directory being down hides its stations; the saved ones stay.
+          if (mine === directorySeq) directory = [];
+        });
+    }, DIRECTORY_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  });
+
   /** Enter: acts on the result of what is typed now. Inside the debounce window the search
    *  runs at once and Enter takes its first entry; it never acts on an older query's result. */
   async function enter() {
@@ -112,6 +161,7 @@
     close();
     if (item.kind === 'album') go('album', item.album.id);
     else if (item.kind === 'artist') go('artist', item.artist.name);
+    else if (item.kind === 'station') void playStationNotified(item.station);
     else void playAlbum(item.track.albumId, { trackId: item.track.id });
   }
 
@@ -226,6 +276,14 @@
                     <span class="main">{item.artist.name}</span>
                     <span class="sub">{tc('view.count.albums', item.artist.albumCount)}</span>
                   </span>
+                {:else if item.kind === 'station'}
+                  <span class="art">
+                    <StationArt station={item.station} size={40} radius="6px" />
+                  </span>
+                  <span class="text">
+                    <span class="main">{item.station.name}</span>
+                    <span class="sub">{stationSub(item.station)}</span>
+                  </span>
                 {:else}
                   <span class="art">
                     <Cover coverId={item.track.coverId} size={40} cache={96} radius="6px" />
@@ -239,7 +297,11 @@
                 {/if}
                 {#if index === active}
                   <span class="enter" aria-hidden="true">
-                    <Icon name={item.kind === 'song' ? 'play' : 'back'} size={14} filled={item.kind === 'song'} />
+                    <Icon
+                      name={item.kind === 'song' || item.kind === 'station' ? 'play' : 'back'}
+                      size={14}
+                      filled={item.kind === 'song' || item.kind === 'station'}
+                    />
                   </span>
                 {/if}
               </div>

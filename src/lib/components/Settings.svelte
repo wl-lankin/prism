@@ -18,11 +18,15 @@
   import { library, reloadLibrary } from '../stores/library.svelte';
   import { overlays } from '../stores/nav.svelte';
   import { navidrome, navidromeErrorText } from '../stores/navidrome.svelte';
+  import { listCountries, listRegions, loadNear, radio, redetectPlace } from '../stores/radio.svelte';
   import { settings, updateSettings } from '../stores/settings.svelte';
   import type {
     CrossfadeMode,
     Folder,
     LanguagePref,
+    RadioCountry,
+    RadioLocation,
+    RadioRegion,
     ReplayGainMode,
     ServerInfo,
     Settings,
@@ -463,6 +467,95 @@
     })),
   );
 
+  // Radio location. Opening Settings never asks the location service: only "Automatic" and
+  // "Detect again" do, and the Radio view when it first needs the place.
+  const radioLocation = $derived(settings.radioLocation ?? { mode: 'auto' });
+  const manualCountry = $derived(radioLocation.mode === 'manual' ? radioLocation.countryCode : null);
+  const manualRegion = $derived(radioLocation.mode === 'manual' ? radioLocation.region : null);
+  let countries = $state.raw<RadioCountry[]>([]);
+  let regions = $state.raw<RadioRegion[]>([]);
+  let detecting = $state(false);
+
+  function countryName(code: string): string {
+    try {
+      return new Intl.DisplayNames([lang()], { type: 'region' }).of(code) ?? code;
+    } catch {
+      return code;
+    }
+  }
+
+  const placeText = $derived.by(() => {
+    const place = radio.place;
+    if (!place) return null;
+    return [place.city, countryName(place.countryCode)].filter(Boolean).join(', ');
+  });
+
+  $effect(() => {
+    if (manualCountry === null) return;
+    let gone = false;
+    listCountries()
+      .then((list) => {
+        if (!gone) countries = list;
+      })
+      .catch((err) => console.error('listing the radio countries failed', err));
+    return () => {
+      gone = true;
+    };
+  });
+
+  $effect(() => {
+    const code = manualCountry;
+    regions = [];
+    if (code === null) return;
+    let gone = false;
+    listRegions(code)
+      .then((list) => {
+        if (!gone) regions = list;
+      })
+      .catch((err) => console.error('listing the radio regions failed', err));
+    return () => {
+      gone = true;
+    };
+  });
+
+  // The saved choice stays selectable while the directory cannot list it.
+  const countryOptions: SelectOption[] = $derived.by(() => {
+    const list = countries.map((c) => ({ value: c.code, label: c.name }));
+    if (manualCountry && !list.some((c) => c.value === manualCountry)) {
+      list.unshift({ value: manualCountry, label: countryName(manualCountry) });
+    }
+    return list;
+  });
+  const regionOptions: SelectOption[] = $derived.by(() => {
+    const list = [
+      { value: '', label: t('settings.radio.anyRegion') },
+      ...regions.map((r) => ({ value: r.name, label: r.name })),
+    ];
+    if (manualRegion && !list.some((r) => r.value === manualRegion)) list.push({ value: manualRegion, label: manualRegion });
+    return list;
+  });
+
+  async function changeLocation(next: RadioLocation) {
+    await change({ radioLocation: next });
+    if (saveError === null) void loadNear();
+  }
+
+  function pickLocationMode(mode: 'auto' | 'manual') {
+    if (mode === radioLocation.mode) return;
+    if (mode === 'auto') return void changeLocation({ mode: 'auto' });
+    const countryCode = radio.place?.countryCode ?? (lang() === 'de' ? 'DE' : 'US');
+    void changeLocation({ mode: 'manual', countryCode, region: null });
+  }
+
+  async function detectAgain() {
+    detecting = true;
+    try {
+      await redetectPlace();
+    } finally {
+      detecting = false;
+    }
+  }
+
   async function changeShortcut(accelerator: string) {
     shortcutError = null;
     try {
@@ -753,6 +846,74 @@
         </div>
       </div>
       {#if ndActionError}<p class="error" role="alert">{ndActionError}</p>{/if}
+    </section>
+
+    <section aria-labelledby="settings-radio">
+      <h2 id="settings-radio">{t('settings.radio')}</h2>
+      <div class="panel">
+        <div class="row">
+          <div class="row-text">
+            <span class="row-label" id="label-radio-location">{t('settings.radio.location')}</span>
+          </div>
+          <div class="control">
+            <Segmented
+              labelledby="label-radio-location"
+              attr="data-radio-location"
+              value={radioLocation.mode}
+              options={[
+                { value: 'auto', label: t('settings.radio.auto') },
+                { value: 'manual', label: t('settings.radio.manual') },
+              ]}
+              onpick={pickLocationMode}
+            />
+          </div>
+        </div>
+
+        {#if radioLocation.mode === 'auto'}
+          <div class="row">
+            <div class="row-text">
+              <span class="row-label">
+                {placeText ? t('settings.radio.detected', { place: placeText }) : t('settings.radio.notFound')}
+              </span>
+              <span class="hint">{t('settings.radio.privacy')}</span>
+            </div>
+            <div class="control end">
+              <button type="button" class="btn ghost small" disabled={detecting} onclick={detectAgain}>
+                <Icon name="refresh" size={17} />
+                {t('settings.radio.redetect')}
+              </button>
+            </div>
+          </div>
+        {:else}
+          <div class="row">
+            <div class="row-text">
+              <span class="row-label">{t('settings.radio.country')}</span>
+            </div>
+            <div class="control">
+              <Select
+                label={t('settings.radio.country')}
+                value={manualCountry ?? ''}
+                options={countryOptions}
+                onchange={(code) => changeLocation({ mode: 'manual', countryCode: code, region: null })}
+              />
+            </div>
+          </div>
+          <div class="row">
+            <div class="row-text">
+              <span class="row-label">{t('settings.radio.region')}</span>
+            </div>
+            <div class="control">
+              <Select
+                label={t('settings.radio.region')}
+                value={manualRegion ?? ''}
+                options={regionOptions}
+                onchange={(region) =>
+                  changeLocation({ mode: 'manual', countryCode: manualCountry ?? '', region: region || null })}
+              />
+            </div>
+          </div>
+        {/if}
+      </div>
     </section>
 
     <section aria-labelledby="settings-playback">

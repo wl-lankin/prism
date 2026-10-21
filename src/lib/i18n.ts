@@ -383,6 +383,24 @@ const en = {
   'about.licensesLead': 'Prism is MIT licensed and built on these open-source components.',
   'about.external': 'used as an external program',
   'about.close': 'Close',
+  // Radio favorites, home, search, settings (M4 Task 11)
+  'favorites.stations': 'Stations',
+  'favorites.chip.radio': 'Radio',
+  'home.stations': 'Your stations',
+  'search.stations': 'Stations',
+  'stations.playFailed': 'Could not play {name}: {message}',
+  'settings.radio': 'Radio',
+  'settings.radio.location': 'Location',
+  'settings.radio.auto': 'Automatic',
+  'settings.radio.manual': 'Manual',
+  'settings.radio.detected': 'Detected place: {place}',
+  'settings.radio.notFound': 'Not found yet',
+  'settings.radio.redetect': 'Detect again',
+  'settings.radio.privacy':
+    'Prism asks geojs.io once a week for a rough location from your IP address. It stays on this computer.',
+  'settings.radio.country': 'Country',
+  'settings.radio.region': 'Region',
+  'settings.radio.anyRegion': 'Any region',
 } as const;
 
 export type Key = keyof typeof en;
@@ -765,6 +783,24 @@ const de: Record<Key, string> = {
   'about.licensesLead': 'Prism steht unter der MIT-Lizenz und baut auf diesen Open-Source-Komponenten auf.',
   'about.external': 'als externes Programm genutzt',
   'about.close': 'Schließen',
+  // Radio favorites, home, search, settings (M4 Task 11)
+  'favorites.stations': 'Sender',
+  'favorites.chip.radio': 'Radio',
+  'home.stations': 'Deine Sender',
+  'search.stations': 'Sender',
+  'stations.playFailed': '{name} konnte nicht abgespielt werden: {message}',
+  'settings.radio': 'Radio',
+  'settings.radio.location': 'Standort',
+  'settings.radio.auto': 'Automatisch',
+  'settings.radio.manual': 'Manuell',
+  'settings.radio.detected': 'Erkannter Ort: {place}',
+  'settings.radio.notFound': 'Noch nicht gefunden',
+  'settings.radio.redetect': 'Erneut erkennen',
+  'settings.radio.privacy':
+    'Prism fragt einmal pro Woche bei geojs.io nach einem groben Standort anhand deiner IP-Adresse. Er bleibt auf diesem Computer.',
+  'settings.radio.country': 'Land',
+  'settings.radio.region': 'Region',
+  'settings.radio.anyRegion': 'Alle Regionen',
 };
 
 /** The string tables, exported for tests. */

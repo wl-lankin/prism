@@ -18,6 +18,7 @@
   import { go } from '../stores/nav.svelte';
   import { notify } from '../stores/notice.svelte';
   import { player } from '../stores/player.svelte';
+  import { loadSaved, radio, toggleStationFavorite } from '../stores/radio.svelte';
   import type { Album, Artist, Source, Track } from '../types';
   import { menuPoint } from '../menu';
   import AlbumGrid from './AlbumGrid.svelte';
@@ -28,6 +29,8 @@
   import NowPlayingBars from './NowPlayingBars.svelte';
   import RowPlay from './RowPlay.svelte';
   import SourceBadge from './SourceBadge.svelte';
+  import StationArt from './StationArt.svelte';
+  import { playStationNotified, stationSub } from './stationUi';
   import ViewHead from './ViewHead.svelte';
 
   /** Favorite songs, albums and artists in three tabs, narrowed by source with the chips. */
@@ -62,6 +65,17 @@
     };
   });
 
+  $effect(() => {
+    void favorites.version;
+    void loadSaved();
+  });
+
+  // A station un-hearted here leaves the list at once, like the other kinds.
+  const shownStations = $derived(
+    source === 'all' || source === 'radio' ? radio.saved.favorites.filter((x) => favorites.stations.has(x.id)) : [],
+  );
+  const hasStations = $derived(radio.saved.favorites.some((x) => favorites.stations.has(x.id)));
+
   // An item un-hearted here leaves the list at once, before the backend confirms it.
   const keepSource = <T extends { source: Source }>(item: T) => source === 'all' || item.source === source;
   const shownTracks = $derived((tracks ?? []).filter((x) => isFavorite('track', x.id) && keepSource(x)));
@@ -74,6 +88,7 @@
   const sources = $derived.by(() => {
     const present = new Set<Source>(['local']);
     for (const item of [...(tracks ?? []), ...(albums ?? []), ...(artists ?? [])]) present.add(item.source);
+    if (hasStations) present.add('radio');
     return [...present];
   });
 
@@ -89,6 +104,11 @@
     if (tab === 'track') return (tracks ?? []).some((x) => isFavorite('track', x.id));
     if (tab === 'album') return (albums ?? []).some((x) => isFavorite('album', x.id));
     return (artists ?? []).some((x) => isFavorite('artist', x.id));
+  });
+
+  // The last station un-hearted under the Radio chip takes the chip with it.
+  $effect(() => {
+    if (source === 'radio' && !hasStations) source = 'all';
   });
 
   const tabs: { kind: FavKind; label: Key; count: Key; icon: 'songs' | 'album' | 'artist' }[] = [
@@ -245,13 +265,44 @@
           onclick={() => (source = chip as Filter)}
         >
           {#if chip !== 'all'}<span class="dot" style="--dot:var(--src-{chip})"></span>{/if}
-          {chip === 'all' ? t('favorites.all') : t(`source.${chip}`)}
+          {chip === 'all' ? t('favorites.all') : chip === 'radio' ? t('favorites.chip.radio') : t(`source.${chip}`)}
         </button>
       {/each}
     </div>
   </div>
 
   {#if failed}<p class="failed">{t('favorites.loadFailed', { message: failed })}</p>{/if}
+
+  {#if shownStations.length}
+    <section class="stations" id="fav-stations" aria-labelledby="fav-stations-title">
+      <h2 id="fav-stations-title">
+        {t('favorites.stations')}
+        <span class="count">{shownStations.length.toLocaleString()}</span>
+      </h2>
+      <ul>
+        {#each shownStations as station (station.id)}
+          <li class="station">
+            <button type="button" class="open" onclick={() => playStationNotified(station)}>
+              <StationArt {station} size={44} radius="8px" />
+              <span class="text">
+                <span class="name">{station.name}</span>
+                <span class="sub">{stationSub(station)}</span>
+              </span>
+            </button>
+            <button
+              type="button"
+              class="heart"
+              aria-pressed="true"
+              aria-label={t('favorites.toggleItem', { name: station.name })}
+              onclick={() => toggleStationFavorite(station)}
+            >
+              <Icon name="heart" size={16} filled />
+            </button>
+          </li>
+        {/each}
+      </ul>
+    </section>
+  {/if}
 {/snippet}
 
 {#snippet empty()}
@@ -280,7 +331,9 @@
     <div class="scroll">
       {@render header()}
 
-      {#if !loaded}
+      {#if source === 'radio'}
+        <!-- Only the stations show, and they sit under the header. -->
+      {:else if !loaded}
         <!-- The first load takes a moment; nothing flashes meanwhile. -->
       {:else if counts[tab] === 0}
         {@render empty()}
@@ -712,6 +765,90 @@
     border-radius: 50%;
     background: var(--bg);
     box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08);
+  }
+
+  /* Stations: a quiet list under the tabs, the heart at each row's right. */
+
+  .stations {
+    margin: 0 0 30px;
+  }
+
+  .stations h2 {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 0 0 10px;
+    font-size: 17px;
+  }
+
+  .stations ul {
+    list-style: none;
+    margin: 0 -12px;
+    padding: 0;
+  }
+
+  .station {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding-right: 12px;
+    border-radius: 10px;
+    transition: background-color var(--dur) ease-out;
+  }
+
+  .station:hover {
+    background: rgba(255, 255, 255, 0.04);
+  }
+
+  .stations .open {
+    flex: 1;
+    min-width: 0;
+    flex-direction: row;
+    align-items: center;
+    gap: 14px;
+    padding: 5px 12px;
+    text-align: left;
+  }
+
+  .stations .text {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    font-size: 13.5px;
+  }
+
+  .stations .name {
+    display: block;
+    max-width: 100%;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    font-weight: 500;
+  }
+
+  .stations .sub {
+    font-size: 12.5px;
+    color: var(--text-dim);
+  }
+
+  .heart {
+    flex: none;
+    width: 30px;
+    height: 30px;
+    display: grid;
+    place-items: center;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    background: none;
+    color: var(--spec-1);
+    cursor: pointer;
+  }
+
+  .heart:focus-visible {
+    outline: 2px solid var(--spec-4);
+    outline-offset: 1px;
   }
 
   /* Empty tab: an invitation, aligned with the list it stands in for. */

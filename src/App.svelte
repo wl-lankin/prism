@@ -2,6 +2,7 @@
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import About from './lib/components/About.svelte';
   import AlbumGrid from './lib/components/AlbumGrid.svelte';
+  import HomeStations from './lib/components/HomeStations.svelte';
   import AlbumView from './lib/components/AlbumView.svelte';
   import ArtistList from './lib/components/ArtistList.svelte';
   import ArtistView from './lib/components/ArtistView.svelte';
@@ -392,6 +393,7 @@
     {@render sourceHead(tc('view.count.albums', shownAlbums.length))}
   {:else}
     <ViewHead title={t('nav.albums')} meta={tc('view.count.albums', shownAlbums.length)} />
+    {#if nav.view === 'home'}<HomeStations />{/if}
   {/if}
 {/snippet}
 
