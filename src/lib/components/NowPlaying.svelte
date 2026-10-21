@@ -1,6 +1,6 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import { formatDuration, isLive, liveLines, sourceQualityLabel, stationInitials, streamedFrom } from '../format';
+  import { formatDuration, isLive, liveLines, sourceQualityLabel, streamedFrom } from '../format';
   import { t } from '../i18n';
   import { coverUrl, playerJump, playerQueueRange } from '../ipc';
   import { evictPages, pagesFor } from '../pages';
@@ -18,6 +18,7 @@
   import LivePill from './LivePill.svelte';
   import NowPlayingBars from './NowPlayingBars.svelte';
   import RowPlay from './RowPlay.svelte';
+  import StationTile from './StationTile.svelte';
 
   /** What plays now, as large as the window allows, beside the whole queue. The queue is
    *  virtualized: rows of 52 px, read in pages of 200 and dropped whenever its ids change. */
@@ -247,7 +248,11 @@
   {:else}
     <div class="stage">
       <div class="art">
-        <Cover coverId={track.coverId} fluid cache={600} radius="18px" alt={track.album} initials={live ? stationInitials(track.title) : undefined} />
+        {#if live}
+          <StationTile name={track.title} coverId={track.coverId} fluid cache={300} radius="18px" />
+        {:else}
+          <Cover coverId={track.coverId} fluid cache={600} radius="18px" alt={track.album} />
+        {/if}
       </div>
     </div>
 
@@ -357,7 +362,11 @@
                   </span>
                   {#if item?.track}
                     {@const q = item.track}
-                    <Cover coverId={q.coverId} size={36} cache={96} radius="6px" initials={isLive(q) ? stationInitials(q.title) : undefined} />
+                    {#if isLive(q)}
+                      <StationTile name={q.title} coverId={q.coverId} size={36} radius="6px" />
+                    {:else}
+                      <Cover coverId={q.coverId} size={36} cache={96} radius="6px" />
+                    {/if}
                     <span class="name">
                       <span class="qtitle">{q.title}</span>
                       <span class="qartist">{q.artist}</span>

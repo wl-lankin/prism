@@ -17,7 +17,8 @@ export type View =
 export interface Nav {
   view: View;
   /** The album id for 'album', the artist name for 'artist', the playlist id for 'playlist',
-   *  the tab (`near`, `search`, `saved`) for 'radio'. */
+   *  the tab (`near`, `search`, `saved`) for 'radio', the section to scroll to (`radio`) for
+   *  'settings'. */
   param?: string;
   /** A library view narrowed to one source; none shows every source. */
   source?: Source;

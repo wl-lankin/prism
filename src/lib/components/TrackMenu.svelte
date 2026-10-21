@@ -27,16 +27,16 @@
 </script>
 
 <script lang="ts">
-  import { openUrl } from '@tauri-apps/plugin-opener';
   import { onMount, tick, untrack } from 'svelte';
   import { t, tc } from '../i18n';
   import { isFavorite, setFavorite } from '../stores/favorites.svelte';
   import { go } from '../stores/nav.svelte';
   import { addToPlaylist, createWithTracks, playlists, suggestName } from '../stores/playlists.svelte';
-  import { toggleStationFavorite } from '../stores/radio.svelte';
+  import { openHomepage, toggleStationFavorite } from '../stores/radio.svelte';
   import type { Playlist } from '../types';
   import Cover from './Cover.svelte';
   import Icon from './Icon.svelte';
+  import { isWebUrl } from './StationMenu.svelte';
 
   /** The track context menu: add to a playlist (or a new one, named in place), favorite a single
    *  track, go to its album or artist, and, inside a playlist, remove the entry. A menu in the
@@ -175,17 +175,18 @@
   }
 
   const stationFavorite = $derived(station ? isFavorite('station', station.id) : false);
-  const homepage = $derived(station?.homepage && /^https?:\/\//i.test(station.homepage) ? station.homepage : null);
+  const hasHomepage = $derived(isWebUrl(station?.homepage));
 
   function toggleStation() {
     if (station) void toggleStationFavorite(station);
     close();
   }
 
-  function openHomepage() {
-    const url = homepage;
+  /** The backend opens it, after checking the link again (the webview may not open links). */
+  function openStationHomepage() {
+    const chosen = station;
     close();
-    if (url) openUrl(url).catch((err) => console.error('opening the homepage failed', err));
+    if (chosen) void openHomepage(chosen);
   }
 
   function goTo(view: 'album' | 'artist', param: string) {
@@ -263,8 +264,8 @@
       <Icon name="heart" size={16} filled={stationFavorite} />
       <span class="label">{stationFavorite ? t('radio.menu.unfavorite') : t('radio.menu.favorite')}</span>
     </button>
-    {#if homepage}
-      <button type="button" role="menuitem" tabindex="-1" class="item" onclick={openHomepage}>
+    {#if hasHomepage}
+      <button type="button" role="menuitem" tabindex="-1" class="item" onclick={openStationHomepage}>
         <Icon name="external" size={16} />
         <span class="label">{t('radio.menu.homepage')}</span>
       </button>

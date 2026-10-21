@@ -789,10 +789,60 @@ pub(crate) fn ui_stations(count: u32) -> Vec<FakeStation> {
         .collect()
 }
 
-/// Serves the fake directory and the fake location service for the dev instance until
-/// `PRISM_FAKE_SERVER_MINUTES` (default 10) are over:
+/// The ICY interval of the UI stations: one metadata block about every 10 s at 128 kbps, so a
+/// title (sent in two blocks) changes about every 20 s.
+const UI_METAINT: usize = 160_000;
+/// Slightly faster than the 2.04 s tone plays, so the player never runs dry; the ring is
+/// bounded and holds the download back.
+const UI_TONE_SECONDS: f32 = 1.9;
+const UI_TITLES: u32 = 90;
+
+/// What `serve_for_ui` runs: the fake directory with [`ui_stations`], the fake location
+/// service, and a fake stream server that plays every one of those stations as an endless MP3
+/// tone with ICY titles. All on `127.0.0.1`.
+pub(crate) struct UiServers {
+    pub directory: FakeDirectory,
+    pub geo: FakeGeo,
+    pub radio: crate::audio::live::testserver::FakeRadio,
+}
+
+impl UiServers {
+    pub fn start(count: u32) -> UiServers {
+        UiServers::paced(count, UI_TONE_SECONDS)
+    }
+
+    /// `seconds_per_loop` 0 streams as fast as the client reads (for tests).
+    fn paced(count: u32, seconds_per_loop: f32) -> UiServers {
+        use crate::audio::live::testserver::{Body, FakeRadio};
+        let radio = FakeRadio::start();
+        let titles: Vec<String> = (1..=UI_TITLES)
+            .map(|k| format!("Demo Artist {k} - Demo Song {k}"))
+            .collect();
+        let titles: Vec<&str> = titles.iter().map(String::as_str).collect();
+        let stations = ui_stations(count);
+        // Every station is the MP3 tone, whatever codec it announces: the opener goes by the
+        // content type first, and an "HLS" station still takes FFmpeg's URL path.
+        for station in &stations {
+            radio.station(
+                &format!("/stream/{}", station.n),
+                Body::Mp3Tone { seconds_per_loop },
+                Some(UI_METAINT),
+                &titles,
+            );
+        }
+        let directory = FakeDirectory::start_with_stream_base(stations, &radio.url(""));
+        let geo = FakeGeo::start();
+        UiServers {
+            directory,
+            geo,
+            radio,
+        }
+    }
+}
+
+/// Serves the fake directory, the fake location service and the fake station streams for the
+/// dev instance until `PRISM_FAKE_SERVER_MINUTES` (default 10) are over:
 /// `cargo test --manifest-path src-tauri/Cargo.toml radio::testserver::serve_for_ui -- --exact --ignored --nocapture`.
-/// Station streams point at `PRISM_FAKE_STREAM_BASE` (default `http://127.0.0.1:8099`).
 #[test]
 #[ignore = "serves fake radio data for a manual UI check"]
 fn serve_for_ui() {
@@ -800,16 +850,80 @@ fn serve_for_ui() {
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(10);
-    let stream_base = std::env::var("PRISM_FAKE_STREAM_BASE")
-        .unwrap_or_else(|_| "http://127.0.0.1:8099".to_owned());
-    let directory = FakeDirectory::start_with_stream_base(ui_stations(300), &stream_base);
-    let geo = FakeGeo::start();
-    println!("PRISM_RADIO_DIRECTORY={}", directory.url());
-    println!("PRISM_RADIO_GEO={}", geo.geojs_url());
-    println!("(ipinfo fallback: {})", geo.ipinfo_url());
-    println!("station streams point at {stream_base}/stream/<n>");
+    let servers = UiServers::start(300);
+    println!("PRISM_RADIO_DIRECTORY={}", servers.directory.url());
+    println!("PRISM_RADIO_GEO={}", servers.geo.geojs_url());
+    println!("(ipinfo fallback: {})", servers.geo.ipinfo_url());
+    println!(
+        "station streams: {} (endless MP3 tone with ICY titles)",
+        servers.radio.url("/stream/<n>")
+    );
     println!("serving for {minutes} minutes");
     std::thread::sleep(Duration::from_secs(minutes * 60));
+}
+
+/// The stations `serve_for_ui` lists really stream: the directory's URL answers with MP3 audio,
+/// `icy-metaint` and a first title.
+#[test]
+fn ui_stations_stream_from_the_fake_radio() {
+    let servers = UiServers::paced(12, 0.0);
+    let station = FakeStation::new(7);
+    let found: Value = reqwest::blocking::get(format!(
+        "{}/json/stations/byuuid?uuids={}",
+        servers.directory.url(),
+        station.uuid()
+    ))
+    .expect("asking the fake directory")
+    .json()
+    .expect("a station list");
+    let url = found[0]["url_resolved"].as_str().expect("a stream url");
+    assert_loopback(url);
+    assert_eq!(url, servers.radio.url("/stream/7"));
+
+    let mut stream =
+        TcpStream::connect(url.trim_start_matches("http://").split('/').next().unwrap())
+            .expect("connecting to the fake stream");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    write!(
+        stream,
+        "GET /stream/7 HTTP/1.1\r\nHost: 127.0.0.1\r\nIcy-MetaData: 1\r\nUser-Agent: Prism/test\r\n\r\n"
+    )
+    .unwrap();
+    // The head, then the first metadata block right after `UI_METAINT` audio bytes.
+    let mut got = Vec::new();
+    let mut buf = [0u8; 16 * 1024];
+    let head_end = loop {
+        let n = stream.read(&mut buf).expect("reading the head");
+        assert!(n > 0, "the fake stream closed early");
+        got.extend_from_slice(&buf[..n]);
+        if let Some(at) = got.windows(4).position(|w| w == b"\r\n\r\n") {
+            break at + 4;
+        }
+    };
+    let head = String::from_utf8_lossy(&got[..head_end]).to_ascii_lowercase();
+    assert!(head.starts_with("http/1.1 200"), "{head}");
+    assert!(head.contains("content-type: audio/mpeg"), "{head}");
+    assert!(
+        head.contains(&format!("icy-metaint: {UI_METAINT}")),
+        "{head}"
+    );
+    let block_at = head_end + UI_METAINT;
+    while got.len() <= block_at || got.len() < block_at + 1 + usize::from(got[block_at]) * 16 {
+        let n = stream.read(&mut buf).expect("reading the stream");
+        assert!(n > 0, "the fake stream closed early");
+        got.extend_from_slice(&buf[..n]);
+    }
+    // The audio starts with an MP3 frame sync.
+    assert_eq!(got[head_end], 0xff);
+    assert_eq!(got[head_end + 1] & 0xe0, 0xe0);
+    let block = &got[block_at + 1..block_at + 1 + usize::from(got[block_at]) * 16];
+    let text = String::from_utf8_lossy(block);
+    assert!(
+        text.starts_with("StreamTitle='Demo Artist 1 - Demo Song 1';"),
+        "{text}"
+    );
 }
 
 /// One answer of [`FakeWeb`].

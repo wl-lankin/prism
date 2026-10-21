@@ -21,15 +21,6 @@ export function liveLines(track: Pick<Track, 'title' | 'artist'>, streamTitle: s
   return heard ? { title: heard, sub: track.title } : { title: track.title, sub: track.artist };
 }
 
-/** "Radio Testhausen" -> "RT": up to two capitals for a station without a logo. */
-export function stationInitials(name: string): string {
-  const words = name.split(/\s+/).filter((w) => /[\p{L}\p{N}]/u.test(w));
-  return words
-    .slice(0, 2)
-    .map((w) => ([...w].find((c) => /[\p{L}\p{N}]/u.test(c)) ?? '').toUpperCase())
-    .join('');
-}
-
 export type QualityInput = Pick<Track, 'format'> &
   Partial<Pick<Track, 'source' | 'bitDepth' | 'sampleRate' | 'bitrateKbps'>>;
 

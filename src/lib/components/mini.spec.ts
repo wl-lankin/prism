@@ -160,6 +160,9 @@ it('mini_shows_live_and_title', async () => {
   expect(target.querySelector('.pill')?.textContent?.trim()).toBe('LIVE');
   expect(target.querySelector('.source')?.textContent?.replace(/\s+/g, ' ').trim()).toBe('LIVE Radio · MP3 128');
   expect(target.querySelector<HTMLButtonElement>('button[aria-label="Next"]')!.disabled).toBe(true);
+  // The shared station tile, not a cover with letters.
+  expect(target.querySelector('.cover-button .tile .initials')?.textContent).toBe('RT');
+  expect(target.querySelector('.cover-button .cover')).toBeNull();
   // The mini player is a separate webview: it asks for the current title itself ...
   expect(invoke).toHaveBeenCalledWith('radio_now_playing', undefined);
   // ... and then shows it over the station name.

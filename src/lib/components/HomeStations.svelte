@@ -2,9 +2,8 @@
   import { onMount } from 'svelte';
   import { t } from '../i18n';
   import { favorites } from '../stores/favorites.svelte';
-  import { loadSaved, radio } from '../stores/radio.svelte';
-  import StationArt from './StationArt.svelte';
-  import { playStationNotified } from './stationUi';
+  import { loadSaved, radio, startStation } from '../stores/radio.svelte';
+  import StationTile from './StationTile.svelte';
 
   /** Home's "Your stations" row: up to 12 favorite stations, nothing while there are none. */
   const MAX = 12;
@@ -22,8 +21,8 @@
     <ul>
       {#each shown as station (station.id)}
         <li>
-          <button type="button" class="tile" onclick={() => playStationNotified(station)}>
-            <StationArt {station} size={96} radius="12px" />
+          <button type="button" class="station" onclick={() => startStation(station)}>
+            <StationTile name={station.name} coverId={station.coverId} size={96} radius="12px" />
             <span class="name">{station.name}</span>
           </button>
         </li>
@@ -55,7 +54,7 @@
     padding-bottom: 6px;
   }
 
-  .tile {
+  .station {
     width: 96px;
     display: flex;
     flex-direction: column;
@@ -70,16 +69,18 @@
     border-radius: 12px;
   }
 
-  .tile:focus-visible {
+  .station:focus-visible {
     outline: 2px solid var(--spec-4);
     outline-offset: 3px;
   }
 
-  .tile :global(.art) {
-    transition: filter var(--dur) ease-out;
+  .station :global(.tile) {
+    transition:
+      filter var(--dur) ease-out,
+      background-color var(--dur) ease-out;
   }
 
-  .tile:hover :global(.art) {
+  .station:hover :global(.tile) {
     filter: brightness(1.12);
   }
 

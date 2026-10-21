@@ -19,7 +19,7 @@
   import { go } from '../stores/nav.svelte';
   import { notify } from '../stores/notice.svelte';
   import { player } from '../stores/player.svelte';
-  import { loadSaved, radio, toggleStationFavorite } from '../stores/radio.svelte';
+  import { loadSaved, radio } from '../stores/radio.svelte';
   import type { Album, Artist, Source, Track } from '../types';
   import { menuPoint } from '../menu';
   import AlbumGrid from './AlbumGrid.svelte';
@@ -30,8 +30,7 @@
   import NowPlayingBars from './NowPlayingBars.svelte';
   import RowPlay from './RowPlay.svelte';
   import SourceBadge from './SourceBadge.svelte';
-  import StationArt from './StationArt.svelte';
-  import { playStationNotified, stationSub } from './stationUi';
+  import StationList from './StationList.svelte';
   import ViewHead from './ViewHead.svelte';
 
   /** Favorite songs, albums and artists in three tabs, narrowed by source with the chips. */
@@ -67,6 +66,9 @@
   });
 
   onMount(() => void loadSaved());
+
+  /** A few saved stations render as plain rows; a long list only near the viewport. */
+  const STATIONS_VIRTUAL_FROM = 50;
 
   // A station un-hearted here leaves the list at once, like the other kinds.
   const shownStations = $derived(
@@ -277,28 +279,7 @@
         {t('favorites.stations')}
         <span class="count">{shownStations.length.toLocaleString()}</span>
       </h2>
-      <ul>
-        {#each shownStations as station (station.id)}
-          <li class="station">
-            <button type="button" class="open" onclick={() => playStationNotified(station)}>
-              <StationArt {station} size={44} radius="8px" />
-              <span class="text">
-                <span class="name">{station.name}</span>
-                <span class="sub">{stationSub(station)}</span>
-              </span>
-            </button>
-            <button
-              type="button"
-              class="heart"
-              aria-pressed="true"
-              aria-label={t('favorites.toggleItem', { name: station.name })}
-              onclick={() => toggleStationFavorite(station)}
-            >
-              <Icon name="heart" size={16} filled />
-            </button>
-          </li>
-        {/each}
-      </ul>
+      <StationList stations={shownStations} virtual={shownStations.length >= STATIONS_VIRTUAL_FROM} />
     </section>
   {/if}
 {/snippet}
@@ -769,88 +750,18 @@
     box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08);
   }
 
-  /* Stations: a quiet list under the tabs, the heart at each row's right. */
+  /* Stations: the radio view's rows under the tabs, flush with the list edge. */
 
   .stations {
-    margin: 0 0 30px;
+    margin: 0 -12px 30px;
   }
 
   .stations h2 {
     display: flex;
     align-items: center;
     gap: 10px;
-    margin: 0 0 10px;
+    margin: 0 12px 10px;
     font-size: 17px;
-  }
-
-  .stations ul {
-    list-style: none;
-    margin: 0 -12px;
-    padding: 0;
-  }
-
-  .station {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding-right: 12px;
-    border-radius: 10px;
-    transition: background-color var(--dur) ease-out;
-  }
-
-  .station:hover {
-    background: rgba(255, 255, 255, 0.04);
-  }
-
-  .stations .open {
-    flex: 1;
-    min-width: 0;
-    flex-direction: row;
-    align-items: center;
-    gap: 14px;
-    padding: 5px 12px;
-    text-align: left;
-  }
-
-  .stations .text {
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    font-size: 13.5px;
-  }
-
-  .stations .name {
-    display: block;
-    max-width: 100%;
-    overflow: hidden;
-    white-space: nowrap;
-    text-overflow: ellipsis;
-    font-weight: 500;
-  }
-
-  .stations .sub {
-    font-size: 12.5px;
-    color: var(--text-dim);
-  }
-
-  .heart {
-    flex: none;
-    width: 30px;
-    height: 30px;
-    display: grid;
-    place-items: center;
-    padding: 0;
-    border: 0;
-    border-radius: 50%;
-    background: none;
-    color: var(--spec-1);
-    cursor: pointer;
-  }
-
-  .heart:focus-visible {
-    outline: 2px solid var(--spec-4);
-    outline-offset: 1px;
   }
 
   /* Empty tab: an invitation, aligned with the list it stands in for. */

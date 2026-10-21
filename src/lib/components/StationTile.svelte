@@ -10,20 +10,36 @@
 </script>
 
 <script lang="ts">
-  import { coverUrl } from '../ipc';
+  import { coverUrl, type CoverSize } from '../ipc';
 
   /** A station's logo on a raised square, contained so nothing is cropped. Without a logo, or
    *  when it does not load, the station's initials in radio blue. */
-  let { name, coverId, size = 40 }: { name: string; coverId: string | null; size?: number } = $props();
+  let {
+    name,
+    coverId,
+    size = 40,
+    radius = '8px',
+    fluid = false,
+    cache = 96,
+  }: {
+    name: string;
+    coverId: string | null;
+    size?: number;
+    radius?: string;
+    /** Fills its container's width (a square) instead of `size`. */
+    fluid?: boolean;
+    /** The cached logo size; logos are small, so 96 serves every list. */
+    cache?: CoverSize;
+  } = $props();
 
-  const src = $derived(coverUrl(coverId, 96));
+  const src = $derived(coverUrl(coverId, cache));
   let failedSrc: string | null = $state(null);
   let loadedSrc: string | null = $state(null);
   const showImage = $derived(!!src && failedSrc !== src);
   const logo = $derived(showImage && loadedSrc === src);
 </script>
 
-<div class="tile" class:logo style="--s:{size}px">
+<div class="tile" class:logo class:fluid style="--s:{size}px; --r:{radius}">
   {#if !logo}
     <span class="initials" aria-hidden="true">{initials(name)}</span>
   {/if}
@@ -52,10 +68,17 @@
     display: grid;
     place-items: center;
     overflow: hidden;
-    border-radius: 8px;
+    border-radius: var(--r);
     background: var(--surface);
     box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
     transition: background-color var(--dur) ease-out;
+  }
+
+  .tile.fluid {
+    width: 100%;
+    height: auto;
+    aspect-ratio: 1;
+    container-type: inline-size;
   }
 
   .tile.logo {
@@ -70,12 +93,16 @@
     color: var(--src-radio);
   }
 
+  .fluid .initials {
+    font-size: 34cqi;
+  }
+
   img {
     position: absolute;
     inset: 0;
     width: 100%;
     height: 100%;
-    padding: 4px;
+    padding: max(4px, 8%);
     box-sizing: border-box;
     object-fit: contain;
     opacity: 0;

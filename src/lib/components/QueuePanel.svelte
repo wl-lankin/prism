@@ -1,6 +1,6 @@
 <script lang="ts">
   import { tick, untrack } from 'svelte';
-  import { formatDuration, isLive, stationInitials } from '../format';
+  import { formatDuration, isLive } from '../format';
   import { t, tc } from '../i18n';
   import { playerJump, playerMove, playerQueueRange, playerRemove } from '../ipc';
   import { evictPages, pagesFor } from '../pages';
@@ -17,6 +17,7 @@
   import Icon from './Icon.svelte';
   import LivePill from './LivePill.svelte';
   import RowPlay from './RowPlay.svelte';
+  import StationTile from './StationTile.svelte';
 
   /** "Up next": a sheet that slides in from the right over the content. The list starts at
    *  the track that plays (lit with its cover's colors), the played ones fold away above it.
@@ -444,7 +445,11 @@
               </span>
               {#if item?.track}
                 {@const q = item.track}
-                <Cover coverId={q.coverId} size={40} cache={96} radius="7px" initials={isLive(q) ? stationInitials(q.title) : undefined} />
+                {#if isLive(q)}
+                  <StationTile name={q.title} coverId={q.coverId} size={40} radius="7px" />
+                {:else}
+                  <Cover coverId={q.coverId} size={40} cache={96} radius="7px" />
+                {/if}
                 <span class="name">
                   <span class="title">{q.title}</span>
                   <span class="artist">{isCurrent ? t('queue.nowPlaying') : q.artist}</span>

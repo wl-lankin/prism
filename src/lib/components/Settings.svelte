@@ -16,7 +16,7 @@
     navidromeTest,
   } from '../ipc';
   import { library, reloadLibrary } from '../stores/library.svelte';
-  import { overlays } from '../stores/nav.svelte';
+  import { nav, overlays } from '../stores/nav.svelte';
   import { navidrome, navidromeErrorText } from '../stores/navidrome.svelte';
   import { listCountries, listRegions, loadNear, radio, redetectPlace } from '../stores/radio.svelte';
   import { settings, updateSettings } from '../stores/settings.svelte';
@@ -66,6 +66,18 @@
       folderError = t('settings.folders.loadFailed', { message: String(err) });
     }
   }
+
+  // `go('settings', 'radio')` opens Settings at that section (`#settings-section-<param>`).
+  $effect(() => {
+    const section = nav.view === 'settings' ? nav.param : undefined;
+    if (!section) return;
+    void tick().then(() => {
+      const reduce = typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
+      document
+        .getElementById(`settings-section-${section}`)
+        ?.scrollIntoView({ block: 'start', behavior: reduce ? 'auto' : 'smooth' });
+    });
+  });
 
   // Reload whenever the library changed (a scan finished, a folder came back online).
   $effect(() => {
@@ -849,7 +861,7 @@
       {#if ndActionError}<p class="error" role="alert">{ndActionError}</p>{/if}
     </section>
 
-    <section aria-labelledby="settings-radio">
+    <section id="settings-section-radio" aria-labelledby="settings-radio">
       <h2 id="settings-radio">{t('settings.radio')}</h2>
       <div class="panel">
         <div class="row">
