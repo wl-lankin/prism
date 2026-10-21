@@ -251,6 +251,7 @@ fn service(server: Option<&FakeServer>) -> Service {
             first_delay: never,
             interval: never,
             offline_retry: never,
+            ..ServiceOptions::default()
         },
     );
     Service {
