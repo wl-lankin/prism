@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { ring } from '../stores/ring.svelte';
+
   let {
     value,
     label,
@@ -15,7 +17,7 @@
     label: string;
     valueText?: string;
     step?: number;
-    /** Fill with the spectral gradient instead of plain white. */
+    /** Fill with the cover colors of the Flow ring (the spectrum without a cover) instead of plain white. */
     spectrum?: boolean;
     disabled?: boolean;
     /** Every change while dragging or on a key press. */
@@ -29,6 +31,10 @@
   let el: HTMLDivElement;
   let dragging = $state(false);
   let dragValue = $state(0);
+
+  const spectrumStyle = $derived(
+    spectrum ? ring.colors.map((color, i) => `--seek-${i + 1}:${color}`).join(';') : undefined,
+  );
 
   const shown = $derived(Math.min(Math.max(dragging ? dragValue : value || 0, 0), 1));
 
@@ -102,12 +108,37 @@
   onkeydown={key}
 >
   <div class="rail">
-    <div class="fill" class:spectrum></div>
+    <div class="fill" class:spectrum style={spectrumStyle}></div>
   </div>
   <div class="thumb"></div>
 </div>
 
 <style>
+  /* Registered so they interpolate: a new cover's colors fade in instead of jumping. */
+  @property --seek-1 {
+    syntax: '<color>';
+    inherits: false;
+    initial-value: #ff4d6d;
+  }
+
+  @property --seek-2 {
+    syntax: '<color>';
+    inherits: false;
+    initial-value: #ffc94d;
+  }
+
+  @property --seek-3 {
+    syntax: '<color>';
+    inherits: false;
+    initial-value: #4dffb2;
+  }
+
+  @property --seek-4 {
+    syntax: '<color>';
+    inherits: false;
+    initial-value: #4da6ff;
+  }
+
   .slider {
     position: relative;
     height: 16px;
@@ -149,7 +180,13 @@
 
   /* The gradient spans the whole rail, so a color always marks the same spot in the track. */
   .fill.spectrum {
-    background: linear-gradient(90deg, var(--spec-1), var(--spec-2), var(--spec-3), var(--spec-4));
+    background: linear-gradient(90deg, var(--seek-1), var(--seek-2), var(--seek-3), var(--seek-4));
+    /* The same 600 ms fade as the ring's colors, also under reduced motion. */
+    transition:
+      --seek-1 600ms ease,
+      --seek-2 600ms ease,
+      --seek-3 600ms ease,
+      --seek-4 600ms ease;
   }
 
   .thumb {
