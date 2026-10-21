@@ -77,6 +77,13 @@ export async function initPlaylists(): Promise<() => void> {
   return () => stop?.();
 }
 
+/** A stable number for a Navidrome playlist id, so its empty tile keeps one color. */
+export function remoteSeed(id: string): number {
+  let hash = 0;
+  for (let i = 0; i < id.length; i++) hash = (hash * 31 + id.charCodeAt(i)) | 0;
+  return hash;
+}
+
 /** "New playlist", or "New playlist 2", 3, ... when that name is taken. */
 export function suggestName(): string {
   const taken = new Set((playlists.list ?? []).map((p) => p.name.toLowerCase()));

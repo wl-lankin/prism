@@ -1,13 +1,13 @@
 <script lang="ts">
   import { t, tc } from '../i18n';
-  import { playPlaylist } from '../play';
+  import { playPlaylist, playRemotePlaylist } from '../play';
   import { go } from '../stores/nav.svelte';
   import { player } from '../stores/player.svelte';
-  import { createPlaylist, playlists, suggestName } from '../stores/playlists.svelte';
+  import { createPlaylist, playlists, remoteSeed, suggestName } from '../stores/playlists.svelte';
   import { saveScroll, savedScroll } from '../scroll';
   import Icon from './Icon.svelte';
   import PlaylistCover from './PlaylistCover.svelte';
-  import { playRemotePlaylist, remoteSeed } from './PlaylistView.svelte';
+  import SourceBadge from './SourceBadge.svelte';
   import ViewHead from './ViewHead.svelte';
 
   /** Every playlist as a card with its cover mosaic. "New playlist" creates one with a free
@@ -110,8 +110,7 @@
     <section class="remote" aria-labelledby="pl-remote-head">
       <header class="section-head">
         <h2 id="pl-remote-head">
-          <!-- The Navidrome source dot; unified with the shared source badge at merge. -->
-          <span class="source-dot" data-source="navidrome"></span>
+          <SourceBadge source="navidrome" size={9} />
           {t('source.navidrome')}
         </h2>
         <p class="section-lead">{t('playlists.remote.lead')}</p>
@@ -132,21 +131,7 @@
               <span class="name">{playlist.name}</span>
               <span class="meta">
                 <span class="readonly" title={t('playlist.readOnlyHint')}>
-                  <svg
-                    class="lock"
-                    width="12"
-                    height="12"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="1.8"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                    aria-hidden="true"
-                  >
-                    <rect x="5.5" y="10.5" width="13" height="9" rx="2" />
-                    <path d="M8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5" />
-                  </svg>
+                  <span class="lock"><Icon name="lock" size={12} /></span>
                   {t('playlist.readOnly')}
                 </span>
                 <span class="count">{tc('view.count.songs', playlist.trackCount)}</span>
@@ -310,15 +295,6 @@
     color: var(--text-dim);
   }
 
-  .source-dot {
-    flex: none;
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: var(--src-navidrome);
-    box-shadow: 0 0 10px color-mix(in srgb, var(--src-navidrome) 55%, transparent);
-  }
-
   .remote .meta {
     display: flex;
     align-items: center;
@@ -335,6 +311,7 @@
   }
 
   .lock {
+    display: grid;
     color: var(--src-navidrome);
   }
 
