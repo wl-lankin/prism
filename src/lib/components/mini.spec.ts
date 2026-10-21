@@ -177,6 +177,49 @@ it('mini_shows_live_and_title', async () => {
   unmount(mini);
 });
 
+it('mini_shows_ytm_when_active', async () => {
+  const mini = mount(MiniPlayer, { target });
+  await vi.waitFor(async () => {
+    await settle();
+    expect(handlers.has('ytm://state') && handlers.has('transport://active')).toBe(true);
+  });
+  // The mini player is its own webview: it asks for the YouTube Music state itself.
+  expect(invoke).toHaveBeenCalledWith('ytm_state', undefined);
+  handlers.get('transport://active')!({ payload: 'ytm' });
+  handlers.get('ytm://state')!({
+    payload: {
+      status: 'playing',
+      title: 'Web Tides',
+      artist: 'Lumen Field',
+      album: 'Low Light',
+      coverId: 'yt-0123456789abcdef0123',
+      positionMs: 50_000,
+      durationMs: 200_000,
+      canNext: true,
+      canPrev: false,
+    },
+  });
+  await settle();
+  expect(target.querySelector('.title')?.textContent?.trim()).toBe('Web Tides');
+  expect(target.querySelector('.sub')?.textContent?.trim()).toBe('Lumen Field');
+  const source = target.querySelector<HTMLElement>('.source')!;
+  expect(source.textContent?.trim()).toBe('YouTube Music');
+  expect(source.getAttribute('style')).toContain('--src-youtube');
+  expect(target.querySelector('.cover-button img')?.getAttribute('src')).toContain('yt-0123456789abcdef0123');
+  expect(target.querySelector('.ring')?.getAttribute('aria-label')).toBe('Pause');
+  expect(target.querySelector('button[aria-label="Next"]')).toHaveProperty('disabled', false);
+  expect(target.querySelector('button[aria-label="Previous"]')).toHaveProperty('disabled', true);
+  // No heart, no play modes.
+  expect(target.querySelector('.heart')).toBeNull();
+  // The ring toggles whichever player is active.
+  target.querySelector<HTMLButtonElement>('.ring')!.click();
+  await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('player_toggle', undefined));
+  handlers.get('transport://active')!({ payload: 'prism' });
+  await settle();
+  expect(target.querySelector('.title')?.textContent?.trim()).toBe('Glass Tides');
+  unmount(mini);
+});
+
 it('opens Prism with the open button', async () => {
   const mini = mount(MiniPlayer, { target });
   await settle();

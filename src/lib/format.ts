@@ -1,4 +1,4 @@
-import type { Source, StreamQuality, Track } from './types';
+import type { Source, StreamQuality, Track, YtmState } from './types';
 
 /** "3:07", or "1:02:03" from one hour on. Invalid and negative values show "0:00". */
 export function formatDuration(ms: number): string {
@@ -12,6 +12,16 @@ export function formatDuration(ms: number): string {
 /** A station: radio with no duration (the engine's `is_live`). */
 export function isLive(track: Pick<Track, 'source' | 'durationMs'> | null | undefined): boolean {
   return track?.source === 'radio' && track.durationMs === 0;
+}
+
+/** YouTube Music has nothing to show: not started yet, or the page's controls are gone. */
+export function ytmIdle(state: Pick<YtmState, 'status'>): boolean {
+  return state.status === 'idle' || state.status === 'unavailable';
+}
+
+/** The two lines YouTube Music shows: the title over the artist. */
+export function ytmLines(state: Pick<YtmState, 'title' | 'artist'>): { title: string; sub: string } {
+  return { title: state.title, sub: state.artist };
 }
 
 /** The two lines a station shows: the stream title over the station name, or, without a

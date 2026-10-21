@@ -1,11 +1,12 @@
 <script lang="ts">
-  import { flushSync, tick } from 'svelte';
+  import { flushSync, tick, untrack } from 'svelte';
   import { formatDuration } from '../format';
   import { t, tc, type Key } from '../i18n';
   import { librarySearch } from '../ipc';
   import { playAlbum } from '../play';
   import { hasMixedSources } from '../stores/library.svelte';
   import { go } from '../stores/nav.svelte';
+  import { closeOverlay, openOverlay } from '../stores/overlays.svelte';
   import { countryName, findStations, radio, startStation } from '../stores/radio.svelte';
   import type { Album, Artist, SearchResult, Station, Track } from '../types';
   import Cover from './Cover.svelte';
@@ -17,6 +18,13 @@
    *  songs, stations); arrows move through all of them, Enter opens an album or artist, plays a
    *  song with its album, or plays a station. */
   let { open = $bindable(false) }: { open?: boolean } = $props();
+
+  // The YouTube Music view is a native view above the page: it steps aside while this is open.
+  $effect(() => {
+    if (!open) return;
+    untrack(() => openOverlay('palette'));
+    return () => untrack(() => closeOverlay('palette'));
+  });
 
   /** Results carry their source's dot once the library has more than one source. */
   const mixed = $derived(hasMixedSources());

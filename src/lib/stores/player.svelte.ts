@@ -1,5 +1,5 @@
 import { t } from '../i18n';
-import { onActivePlayer, onPlayerError, onPlayerState, playerState } from '../ipc';
+import { onActivePlayer, onPlayerError, onPlayerState, playerState, transportActive } from '../ipc';
 import type { ActivePlayer, PlayerError, PlayerState, Track } from '../types';
 import { notice, notify } from './notice.svelte';
 import { findStation } from './radio.svelte';
@@ -59,11 +59,22 @@ export async function initPlayer(): Promise<() => void> {
     apply(state);
   });
   let unlistenActive: () => void = () => {};
+  let activeFresh = false;
   try {
-    unlistenActive = await onActivePlayer((active) => (player.active = active));
+    unlistenActive = await onActivePlayer((active) => {
+      activeFresh = true;
+      player.active = active;
+    });
   } catch (err) {
     console.error('following the active player failed', err);
   }
+  // Not awaited: the player state does not wait for it. A change event that came first wins.
+  transportActive().then(
+    (active) => {
+      if (!activeFresh && (active === 'prism' || active === 'ytm')) player.active = active;
+    },
+    (err) => console.error('loading the active player failed', err),
+  );
   const unlisten = () => {
     unlistenState();
     unlistenActive();

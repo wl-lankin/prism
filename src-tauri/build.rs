@@ -9,6 +9,7 @@ const COMMANDS: &[&str] = &[
     "player_seek",
     "player_set_volume",
     "player_state",
+    "transport_active",
     "player_play_files",
     "player_append",
     "player_jump",

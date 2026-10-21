@@ -1,7 +1,13 @@
 <script lang="ts">
   import { t } from '../i18n';
   import { coverUrl } from '../ipc';
-  import { hideView, reportRect, signIn, ytm } from '../stores/ytm.svelte';
+  import { onDestroy } from 'svelte';
+  import { setOverlayListener } from '../stores/overlays.svelte';
+  import { hideView, reportRect, setOverlayOpen, signIn, ytm } from '../stores/ytm.svelte';
+
+  // Before the first rect goes out, so an overlay already open keeps the child hidden.
+  setOverlayListener(setOverlayOpen);
+  onDestroy(() => setOverlayListener(null));
 
   /** YouTube Music lives in a native child view that Rust lays over the `.stage` below. This
    *  component only keeps the stage's rect reported and shows a calm still while an overlay
