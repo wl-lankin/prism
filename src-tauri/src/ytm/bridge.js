@@ -12,7 +12,7 @@
     toggle: '#play-pause-button',
     next: '.next-button',
     prev: '.previous-button',
-    video: 'video',
+    video: ['ytmusic-player video', '#movie_player video'],
   };
   var TEXT_MAX = 256;
   var URL_MAX = 2048;
@@ -28,12 +28,23 @@
     return typeof value === 'string' ? value.slice(0, max) : '';
   }
 
-  function find(selector) {
+  function find(selector, root) {
     try {
-      return document.querySelector(selector);
+      return (root || document).querySelector(selector);
     } catch (e) {
       return null;
     }
+  }
+
+  // Controls are only looked up inside the player bar, never elsewhere in the page.
+  function control(selector) {
+    var bar = find(SEL.bar);
+    return bar ? find(selector, bar) : null;
+  }
+
+  // Only the player's own video counts; other <video> elements on the page (previews, ads) are ignored.
+  function findVideo() {
+    return find(SEL.video[0]) || find(SEL.video[1]);
   }
 
   function enabled(button) {
@@ -62,10 +73,10 @@
 
   function snapshot() {
     var bar = find(SEL.bar);
-    var toggle = find(SEL.toggle);
-    var next = find(SEL.next);
-    var prev = find(SEL.prev);
-    var video = find(SEL.video);
+    var toggle = control(SEL.toggle);
+    var next = control(SEL.next);
+    var prev = control(SEL.prev);
+    var video = findVideo();
     var session = navigator.mediaSession;
     var metadata = session && session.metadata;
     var time = video ? video.currentTime : 0;
@@ -114,13 +125,26 @@
     send(state);
   }
 
+  function safeEvaluate() {
+    try {
+      evaluate(false);
+    } catch (e) {
+      // Report nothing rather than throw into the page.
+    }
+  }
+
   function onVideoEvent(event) {
-    if (event.type === 'ended') send({ v: 1, kind: 'ended' });
-    evaluate(false);
+    try {
+      if (event.target !== findVideo()) return;
+      if (event.type === 'ended') send({ v: 1, kind: 'ended' });
+      evaluate(false);
+    } catch (e) {
+      // Report nothing rather than throw into the page.
+    }
   }
 
   function refresh() {
-    var video = find(SEL.video);
+    var video = findVideo();
     if (video !== watchedVideo) {
       if (watchedVideo) {
         for (var i = 0; i < EVENTS.length; i++) watchedVideo.removeEventListener(EVENTS[i], onVideoEvent);
@@ -135,21 +159,19 @@
       if (observer) observer.disconnect();
       watchedBar = bar;
       if (bar && typeof MutationObserver === 'function') {
-        observer = observer || new MutationObserver(function () {
-          evaluate(false);
-        });
+        observer = observer || new MutationObserver(safeEvaluate);
         observer.observe(bar, { attributes: true, childList: true, subtree: true, characterData: true });
       }
     }
   }
 
   function click(selector) {
-    var button = find(selector);
+    var button = control(selector);
     if (enabled(button)) button.click();
   }
 
   function isPlaying() {
-    var video = find(SEL.video);
+    var video = findVideo();
     return !!video && !video.paused && !video.ended;
   }
 
@@ -164,7 +186,7 @@
         click(SEL.toggle);
         break;
       case 'play':
-        if (find(SEL.video) && !isPlaying()) click(SEL.toggle);
+        if (findVideo() && !isPlaying()) click(SEL.toggle);
         break;
       case 'pause':
         if (isPlaying()) click(SEL.toggle);
@@ -177,12 +199,12 @@
         break;
       case 'seek':
         var ms = number(window.__prismSeekMs);
-        video = find(SEL.video);
+        video = findVideo();
         if (video && ms !== null && ms >= 0) video.currentTime = ms / 1000;
         break;
       case 'volume':
         var level = number(window.__prismVolume);
-        video = find(SEL.video);
+        video = findVideo();
         if (video && level !== null) video.volume = Math.min(1, Math.max(0, level));
         break;
       default:

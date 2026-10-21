@@ -56,7 +56,9 @@ function button(el: HTMLElement, cls: string): HTMLElement {
 function buildPlayer(withBar = true) {
   document.body.innerHTML = '';
   video = makeVideo();
-  document.body.appendChild(video);
+  const player = document.createElement('ytmusic-player');
+  player.appendChild(video);
+  document.body.appendChild(player);
   if (!withBar) return;
   const bar = document.createElement('ytmusic-player-bar');
   button(bar, '#play-pause-button');
@@ -294,9 +296,15 @@ it('missing_mediasession_is_tolerated', () => {
 it('video_swap_is_followed', () => {
   run();
   const fresh = makeVideo();
-  video!.replaceWith(fresh);
+  const oldVideo = video!;
+  oldVideo.replaceWith(fresh);
   video = fresh;
   vi.advanceTimersByTime(1000);
+  const stale = reports.length;
+  const old = oldVideo;
+  (old as unknown as { setPaused: (p: boolean) => void }).setPaused(false);
+  old.dispatchEvent(new Event('play'));
+  expect(reports).toHaveLength(stale);
   const before = reports.length;
   play(true);
   fresh.dispatchEvent(new Event('play'));
@@ -331,4 +339,82 @@ it('sends_nothing_without_tauri_internals', () => {
   expect(() => run()).not.toThrow();
   expect(() => vi.advanceTimersByTime(2000)).not.toThrow();
   expect(reports).toHaveLength(0);
+});
+
+it('decoys_outside_the_player_are_ignored', () => {
+  const decoyVideo = makeVideo();
+  (decoyVideo as unknown as { setPaused: (p: boolean) => void }).setPaused(false);
+  document.body.prepend(decoyVideo);
+  const decoyNext = document.createElement('div');
+  decoyNext.className = 'next-button';
+  decoyNext.addEventListener('click', () => (clicks.decoy = (clicks.decoy ?? 0) + 1));
+  document.body.prepend(decoyNext);
+  run();
+  expect(states()[0].playing).toBe(false);
+  vi.advanceTimersByTime(3000);
+  expect(reports).toHaveLength(1);
+  command('next');
+  expect(clicks.decoy).toBeUndefined();
+  expect(clicks['next-button']).toBe(1);
+});
+
+it('no_bar_means_every_control_is_missing', () => {
+  document.querySelector('ytmusic-player-bar')!.remove();
+  const loose = document.createElement('div');
+  loose.id = 'play-pause-button';
+  loose.addEventListener('click', () => (clicks.loose = 1));
+  document.body.appendChild(loose);
+  run();
+  expect(reports[0]).toMatchObject({ available: false, canNext: false, canPrev: false });
+  command('toggle');
+  expect(clicks.loose).toBeUndefined();
+});
+
+it('falls_back_to_movie_player_video', () => {
+  document.body.innerHTML = '';
+  buildPlayer();
+  const player = document.querySelector('ytmusic-player')!;
+  const movie = document.createElement('div');
+  movie.id = 'movie_player';
+  const v = makeVideo();
+  (v as unknown as { setPaused: (p: boolean) => void }).setPaused(false);
+  movie.appendChild(v);
+  player.replaceWith(movie);
+  run();
+  expect(states()[0]).toMatchObject({ playing: true, available: true });
+});
+
+it('a_mutation_inside_the_bar_reports_right_away', async () => {
+  run();
+  const next = document.querySelector('.next-button')!;
+  next.setAttribute('aria-disabled', 'true');
+  await Promise.resolve();
+  expect(states()).toHaveLength(2);
+  expect(states()[1].canNext).toBe(false);
+});
+
+it('a_replaced_bar_is_re_observed', async () => {
+  run();
+  document.querySelector('ytmusic-player-bar')!.remove();
+  const bar = document.createElement('ytmusic-player-bar');
+  button(bar, '#play-pause-button');
+  const next = button(bar, 'next-button');
+  button(bar, 'previous-button');
+  document.body.appendChild(bar);
+  // The bar swap itself is picked up on the next tick; wait for it, then mutate the new bar.
+  await vi.advanceTimersByTimeAsync(1000);
+  const count = states().length;
+  next.setAttribute('aria-disabled', 'true');
+  await Promise.resolve();
+  expect(states().length).toBe(count + 1);
+  expect(states()[count].canNext).toBe(false);
+});
+
+it('works_wrapped_in_a_block', () => {
+  const wrapped = `{ const ALLOW_DEV_HOST = false;\n${source}\n}`;
+  new Function('window', 'location', 'navigator', wrapped)(win, { host: 'music.youtube.com', hostname: 'music.youtube.com' }, { mediaSession: session });
+  expect(reports).toHaveLength(1);
+  const dev = fakeWindow();
+  new Function('window', 'location', 'navigator', `{ const ALLOW_DEV_HOST = true;\n${source}\n}`)(dev, { host: '127.0.0.1:9', hostname: '127.0.0.1' }, { mediaSession: session });
+  expect(dev.__prismBridge).toBe(true);
 });
