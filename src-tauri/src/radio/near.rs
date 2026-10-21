@@ -179,6 +179,27 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(debug_assertions, ignore = "timing budget, run with --release")]
+    fn near_with_10k_stations_under_200ms() {
+        let place = testhausen(PlaceOrigin::Detected);
+        // 10 000 rows in three bands, with every tenth repeated from an earlier band.
+        let geo: Vec<Station> = (0..2_000).map(|n| near(n, (n % 100) as f32)).collect();
+        let region: Vec<Station> = (1_800..5_000).map(station).collect();
+        let country: Vec<Station> = (4_000..9_000).map(station).collect();
+        let total = geo.len() + region.len() + country.len();
+        assert!(total >= 10_000, "{total}");
+        let started = std::time::Instant::now();
+        let ranked = rank(&place, geo, region, country, usize::MAX);
+        let took = started.elapsed();
+        println!("near::rank over {total} stations: {took:?}");
+        assert!(ranked.len() > 8_000, "{}", ranked.len());
+        assert!(
+            took < std::time::Duration::from_millis(200),
+            "took {took:?}"
+        );
+    }
+
+    #[test]
     fn the_list_is_capped() {
         let place = testhausen(PlaceOrigin::Detected);
         let country: Vec<Station> = (1..=500).map(station).collect();

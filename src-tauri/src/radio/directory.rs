@@ -1098,6 +1098,144 @@ mod tests {
         assert!(Directory::new(MirrorSource::Fixed(vec!["ftp://x".into()])).is_err());
     }
 
+    /// Read-only against the real directory and one real stream. Never clicks, never votes,
+    /// prints counts and timings only (no names, no URLs, no place beyond the fake Testhausen).
+    #[test]
+    #[ignore = "reaches the internet, needs PRISM_LIVE_RADIO=1"]
+    fn live_directory_smoke() {
+        use crate::audio::live::{LiveConfig, LiveInput, LiveStream};
+        use std::io::Read;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use std::time::Instant;
+
+        if !crate::radio::testserver::allow_live_hosts() {
+            println!("PRISM_LIVE_RADIO=1 is not set: skipping the live directory smoke test");
+            return;
+        }
+        let dir = Directory::new(MirrorSource::Discover { cached: Vec::new() }).unwrap();
+
+        let t = Instant::now();
+        let servers = dir
+            .refresh_mirrors()
+            .unwrap_or_else(|e| panic!("servers: {}", e.code()));
+        println!("servers: {} mirrors in {:?}", servers.len(), t.elapsed());
+        assert!(!servers.is_empty());
+
+        let t = Instant::now();
+        let near = dir
+            .search(&StationQuery {
+                geo: Some((50.0, 10.0, 75_000.0)),
+                limit: 50,
+                ..StationQuery::default()
+            })
+            .unwrap_or_else(|e| panic!("near search: {}", e.code()));
+        println!(
+            "near search around Testhausen: {} stations in {:?}",
+            near.len(),
+            t.elapsed()
+        );
+
+        let t = Instant::now();
+        let top = dir
+            .search(&StationQuery {
+                country_code: Some("DE".into()),
+                limit: 1,
+                ..StationQuery::default()
+            })
+            .unwrap_or_else(|e| panic!("top search: {}", e.code()));
+        println!(
+            "most clicked station search: {} in {:?}",
+            top.len(),
+            t.elapsed()
+        );
+        let station = top
+            .first()
+            .expect("the directory knows a most clicked station");
+
+        let t = Instant::now();
+        let uuid = crate::radio::model::station_uuid(&station.id).expect("a station id");
+        let again = dir
+            .by_uuids(&[uuid])
+            .unwrap_or_else(|e| panic!("byuuid: {}", e.code()));
+        println!("byuuid: {} station in {:?}", again.len(), t.elapsed());
+        assert_eq!(again.len(), 1);
+
+        let url = station
+            .url_resolved
+            .clone()
+            .unwrap_or_else(|| station.url.clone());
+        println!("stream: hls flag {}", station.hls);
+
+        // Headers only: is icy-metaint announced?
+        let client = reqwest::blocking::Client::builder()
+            .user_agent(USER_AGENT)
+            .timeout(Duration::from_secs(15))
+            .build()
+            .unwrap();
+        let t = Instant::now();
+        match client.get(&url).header("Icy-MetaData", "1").send() {
+            Ok(response) => println!(
+                "stream headers: status {}, icy-metaint {} in {:?}",
+                response.status().as_u16(),
+                if response.headers().contains_key("icy-metaint") {
+                    "present"
+                } else {
+                    "absent"
+                },
+                t.elapsed()
+            ),
+            Err(_) => println!("stream headers: no answer in {:?}", t.elapsed()),
+        }
+
+        // The first 256 KiB through LiveStream, then on until a title arrives or 30 s pass.
+        let titles = Arc::new(AtomicUsize::new(0));
+        let sink_titles = Arc::clone(&titles);
+        let input = LiveInput {
+            url,
+            label: "live smoke".into(),
+            codec_hint: station.codec.clone(),
+            config: Arc::new(LiveConfig::new().unwrap()),
+            titles: Some(Arc::new(move |title| {
+                if title.is_some() {
+                    sink_titles.fetch_add(1, Ordering::SeqCst);
+                }
+            })),
+        };
+        let t = Instant::now();
+        let stream = match LiveStream::open(&input) {
+            Ok(stream) => stream,
+            Err(_) => {
+                println!("stream open: failed in {:?}", t.elapsed());
+                return;
+            }
+        };
+        if stream.is_hls() {
+            println!("stream: HLS playlist, no bytes read here");
+            return;
+        }
+        let mut reader = stream.reader();
+        let mut buf = vec![0u8; 16 * 1024];
+        let mut got = 0usize;
+        while got < 256 * 1024 {
+            match reader.read(&mut buf) {
+                Ok(n) if n > 0 => got += n,
+                _ => break,
+            }
+        }
+        println!("stream: {got} bytes in {:?}", t.elapsed());
+        assert!(got >= 256 * 1024, "only {got} bytes arrived");
+        while titles.load(Ordering::SeqCst) == 0 && t.elapsed() < Duration::from_secs(30) {
+            if reader.read(&mut buf).is_err() {
+                break;
+            }
+        }
+        match titles.load(Ordering::SeqCst) {
+            0 => println!("stream title: no title within 30 s"),
+            n => println!("stream title: arrived after {:?} ({n} seen)", t.elapsed()),
+        }
+    }
+
     #[test]
     fn errors_name_the_host_only() {
         let mut gone = FakeDirectory::start(vec![]);
