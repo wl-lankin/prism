@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import { getVersion } from '@tauri-apps/api/app';
   import { open } from '@tauri-apps/plugin-dialog';
   import logoUrl from '../../../assets/logo.svg';
@@ -19,7 +19,9 @@
   import { nav, overlays } from '../stores/nav.svelte';
   import { navidrome, navidromeErrorText } from '../stores/navidrome.svelte';
   import { listCountries, listRegions, loadNear, radio, redetectPlace } from '../stores/radio.svelte';
+  import { closeOverlay, openOverlay } from '../stores/overlays.svelte';
   import { settings, updateSettings } from '../stores/settings.svelte';
+  import { signIn as ytmSignIn, signOut as ytmSignOut } from '../stores/ytm.svelte';
   import type {
     CrossfadeMode,
     Folder,
@@ -479,6 +481,54 @@
     })),
   );
 
+  // YouTube Music. The bridge does not report the sign-in state yet, so it reads "unknown";
+  // a later field on the state fills `signedIn`.
+  const ytmSignedIn = $derived.by((): boolean | null => null);
+  const ytmStatusText = $derived(
+    t(
+      ytmSignedIn === null
+        ? 'settings.ytm.status.unknown'
+        : ytmSignedIn
+          ? 'settings.ytm.status.signedIn'
+          : 'settings.ytm.status.signedOut',
+    ),
+  );
+  let confirmYtmSignOut = $state(false);
+  let ytmSignOutTrigger = $state<HTMLButtonElement>();
+  let ytmKeepButton = $state<HTMLButtonElement>();
+
+  // The confirm is a dialog, so it hides the YouTube Music view like any overlay.
+  $effect(() => {
+    if (!confirmYtmSignOut) return;
+    // The registry reads the set it writes; keep that out of this effect's dependencies.
+    untrack(() => openOverlay('confirm-ytm-signout'));
+    return () => untrack(() => closeOverlay('confirm-ytm-signout'));
+  });
+
+  async function askYtmSignOut() {
+    confirmYtmSignOut = true;
+    await tick();
+    ytmKeepButton?.focus();
+  }
+
+  async function keepYtm() {
+    confirmYtmSignOut = false;
+    await tick();
+    ytmSignOutTrigger?.focus();
+  }
+
+  async function doYtmSignOut() {
+    confirmYtmSignOut = false;
+    await ytmSignOut();
+  }
+
+  function ytmConfirmKeys(event: KeyboardEvent) {
+    if (event.key !== 'Escape') return;
+    event.preventDefault();
+    event.stopPropagation();
+    void keepYtm();
+  }
+
   // Radio location. Opening Settings never asks the location service: only "Automatic" and
   // "Detect again" do, and the Radio view when it first needs the place.
   const radioLocation = $derived(settings.radioLocation ?? { mode: 'auto' });
@@ -923,6 +973,36 @@
                 onchange={(region) =>
                   changeLocation({ mode: 'manual', countryCode: manualCountry ?? '', region: region || null })}
               />
+            </div>
+          </div>
+        {/if}
+      </div>
+    </section>
+
+    <section id="settings-section-youtube" aria-labelledby="settings-ytm">
+      <h2 id="settings-ytm">{t('settings.ytm')}</h2>
+      <div class="panel">
+        <div class="row">
+          <div class="row-text">
+            <span class="row-label">{ytmStatusText}</span>
+            <span class="hint">{t('settings.ytm.lead')}</span>
+          </div>
+          <div class="control end account-actions">
+            <button type="button" class="btn ghost small" onclick={() => void ytmSignIn()}>{t('ytm.signIn')}</button>
+            {#if !confirmYtmSignOut}
+              <button bind:this={ytmSignOutTrigger} type="button" class="link" onclick={askYtmSignOut}>
+                {t('ytm.signOut')}
+              </button>
+            {/if}
+          </div>
+        </div>
+        {#if confirmYtmSignOut}
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <div class="confirm-row ytm-confirm" onkeydown={ytmConfirmKeys}>
+            <span>{t('ytm.signOutConfirm')}</span>
+            <div class="confirm-actions">
+              <button type="button" class="link danger" onclick={doYtmSignOut}>{t('ytm.signOut')}</button>
+              <button bind:this={ytmKeepButton} type="button" class="link keep" onclick={keepYtm}>{t('ytm.keep')}</button>
             </div>
           </div>
         {/if}

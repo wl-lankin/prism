@@ -464,9 +464,15 @@ function mountSettings() {
 it('test_connection_shows_server_version', async () => {
   setStatus({});
   mountSettings();
-  // The section sits between Library and Radio, then Playback.
+  // The section sits between Library and Radio, then YouTube Music and Playback.
   const ids = [...target.querySelectorAll('section h2')].map((h) => h.id);
-  expect(ids.slice(0, 4)).toEqual(['settings-library', 'settings-navidrome', 'settings-radio', 'settings-playback']);
+  expect(ids.slice(0, 5)).toEqual([
+    'settings-library',
+    'settings-navidrome',
+    'settings-radio',
+    'settings-ytm',
+    'settings-playback',
+  ]);
   expect(field('url').placeholder).toBe('https://music.example.com');
   expect(field('password').type).toBe('password');
 
@@ -922,5 +928,48 @@ describe('Radio settings (M4 Task 11)', () => {
       expect(combo('Region').textContent).toContain('Any region');
     });
     expect(invoke).toHaveBeenCalledWith('radio_regions', { countryCode: 'AT' });
+  });
+});
+
+describe('YouTube Music settings (M5 Task 8)', () => {
+  const ytmSection = () => target.querySelector<HTMLElement>('#settings-section-youtube')!;
+  const ytmButton = (label: string) =>
+    [...ytmSection().querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === label)!;
+  const ytmCalls = (cmd: string) => invoke.mock.calls.filter((call) => call[0] === cmd);
+
+  it('settings_sign_out_asks_first', async () => {
+    const { overlayOpen } = await import('../stores/overlays.svelte');
+    mountSettings();
+    expect(ytmSection().querySelector('h2')?.textContent).toBe('YouTube Music');
+    expect(ytmSection().textContent).toContain('Sign-in status unknown');
+    expect(ytmSection().querySelector('.confirm-row')).toBeNull();
+
+    ytmButton('Sign out').click();
+    await tick();
+    expect(ytmSection().querySelector('.confirm-row')).not.toBeNull();
+    expect(overlayOpen('confirm-ytm-signout')).toBe(true);
+    expect(ytmCalls('ytm_sign_out')).toHaveLength(0);
+    await vi.waitFor(() => expect(document.activeElement?.textContent?.trim()).toBe('Stay signed in'));
+
+    // Keeping the session closes the confirm and the overlay.
+    ytmButton('Stay signed in').click();
+    await tick();
+    expect(ytmSection().querySelector('.confirm-row')).toBeNull();
+    expect(overlayOpen('confirm-ytm-signout')).toBe(false);
+    expect(ytmCalls('ytm_sign_out')).toHaveLength(0);
+
+    ytmButton('Sign out').click();
+    await tick();
+    ytmButton('Sign out').click();
+    await tick();
+    expect(ytmCalls('ytm_sign_out')).toHaveLength(1);
+    expect(ytmSection().querySelector('.confirm-row')).toBeNull();
+    expect(overlayOpen('confirm-ytm-signout')).toBe(false);
+  });
+
+  it('settings_sign_in_calls_the_backend', () => {
+    mountSettings();
+    ytmButton('Sign in').click();
+    expect(ytmCalls('ytm_sign_in')).toHaveLength(1);
   });
 });

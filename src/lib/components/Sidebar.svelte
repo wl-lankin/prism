@@ -32,10 +32,10 @@
     { label: 'nav.songs', icon: 'songs', view: 'songs', match: ['songs'] },
   ];
 
-  // No YouTube entry until it lands (owner decision).
   const sources: Item[] = [
     { label: 'source.local', dot: 'var(--src-local)', view: 'albums', source: 'local' },
     { label: 'source.navidrome', dot: 'var(--src-navidrome)', view: 'albums', source: 'navidrome' },
+    { label: 'source.youtube', dot: 'var(--src-youtube)', view: 'youtube', match: ['youtube'] },
     { label: 'source.radio', dot: 'var(--src-radio)', view: 'radio', param: 'near', match: ['radio'] },
   ];
 

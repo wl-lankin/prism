@@ -420,6 +420,22 @@ const en = {
   'settings.radio.region': 'Region',
   'settings.radio.anyRegion': 'Any region',
 
+  // YouTube Music (M5 Task 8)
+  'ytm.title': 'YouTube Music',
+  'ytm.signInHint': 'Sign in with your Google account to see your library',
+  'ytm.signIn': 'Sign in',
+  'ytm.signOut': 'Sign out',
+  'ytm.signOutConfirm': 'Sign out of YouTube Music? Prism forgets the session on this computer.',
+  'ytm.unavailable': 'YouTube Music is paused while a menu is open',
+  'ytm.loading': 'Loading YouTube Music',
+  'ytm.hintDismiss': 'Dismiss',
+  'ytm.keep': 'Stay signed in',
+  'settings.ytm': 'YouTube Music',
+  'settings.ytm.status.signedIn': 'Signed in',
+  'settings.ytm.status.signedOut': 'Signed out',
+  'settings.ytm.status.unknown': 'Sign-in status unknown',
+  'settings.ytm.lead': 'Prism shows YouTube Music in its own view and never sees your Google password.',
+
   // Radio view (M4 Task 9)
   'radio.title': 'Radio',
   'radio.tab.near': 'Near you',
@@ -865,6 +881,22 @@ const de: Record<Key, string> = {
   'settings.radio.country': 'Land',
   'settings.radio.region': 'Region',
   'settings.radio.anyRegion': 'Alle Regionen',
+
+  // YouTube Music (M5 Task 8)
+  'ytm.title': 'YouTube Music',
+  'ytm.signInHint': 'Melde dich mit deinem Google-Konto an, um deine Mediathek zu sehen',
+  'ytm.signIn': 'Anmelden',
+  'ytm.signOut': 'Abmelden',
+  'ytm.signOutConfirm': 'Von YouTube Music abmelden? Prism vergisst die Sitzung auf diesem Computer.',
+  'ytm.unavailable': 'YouTube Music ruht, solange ein Menü offen ist',
+  'ytm.loading': 'YouTube Music lädt',
+  'ytm.hintDismiss': 'Schließen',
+  'ytm.keep': 'Angemeldet bleiben',
+  'settings.ytm': 'YouTube Music',
+  'settings.ytm.status.signedIn': 'Angemeldet',
+  'settings.ytm.status.signedOut': 'Abgemeldet',
+  'settings.ytm.status.unknown': 'Anmeldestatus unbekannt',
+  'settings.ytm.lead': 'Prism zeigt YouTube Music in einer eigenen Ansicht und sieht dein Google-Passwort nie.',
 
   // Radio view (M4 Task 9)
   'radio.title': 'Radio',
