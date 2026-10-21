@@ -101,12 +101,12 @@ pub fn apply(app: &AppHandle, accelerator: &str) -> Result<(), String> {
 }
 
 /// Where the shortcut shows the mini player: on Windows the corner above the taskbar; on
-/// macOS under the menu bar icon once a click told where it is, else the top-right corner.
-pub fn shortcut_anchor(tray_rect: Option<PhysicalRect<i32, u32>>, macos: bool) -> Anchor {
-    match (macos, tray_rect) {
-        (false, _) => Anchor::WorkAreaBottomRight,
-        (true, Some(rect)) => Anchor::BelowRect(rect),
-        (true, None) => Anchor::WorkAreaTopRight,
+/// macOS the top-right corner under the menu bar (owner decision, 2026-10-21).
+pub fn shortcut_anchor(_tray_rect: Option<PhysicalRect<i32, u32>>, macos: bool) -> Anchor {
+    if macos {
+        Anchor::WorkAreaTopRight
+    } else {
+        Anchor::WorkAreaBottomRight
     }
 }
 
@@ -298,10 +298,10 @@ mod tests {
             shortcut_anchor(None, false),
             Anchor::WorkAreaBottomRight
         ));
-        // macOS: under the menu bar icon once known, else the top-right corner.
+        // macOS: always the top-right corner under the menu bar.
         assert!(matches!(
             shortcut_anchor(Some(rect), true),
-            Anchor::BelowRect(_)
+            Anchor::WorkAreaTopRight
         ));
         assert!(matches!(
             shortcut_anchor(None, true),

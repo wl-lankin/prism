@@ -233,8 +233,8 @@ const en = {
 
   'search.open': 'Search',
   'search.label': 'Search the library',
-  'search.placeholder': 'Albums, artists and songs',
-  'search.hint': 'Type to search your library.',
+  'search.placeholder': 'Albums, artists, songs and stations',
+  'search.hint': 'Type to search your library and radio stations.',
   'search.empty': 'Nothing matches "{query}".',
   'search.failed': 'Search failed: {message}',
   'search.keys': 'Arrows to move, Enter to open, Esc to close',
@@ -676,8 +676,8 @@ const de: Record<Key, string> = {
 
   'search.open': 'Suchen',
   'search.label': 'Mediathek durchsuchen',
-  'search.placeholder': 'Alben, Interpreten und Titel',
-  'search.hint': 'Tippe, um deine Mediathek zu durchsuchen.',
+  'search.placeholder': 'Alben, Interpreten, Titel und Sender',
+  'search.hint': 'Tippe, um deine Mediathek und Radiosender zu durchsuchen.',
   'search.empty': 'Keine Treffer für „{query}“.',
   'search.failed': 'Suche fehlgeschlagen: {message}',
   'search.keys': 'Pfeiltasten zum Wählen, Enter zum Öffnen, Esc zum Schließen',

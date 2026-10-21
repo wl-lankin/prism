@@ -81,14 +81,19 @@ pub enum Anchor {
     BelowRect(PhysicalRect<i32, u32>),
 }
 
-/// Where the mini player goes: under the menu bar icon on macOS once its place is known (a
-/// tray click remembers it), the bottom-right corner otherwise.
-pub fn anchor_for(tray_rect: Option<PhysicalRect<i32, u32>>, menu_bar: bool) -> Anchor {
-    match tray_rect {
-        Some(rect) if menu_bar => Anchor::BelowRect(rect),
-        _ => Anchor::WorkAreaBottomRight,
+/// Where the mini player goes: on macOS the top-right corner under the menu bar, wherever the
+/// menu bar icon is (owner decision, 2026-10-21: it stays there all day); the bottom-right
+/// corner otherwise.
+pub fn anchor_for(_tray_rect: Option<PhysicalRect<i32, u32>>, menu_bar: bool) -> Anchor {
+    if menu_bar {
+        Anchor::WorkAreaTopRight
+    } else {
+        Anchor::WorkAreaBottomRight
     }
 }
+
+/// How far the card sits below the menu bar when docked at the top (logical px).
+const TOP_GAP: f64 = 6.0;
 
 /// The anchor for a toggle that does not come from the tray (the ring, the shortcut).
 pub fn home_anchor(app: &AppHandle) -> Anchor {
@@ -324,7 +329,12 @@ pub fn show(app: &AppHandle, anchor: &Anchor) -> tauri::Result<()> {
             w: px(config.width),
             h: px(config.player_height),
         };
-        let at = dock_position(area, player, anchor, px(MARGIN));
+        let mut at = dock_position(area, player, anchor, px(MARGIN));
+        if matches!(anchor, Anchor::WorkAreaTopRight) {
+            // The card, not the window's transparent top padding, sits just under the menu
+            // bar; the padding may reach under the bar, which stays on top.
+            at.y = area.y + px(TOP_GAP) - px(shape::shapes().mini.pad_y);
+        }
         let room = if room_above {
             px(config.height - config.player_height)
         } else {
@@ -554,20 +564,16 @@ mod tests {
     }
 
     #[test]
-    fn anchor_follows_the_menu_bar_icon_only_on_macos() {
+    fn macos_docks_to_the_top_right_corner() {
         let rect = PhysicalRect {
             position: PhysicalPosition::new(700, 0),
             size: PhysicalSize::new(24, 24),
         };
         assert!(matches!(
             anchor_for(Some(rect), true),
-            Anchor::BelowRect(at) if at.position == rect.position && at.size == rect.size
+            Anchor::WorkAreaTopRight
         ));
-        // No click yet: the corner.
-        assert!(matches!(
-            anchor_for(None, true),
-            Anchor::WorkAreaBottomRight
-        ));
+        assert!(matches!(anchor_for(None, true), Anchor::WorkAreaTopRight));
         // Windows always docks to the corner.
         assert!(matches!(
             anchor_for(Some(rect), false),
