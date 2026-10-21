@@ -1,4 +1,5 @@
 <script lang="ts">
+  import type { Snippet } from 'svelte';
   import { t, tc } from '../i18n';
   import { saveScroll, savedScroll } from '../scroll';
   import { go, nav } from '../stores/nav.svelte';
@@ -7,10 +8,35 @@
   import { visibleRange } from '../virtual';
   import Cover from './Cover.svelte';
   import NowPlayingBars from './NowPlayingBars.svelte';
+  import SourceBadge from './SourceBadge.svelte';
   import ViewHead from './ViewHead.svelte';
 
-  /** Every album artist, virtualized; a click opens the artist. */
-  let { artists }: { artists: Artist[] } = $props();
+  /** Every album artist, virtualized; a click opens the artist page, which is one page per
+   *  name over every source. */
+  let {
+    artists,
+    showSource = false,
+    header,
+  }: {
+    artists: Artist[];
+    /** Marks each artist with its source; for lists that mix sources. */
+    showSource?: boolean;
+    /** Replaces the default heading. */
+    header?: Snippet;
+  } = $props();
+
+  /** Names listed more than once (one artist per source): those rows name their source, so
+   *  the two read apart. One pass per list, not per row. */
+  const shared = $derived.by(() => {
+    const out = new Set<string>();
+    if (!showSource) return out;
+    const seen = new Set<string>();
+    for (const artist of artists) {
+      if (seen.has(artist.name)) out.add(artist.name);
+      else seen.add(artist.name);
+    }
+    return out;
+  });
 
   const ROW = 64;
   /** Each source view keeps its own scroll position. */
@@ -39,12 +65,17 @@
   }
 
   function counts(artist: Artist): string {
-    return `${tc('view.count.albums', artist.albumCount)}, ${tc('view.count.songs', artist.trackCount)}`;
+    const text = `${tc('view.count.albums', artist.albumCount)}, ${tc('view.count.songs', artist.trackCount)}`;
+    return shared.has(artist.name) ? `${t(`source.${artist.source}`)} · ${text}` : text;
   }
 </script>
 
 <div class="scroll" bind:this={scroller} bind:clientHeight={viewport} {onscroll}>
-  <ViewHead title={t('nav.artists')} meta={tc('view.count.artists', artists.length)} />
+  {#if header}
+    {@render header()}
+  {:else}
+    <ViewHead title={t('nav.artists')} meta={tc('view.count.artists', artists.length)} />
+  {/if}
 
   <ul
     class="list"
@@ -56,7 +87,10 @@
     {#each visible as artist, i (`${artist.source}:${artist.id}`)}
       <li style="transform:translateY({(range.start + i) * ROW}px)">
         <button type="button" class="row" onclick={() => go('artist', artist.name)}>
-          <Cover coverId={artist.coverId} size={44} cache={96} radius="50%" />
+          <span class="avatar">
+            <Cover coverId={artist.coverId} size={44} cache={96} radius="50%" />
+            {#if showSource && artist.source !== 'local'}<SourceBadge source={artist.source} size={9} />{/if}
+          </span>
           <span class="text">
             <span class="name">{artist.name}</span>
             <span class="counts">{counts(artist)}</span>
@@ -118,6 +152,21 @@
   .row:focus-visible {
     outline: 2px solid var(--spec-4);
     outline-offset: -2px;
+  }
+
+  .avatar {
+    position: relative;
+    flex: none;
+    display: block;
+    width: 44px;
+    height: 44px;
+  }
+
+  /* On the portrait's edge, like a presence dot. */
+  .avatar :global(.source-badge) {
+    position: absolute;
+    right: 0;
+    bottom: 1px;
   }
 
   .text {

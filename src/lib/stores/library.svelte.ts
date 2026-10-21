@@ -41,6 +41,13 @@ export function artistsOf(source?: Source): Artist[] {
   return source ? artists.filter((artist) => artist.source === source) : artists;
 }
 
+/** True when more than one source has tracks: only then do mixed lists mark each item with
+ *  its source (a library of local files alone looks as it always did). */
+export function hasMixedSources(): boolean {
+  const counts = library.trackCounts;
+  return !!counts && counts.local > 0 && counts.navidrome > 0;
+}
+
 /** Reloads albums, artists and the track counts. Calls during a reload queue one more. */
 export function reloadLibrary(): Promise<void> {
   if (loading) {

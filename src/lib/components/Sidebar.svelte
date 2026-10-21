@@ -2,6 +2,8 @@
   import logoUrl from '../../../assets/logo.svg';
   import { t, type Key } from '../i18n';
   import { go, nav, overlays, type View } from '../stores/nav.svelte';
+  import { navidrome } from '../stores/navidrome.svelte';
+  import type { Source } from '../types';
   import Icon, { type IconName } from './Icon.svelte';
 
   interface Item {
@@ -9,8 +11,10 @@
     icon?: IconName;
     dot?: string;
     view?: View;
-    /** Views that keep this item highlighted. */
+    /** Views that keep this item highlighted (while no source is chosen). */
     match?: View[];
+    /** A source entry: opens the source's albums, and is lit wherever that source is. */
+    source?: Source;
     soon?: boolean;
   }
 
@@ -26,13 +30,26 @@
     { label: 'nav.songs', icon: 'songs', view: 'songs', match: ['songs'] },
   ];
 
+  // No YouTube entry until it lands (owner decision).
   const sources: Item[] = [
-    // The only source in M1, so it is lit wherever the library albums are.
-    { label: 'source.local', dot: 'var(--src-local)', view: 'albums', match: ['albums', 'album'] },
-    { label: 'source.navidrome', dot: 'var(--src-navidrome)', soon: true },
-    { label: 'source.youtube', dot: 'var(--src-youtube)', soon: true },
+    { label: 'source.local', dot: 'var(--src-local)', view: 'albums', source: 'local' },
+    { label: 'source.navidrome', dot: 'var(--src-navidrome)', view: 'albums', source: 'navidrome' },
     { label: 'source.radio', dot: 'var(--src-radio)', soon: true },
   ];
+
+  /** The Navidrome dot: hollow while the server is away or the sync needs the user, faint
+   *  while no account is signed in, breathing while a sync runs. The state is in the name. */
+  const link = $derived.by(() => {
+    if (!navidrome.configured || navidrome.state === 'off') return { dot: 'dim', label: 'source.navidromeNotConnected' as Key };
+    if (navidrome.state === 'offline') return { dot: 'hollow', label: 'source.navidromeOffline' as Key };
+    if (navidrome.state === 'error') return { dot: 'hollow', label: 'source.navidromeFailed' as Key };
+    return { dot: navidrome.state === 'syncing' ? 'syncing' : '', label: null };
+  });
+
+  function isActive(item: Item): boolean {
+    if (item.source) return nav.source === item.source;
+    return !nav.source && !!item.match?.includes(nav.view);
+  }
 
   /** The "Coming soon" pill floats beside the hovered or keyboard-focused disabled entry. It
    *  lives outside the scrolling list, whose overflow and fade mask would cut it off. */
@@ -49,7 +66,8 @@
 </script>
 
 {#snippet entry(item: Item)}
-  {@const active = !!item.match?.includes(nav.view)}
+  {@const active = isActive(item)}
+  {@const linked = item.source === 'navidrome' ? link : null}
   <li>
     <button
       type="button"
@@ -58,7 +76,8 @@
       class:soon={item.soon}
       aria-current={active ? 'page' : undefined}
       aria-disabled={item.soon ? 'true' : undefined}
-      onclick={() => item.view && !item.soon && go(item.view)}
+      aria-label={linked?.label ? t(linked.label) : undefined}
+      onclick={() => item.view && !item.soon && go(item.view, undefined, item.source)}
       onpointerenter={item.soon ? (event) => showPill(event, true) : undefined}
       onpointerleave={item.soon ? hidePill : undefined}
       onfocus={item.soon
@@ -69,7 +88,13 @@
       {#if item.icon}
         <Icon name={item.icon} size={18} />
       {:else}
-        <span class="dot" style="--dot:{item.dot}"></span>
+        <span
+          class="dot"
+          class:hollow={linked?.dot === 'hollow'}
+          class:dim={linked?.dot === 'dim'}
+          class:syncing={linked?.dot === 'syncing'}
+          style="--dot:{item.dot}"
+        ></span>
       {/if}
       <span class="label">{t(item.label)}</span>
       {#if item.soon}
@@ -284,9 +309,43 @@
     box-shadow: 0 0 10px color-mix(in srgb, var(--dot) 55%, transparent);
   }
 
-  .soon .dot::before {
+  .soon .dot::before,
+  .dot.dim::before {
     opacity: 0.45;
     box-shadow: none;
+  }
+
+  .dot::before {
+    transition:
+      background-color var(--dur) ease-out,
+      box-shadow var(--dur) ease-out,
+      opacity var(--dur) ease-out;
+  }
+
+  /* Offline or failed: the ring stays, the light goes out. */
+  .dot.hollow::before {
+    background: transparent;
+    box-shadow: inset 0 0 0 1.5px var(--dot);
+  }
+
+  /* A sync is running: the glow breathes. An endless loop, so only where motion is welcome;
+     under reduced motion the dot stays still at a calm mid opacity. */
+  .dot.syncing::before {
+    opacity: 0.7;
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .dot.syncing::before {
+      opacity: 1;
+      animation: breathe 1.8s ease-in-out infinite;
+    }
+  }
+
+  @keyframes breathe {
+    50% {
+      box-shadow: 0 0 3px color-mix(in srgb, var(--dot) 25%, transparent);
+      opacity: 0.7;
+    }
   }
 
   .sr-only {

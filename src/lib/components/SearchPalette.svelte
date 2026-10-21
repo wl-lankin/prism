@@ -4,14 +4,19 @@
   import { t, tc, type Key } from '../i18n';
   import { librarySearch } from '../ipc';
   import { playAlbum } from '../play';
+  import { hasMixedSources } from '../stores/library.svelte';
   import { go } from '../stores/nav.svelte';
   import type { Album, Artist, SearchResult, Track } from '../types';
   import Cover from './Cover.svelte';
   import Icon from './Icon.svelte';
+  import SourceBadge from './SourceBadge.svelte';
 
   /** Ctrl+K / Cmd+K: search the whole library. Results come in three groups; arrows move
    *  through all of them, Enter opens an album or artist or plays a song with its album. */
   let { open = $bindable(false) }: { open?: boolean } = $props();
+
+  /** Results carry their source's dot once the library has more than one source. */
+  const mixed = $derived(hasMixedSources());
 
   const DEBOUNCE_MS = 120;
   const LIMIT = 8;
@@ -204,19 +209,28 @@
                 onkeydown={onkeydown}
               >
                 {#if item.kind === 'album'}
-                  <Cover coverId={item.album.coverId} size={40} cache={96} radius="6px" />
+                  <span class="art">
+                    <Cover coverId={item.album.coverId} size={40} cache={96} radius="6px" />
+                    {#if mixed && item.album.source !== 'local'}<SourceBadge source={item.album.source} size={9} />{/if}
+                  </span>
                   <span class="text">
                     <span class="main">{item.album.title}</span>
                     <span class="sub">{item.album.artist}{item.album.year ? `, ${item.album.year}` : ''}</span>
                   </span>
                 {:else if item.kind === 'artist'}
-                  <Cover coverId={item.artist.coverId} size={40} cache={96} radius="50%" />
+                  <span class="art">
+                    <Cover coverId={item.artist.coverId} size={40} cache={96} radius="50%" />
+                    {#if mixed && item.artist.source !== 'local'}<SourceBadge source={item.artist.source} size={9} />{/if}
+                  </span>
                   <span class="text">
                     <span class="main">{item.artist.name}</span>
                     <span class="sub">{tc('view.count.albums', item.artist.albumCount)}</span>
                   </span>
                 {:else}
-                  <Cover coverId={item.track.coverId} size={40} cache={96} radius="6px" />
+                  <span class="art">
+                    <Cover coverId={item.track.coverId} size={40} cache={96} radius="6px" />
+                    {#if mixed && item.track.source !== 'local'}<SourceBadge source={item.track.source} size={9} />{/if}
+                  </span>
                   <span class="text">
                     <span class="main">{item.track.title}</span>
                     <span class="sub">{item.track.artist}, {item.track.album}</span>
@@ -351,6 +365,19 @@
 
   .item.active {
     background: rgba(255, 255, 255, 0.075);
+  }
+
+  .art {
+    position: relative;
+    flex: none;
+    width: 40px;
+    height: 40px;
+  }
+
+  .art :global(.source-badge) {
+    position: absolute;
+    right: -2px;
+    bottom: -2px;
   }
 
   .text {

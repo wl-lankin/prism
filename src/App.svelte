@@ -20,16 +20,18 @@
   import Settings from './lib/components/Settings.svelte';
   import Sidebar from './lib/components/Sidebar.svelte';
   import ResizeBand from './lib/components/ResizeBand.svelte';
+  import Segmented from './lib/components/Segmented.svelte';
   import SongList from './lib/components/SongList.svelte';
+  import SourceEmpty from './lib/components/SourceEmpty.svelte';
   import TitleBar from './lib/components/TitleBar.svelte';
   import TransportStrip from './lib/components/TransportStrip.svelte';
   import ViewHead from './lib/components/ViewHead.svelte';
   import { activateIdle, holdToOpen } from './lib/flow';
-  import { t, tc, type Key } from './lib/i18n';
+  import { lang, t, tc, type Key } from './lib/i18n';
   import { onNavGo, playerPlayFiles, playerToggle, startupNotice, traySetLabels, windowVibrancy } from './lib/ipc';
   import { initFavorites } from './lib/stores/favorites.svelte';
-  import { initLibrary, library } from './lib/stores/library.svelte';
-  import { initNavidrome } from './lib/stores/navidrome.svelte';
+  import { albumsOf, artistsOf, hasMixedSources, initLibrary, library } from './lib/stores/library.svelte';
+  import { failureText, initNavidrome, navidrome } from './lib/stores/navidrome.svelte';
   import { go, nav, overlays, type View } from './lib/stores/nav.svelte';
   import { notice, notify } from './lib/stores/notice.svelte';
   import { followPlayerErrors, initPlayer, player } from './lib/stores/player.svelte';
@@ -287,6 +289,70 @@
     return view === 'home' || view === 'albums' || view === 'artists' || view === 'songs';
   }
 
+  // Source views: albums, artists and songs narrowed to `nav.source`. The lists are narrowed
+  // once per view (and per library reload), not on every render.
+  type SourceTab = 'albums' | 'artists' | 'songs';
+  const shownAlbums = $derived(albumsOf(nav.source));
+  const shownArtists = $derived(artistsOf(nav.source));
+  /** Tracks of the shown source (or of every source); null before the first load. */
+  const shownTracks = $derived(
+    library.trackCounts ? (nav.source ? library.trackCounts[nav.source] : library.trackCounts.all) : null,
+  );
+  /** The views of every source mark their items with a source, once there is more than one. */
+  const mixed = $derived(!nav.source && hasMixedSources());
+  /** An empty view of every source while Navidrome is signed in says what Navidrome is doing
+   *  (the first sync, mostly) rather than asking for a music folder. */
+  const emptyAsNavidrome = $derived(nav.source === 'navidrome' || (!nav.source && navidrome.configured));
+
+  const sourceTabs = $derived<{ value: SourceTab; label: string }[]>([
+    { value: 'albums', label: t('nav.albums') },
+    { value: 'artists', label: t('nav.artists') },
+    { value: 'songs', label: t('nav.songs') },
+  ]);
+
+  /** A calm chip beside a Navidrome view's switch: the index stays browsable meanwhile. The
+   *  visible label is short (the header must fit at the minimum window width); the full
+   *  sentence is its tooltip and accessible name. */
+  const sourceHint = $derived.by(() => {
+    if (nav.source !== 'navidrome') return null;
+    if (navidrome.state === 'offline') {
+      return { text: t('sourceView.offlineShort'), full: t('sourceView.offline'), away: true };
+    }
+    if (navidrome.state === 'error') {
+      const sentence = t('sourceView.failed');
+      const full = navidrome.error ? `${sentence}. ${failureText(navidrome.error)}` : sentence;
+      return { text: t('sourceView.failedShort'), full, away: true };
+    }
+    const progress = navidrome.progress;
+    if (navidrome.state === 'syncing' && progress) {
+      const fmt = (n: number) => n.toLocaleString(lang());
+      if (progress.total) {
+        const percent = Math.min(100, Math.floor((progress.done / progress.total) * 100));
+        const full = t('sourceView.syncing', { done: fmt(progress.done), total: fmt(progress.total) });
+        return { text: t('sourceView.syncingShort', { percent }), full, away: false };
+      }
+      const full = t('sourceView.syncingCount', { done: fmt(progress.done) });
+      return { text: t('sourceView.syncingBusy'), full, away: false };
+    }
+    return null;
+  });
+
+  /** What screen readers hear about the Navidrome link: its state changes (offline, failed,
+   *  a sync starting or finishing), never every progress number. */
+  let linkAnnouncement = $state('');
+  let lastLinkState: string | null = null;
+  $effect(() => {
+    const state = navidrome.state;
+    const previous = lastLinkState;
+    lastLinkState = state;
+    if (previous === null || previous === state) return;
+    if (state === 'offline') linkAnnouncement = t('sourceView.offline');
+    else if (state === 'error') linkAnnouncement = t('sourceView.failed');
+    else if (state === 'syncing') linkAnnouncement = t('sourceView.syncStarted');
+    else if (state === 'online' && previous === 'syncing') linkAnnouncement = t('sourceView.syncDone');
+    else linkAnnouncement = '';
+  });
+
   /** Views tinted by a cover backdrop: the title bar floats over them, so the tint runs up to
    *  the card's top edge instead of stopping under a plain header band. */
   const immersive = $derived(nav.view === 'album' || nav.view === 'playlist' || nav.view === 'nowplaying');
@@ -309,7 +375,45 @@
 <svelte:window {onkeydown} />
 
 {#snippet albumsHead()}
-  <ViewHead title={t('nav.albums')} meta={tc('view.count.albums', library.albums?.length ?? 0)} />
+  {#if nav.source}
+    {@render sourceHead(tc('view.count.albums', shownAlbums.length))}
+  {:else}
+    <ViewHead title={t('nav.albums')} meta={tc('view.count.albums', shownAlbums.length)} />
+  {/if}
+{/snippet}
+
+{#snippet artistsHead()}
+  {@render sourceHead(tc('view.count.artists', shownArtists.length))}
+{/snippet}
+
+{#snippet songsHead()}
+  {@render sourceHead(tc('view.count.songs', shownTracks ?? 0))}
+{/snippet}
+
+<!-- A source view: the source's name, its count, and a switch between its albums, artists
+     and songs. -->
+{#snippet sourceHead(meta: string)}
+  <ViewHead title={nav.source ? t(`source.${nav.source}`) : ''} {meta} actions={sourceActions} />
+{/snippet}
+
+{#snippet sourceActions()}
+  {#if sourceHint?.away && navidrome.state === 'error'}
+    <button type="button" class="source-hint away" title={sourceHint.full} aria-label={sourceHint.full} onclick={() => go('settings')}>
+      <i aria-hidden="true"></i><span class="hint-text">{sourceHint.text}</span>
+    </button>
+  {:else if sourceHint}
+    <span class="source-hint" class:away={sourceHint.away} title={sourceHint.full} role="note" aria-label={sourceHint.full}>
+      <i aria-hidden="true"></i><span class="hint-text">{sourceHint.text}</span>
+    </span>
+  {/if}
+  <span id="source-switch-label" class="sr-only">{t('sourceView.show')}</span>
+  <Segmented
+    options={sourceTabs}
+    value={nav.view as SourceTab}
+    labelledby="source-switch-label"
+    attr="data-view"
+    onpick={(view) => go(view, undefined, nav.source)}
+  />
 {/snippet}
 
 <div
@@ -355,6 +459,8 @@
           <kbd>{isMac ? 'Cmd K' : 'Ctrl K'}</kbd>
         </button>
       </TitleBar>
+      <!-- Outside the keyed view, so a state change is heard once, whichever view is open. -->
+      <span class="sr-only" role="status" aria-live="polite">{linkAnnouncement}</span>
       <!-- data-menu-bounds: context menus stay inside it, clear of the transport and the ring. -->
       <section class="content" data-menu-bounds>
         {#key `${nav.view}:${nav.param ?? ''}:${nav.source ?? ''}`}
@@ -365,18 +471,22 @@
               </div>
             {:else if libraryView(nav.view) && library.trackCounts === null}
               <!-- The first load takes a moment; nothing flashes meanwhile. -->
-            {:else if libraryView(nav.view) && library.trackCounts?.all === 0}
-              <EmptyLibrary />
+            {:else if libraryView(nav.view) && shownTracks === 0}
+              {#if emptyAsNavidrome}
+                <SourceEmpty source="navidrome" offerLocal={!nav.source} />
+              {:else}
+                <EmptyLibrary />
+              {/if}
             {:else if nav.view === 'home' || nav.view === 'albums'}
-              <AlbumGrid albums={library.albums ?? []} scrollKey="albums:{nav.source ?? 'all'}" header={albumsHead} />
+              <AlbumGrid albums={shownAlbums} scrollKey="albums:{nav.source ?? 'all'}" header={albumsHead} showSource={mixed} />
             {:else if nav.view === 'album' && nav.param}
               <AlbumView albumId={nav.param} />
             {:else if nav.view === 'artists'}
-              <ArtistList artists={library.artists ?? []} />
+              <ArtistList artists={shownArtists} showSource={mixed} header={nav.source ? artistsHead : undefined} />
             {:else if nav.view === 'artist' && nav.param}
               <ArtistView name={nav.param} />
             {:else if nav.view === 'songs'}
-              <SongList />
+              <SongList source={nav.source} showSource={mixed} header={nav.source ? songsHead : undefined} />
             {:else if nav.view === 'settings'}
               <Settings />
             {:else if nav.view === 'favorites'}
@@ -561,6 +671,89 @@
     font-size: 14px;
     line-height: 1.55;
     color: var(--text-dim);
+  }
+
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  /* A quiet status beside a source view's switch: a small dot in the source color (hollow
+     while the server is away) and one line of dim text. */
+  .source-hint {
+    display: inline-flex;
+    align-self: center;
+    align-items: center;
+    gap: 8px;
+    height: 28px;
+    padding: 0 11px 0 10px;
+    border: 0;
+    border-radius: 14px;
+    background: rgba(255, 255, 255, 0.04);
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+    color: var(--text-dim);
+    font: inherit;
+    font-size: 12.5px;
+    white-space: nowrap;
+    animation: fade var(--dur) ease-out;
+    transition:
+      background-color var(--dur) ease-out,
+      color var(--dur) ease-out;
+  }
+
+  /* At the minimum window width the chip is what gives way (its label ellipsizes); the
+     switch and the title keep their size. */
+  .source-hint {
+    min-width: 0;
+    flex-shrink: 1;
+  }
+
+  .content :global(.viewhead .actions) {
+    min-width: 0;
+  }
+
+  .content :global(.viewhead .segments) {
+    flex: none;
+  }
+
+  .hint-text {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .source-hint i {
+    width: 7px;
+    height: 7px;
+    flex: none;
+    border-radius: 50%;
+    background: var(--src-navidrome);
+    box-shadow: 0 0 8px color-mix(in srgb, var(--src-navidrome) 45%, transparent);
+  }
+
+  .source-hint.away i {
+    background: transparent;
+    box-shadow: inset 0 0 0 1.5px var(--src-navidrome);
+  }
+
+  button.source-hint {
+    cursor: pointer;
+  }
+
+  button.source-hint:hover {
+    background: rgba(255, 255, 255, 0.07);
+    color: var(--text);
+  }
+
+  button.source-hint:focus-visible {
+    outline: 2px solid var(--spec-4);
+    outline-offset: 2px;
   }
 
   .search {
