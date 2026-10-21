@@ -48,9 +48,7 @@ fn write_reply(stream: &mut TcpStream, status: u16, body: &str) {
     let _ = stream.write_all(body.as_bytes());
 }
 
-// ---- FakeGeo ----------------------------------------------------------------------------
-
-/// Path of the fake GeoJS endpoint.
+/// Path of the fake GeoJS endpoint (the `FakeGeo` section starts here).
 const GEOJS_PATH: &str = "/v1/ip/geo.json";
 /// Path of the fake ipinfo endpoint.
 const IPINFO_PATH: &str = "/json";

@@ -5,6 +5,7 @@
 //! [`Locator::locate`], and no error text or log line carries a coordinate or an IP address.
 
 use std::fmt;
+use std::io::Read;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -15,6 +16,8 @@ use crate::settings::RadioLocation;
 const GEOJS_URL: &str = "https://get.geojs.io/v1/ip/geo.json";
 const IPINFO_URL: &str = "https://ipinfo.io/json";
 const LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
+/// Both answers are a few hundred bytes; a bigger body is not one of them.
+const MAX_BODY: u64 = 64 * 1024;
 /// A detected place is asked again after a week.
 const DETECTED_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 /// The country when neither a lookup nor the locale names one.
@@ -91,6 +94,7 @@ impl IpLocator {
             .user_agent(format!("Prism/{}", env!("CARGO_PKG_VERSION")))
             .connect_timeout(LOOKUP_TIMEOUT)
             .timeout(LOOKUP_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|_| LocateError::Unreachable)?;
         let response = client
@@ -101,12 +105,18 @@ impl IpLocator {
         if !response.status().is_success() {
             return Err(LocateError::Unreachable);
         }
-        // Both answers are a few hundred bytes; a bigger body is not one of them.
-        let bytes = response.bytes().map_err(|_| LocateError::Unreachable)?;
-        if bytes.len() > 64 * 1024 {
+        if response.content_length().is_some_and(|len| len > MAX_BODY) {
             return Err(LocateError::Unusable);
         }
-        String::from_utf8(bytes.to_vec()).map_err(|_| LocateError::Unusable)
+        let mut bytes = Vec::new();
+        response
+            .take(MAX_BODY + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| LocateError::Unreachable)?;
+        if bytes.len() as u64 > MAX_BODY {
+            return Err(LocateError::Unusable);
+        }
+        String::from_utf8(bytes).map_err(|_| LocateError::Unusable)
     }
 }
 
@@ -135,7 +145,12 @@ fn coordinate(value: Option<&Value>, limit: f64) -> Option<f64> {
 }
 
 fn text(value: Option<&Value>) -> Option<String> {
-    let text = value?.as_str()?.trim();
+    let clean: String = value?
+        .as_str()?
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect();
+    let text = clean.trim();
     (!text.is_empty()).then(|| text.chars().take(80).collect())
 }
 
@@ -389,6 +404,29 @@ mod tests {
         );
         let stored = place_to_json(&place);
         assert!(!stored.contains("50.04321") && !stored.contains("10.0987"));
+    }
+
+    #[test]
+    fn oversized_answers_are_refused() {
+        let geo = FakeGeo::start();
+        let big = format!("{{\"pad\":\"{}\"}}", "x".repeat(70 * 1024));
+        geo.set_geojs(200, &big);
+        assert_eq!(
+            IpLocator::fetch(&geo.geojs_url()).unwrap_err(),
+            LocateError::Unusable
+        );
+        geo.set_geojs(200, geojs_fixture());
+        assert!(IpLocator::fetch(&geo.geojs_url()).is_ok());
+    }
+
+    #[test]
+    fn place_names_lose_control_characters() {
+        let body = geojs_fixture()
+            .replace("Testland", "Test\\u0000\\nland\\u001b")
+            .replace("Testhausen", "\\u0007\\t \\u0085");
+        let place = parse_geojs(&body).unwrap();
+        assert_eq!(place.region.as_deref(), Some("Testland"));
+        assert_eq!(place.city, None, "only control characters leaves nothing");
     }
 
     #[test]
