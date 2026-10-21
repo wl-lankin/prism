@@ -390,5 +390,8 @@ it('has the same defaults as the backend', () => {
     startWithSystem: false,
     repeat: 'off',
     shuffle: false,
+    navidromeUrl: null,
+    navidromeUser: null,
+    navidromeQuality: 'original',
   });
 });
