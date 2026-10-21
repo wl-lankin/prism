@@ -9,9 +9,24 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+static LIVE_HOSTS: AtomicBool = AtomicBool::new(false);
+
+/// The one opt-out of [`assert_loopback`], for the ignored `live_directory_smoke` test: it only
+/// takes effect when `PRISM_LIVE_RADIO=1` is set, and returns whether it did.
+pub(crate) fn allow_live_hosts() -> bool {
+    let on = std::env::var("PRISM_LIVE_RADIO").is_ok_and(|v| v == "1");
+    if on {
+        LIVE_HOSTS.store(true, Ordering::SeqCst);
+    }
+    on
+}
+
 /// Panics unless `url` points at this machine: a test that would leave it fails loudly.
 #[track_caller]
 pub(crate) fn assert_loopback(url: &str) {
+    if LIVE_HOSTS.load(Ordering::SeqCst) {
+        return;
+    }
     let host = reqwest::Url::parse(url)
         .ok()
         .and_then(|url| url.host_str().map(str::to_owned));

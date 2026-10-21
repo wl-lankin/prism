@@ -883,6 +883,222 @@ fn ogg_station_streams_its_pages() {
     assert!(out == looped(&ogg, out.len()));
 }
 
+/// Threads of this process, where the platform can tell cheaply.
+fn thread_count() -> Option<usize> {
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_dir("/proc/self/task").ok().map(|d| d.count())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let out = std::process::Command::new("ps")
+            .args(["-M", "-p", &std::process::id().to_string()])
+            .output()
+            .ok()?;
+        let lines = String::from_utf8_lossy(&out.stdout).lines().count();
+        lines.checked_sub(1)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        None
+    }
+}
+
+fn radio_station(url: String, config: &Arc<LiveConfig>) -> crate::radio::stream::StationStream {
+    crate::radio::stream::StationStream {
+        url,
+        label: LABEL.into(),
+        codec: Some("MP3".into()),
+        hls: false,
+        config: Arc::clone(config),
+        titles: Arc::new(|_| {}),
+    }
+}
+
+const DEVICE: crate::audio::source::StreamSpec = crate::audio::source::StreamSpec {
+    sample_rate: 48_000,
+    channels: 2,
+};
+
+/// One hour of a 320 kbps station is 144 MB. The fixture station is 128 kbps and is served as
+/// fast as the loopback allows (no pacing), so both passes run far above 50x real time.
+#[test]
+#[ignore = "endurance run, use --release"]
+fn live_one_hour_simulated() {
+    use crate::audio::source::AudioSource;
+    use crate::radio::stream::RadioSource;
+
+    let ring = 256 * 1024;
+    let config = config(ring, Duration::from_secs(5));
+    let started = Instant::now();
+    let before = thread_count();
+
+    {
+        let server = FakeRadio::start();
+        tone_station(&server, "/station", None, &[]);
+
+        // Pass 1, bytes: 144 MB through a small ring, checked against the looped tone.
+        let stream = open(&input(server.url("/station"), &config, None));
+        let tone = server.tone().to_vec();
+        let mut reader = stream.reader();
+        let mut buf = vec![0; 64 * 1024];
+        let total: usize = 320_000 / 8 * 3600;
+        let mut offset = 0usize;
+        while offset < total {
+            let n = reader.read(&mut buf).unwrap();
+            let mut checked = 0;
+            while checked < n {
+                let at = (offset + checked) % tone.len();
+                let run = (tone.len() - at).min(n - checked);
+                assert!(
+                    buf[checked..checked + run] == tone[at..at + run],
+                    "bytes differ at {}",
+                    offset + checked
+                );
+                checked += run;
+            }
+            offset += n;
+        }
+        println!(
+            "pass 1: {} MB in {:?}, peak buffered {} of {ring}",
+            offset / 1_000_000,
+            started.elapsed(),
+            stream.peak_buffered()
+        );
+        assert!(stream.peak_buffered() <= ring, "{}", stream.peak_buffered());
+        assert_eq!(stream.reconnected(), 0);
+        assert_eq!(server.requests().len(), 1);
+        drop(reader);
+        drop(stream);
+
+        // Pass 2, audio: one hour of decoded frames through RadioSource, nothing kept.
+        let pass = Instant::now();
+        let mut source =
+            RadioSource::open(radio_station(server.url("/station"), &config), DEVICE).unwrap();
+        let spec = source.spec();
+        let wanted = spec.sample_rate as u64 * 3600;
+        let channels = spec.channels as usize;
+        let mut samples = Vec::new();
+        let (mut frames, mut zero_run, mut longest_zero) = (0u64, 0usize, 0usize);
+        while frames < wanted {
+            samples.clear();
+            let read = source
+                .read(&mut samples)
+                .expect("a live source never errors");
+            assert!(read > 0, "a live source never ends");
+            assert_eq!(samples.len(), read * channels);
+            for frame in samples.chunks_exact(channels) {
+                if frame.iter().all(|s| *s == 0.0) {
+                    zero_run += 1;
+                    longest_zero = longest_zero.max(zero_run);
+                } else {
+                    zero_run = 0;
+                }
+            }
+            frames += read as u64;
+        }
+        let hours = frames as f64 / spec.sample_rate as f64 / 3600.0;
+        println!(
+            "pass 2: {frames} frames ({hours:.3} h of audio) in {:?}, {:.0}x real time, \
+             longest silent run {longest_zero} frames",
+            pass.elapsed(),
+            frames as f64 / spec.sample_rate as f64 / pass.elapsed().as_secs_f64()
+        );
+        assert!((1.0..1.001).contains(&hours), "{hours}");
+        // A reopen would hand out at least 20 ms (882 frames) of silence.
+        assert!(longest_zero < 200, "silent run of {longest_zero} frames");
+        assert_eq!(
+            server.requests().len(),
+            2,
+            "one connection per pass, no reopen"
+        );
+        drop(source);
+        assert!(wait_until(Duration::from_secs(3), || server.connections() == 0));
+    }
+
+    if let Some(before) = before {
+        let mut after = thread_count().unwrap();
+        let settle = Instant::now();
+        while after > before && settle.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(50));
+            after = thread_count().unwrap();
+        }
+        println!("threads before {before}, after {after}");
+        assert!(after <= before, "threads leaked: {before} -> {after}");
+    } else {
+        println!("thread count not available on this platform: skipped");
+    }
+}
+
+/// The station drops every 2 s (the port is down for 300 ms each time) for a minute. The
+/// source must not error, must reconnect once per cut and must never wait long.
+#[test]
+#[ignore = "runs for a minute"]
+fn reconnect_storm() {
+    use crate::audio::source::AudioSource;
+    use crate::radio::stream::RadioSource;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let server = Arc::new(FakeRadio::start());
+    // Served at the pace of the audio (2 s per loop), like a real station.
+    server.station(
+        "/station",
+        Body::Mp3Tone {
+            seconds_per_loop: 2.0,
+        },
+        None,
+        &[],
+    );
+    let config = config(128 * 1024, Duration::from_secs(20));
+    let mut source =
+        RadioSource::open(radio_station(server.url("/station"), &config), DEVICE).unwrap();
+    let spec = source.spec();
+    let cuts = AtomicUsize::new(0);
+    let storm = Duration::from_secs(60);
+    let started = Instant::now();
+    let (mut frames, mut longest_gap) = (0u64, Duration::ZERO);
+    let mut samples = Vec::new();
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let mut next = Duration::from_secs(2);
+            while started.elapsed() + Duration::from_millis(400) < storm {
+                if started.elapsed() >= next {
+                    server.stop();
+                    std::thread::sleep(Duration::from_millis(300));
+                    server.restart();
+                    cuts.fetch_add(1, Ordering::SeqCst);
+                    next += Duration::from_secs(2);
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+        let mut last = Instant::now();
+        while started.elapsed() < storm {
+            samples.clear();
+            let read = source
+                .read(&mut samples)
+                .unwrap_or_else(|err| panic!("the source errored during the storm: {err:#}"));
+            assert!(read > 0, "a live source never ends");
+            frames += read as u64;
+            longest_gap = longest_gap.max(last.elapsed());
+            last = Instant::now();
+        }
+    });
+    let cuts = cuts.load(Ordering::SeqCst);
+    let requests = server.requests().len();
+    let seconds = frames as f64 / spec.sample_rate as f64;
+    println!(
+        "{cuts} cuts, {requests} requests, {seconds:.1} s of audio in {:?}, longest wait {longest_gap:?}",
+        started.elapsed()
+    );
+    assert!(cuts >= 25, "{cuts}");
+    assert_eq!(requests, cuts + 1, "exactly one reconnect per cut");
+    // 300 ms down, then the 50/100 ms test backoff, plus the decoder's own latency.
+    assert!(longest_gap < Duration::from_secs(2), "{longest_gap:?}");
+    assert!(seconds > 40.0, "{seconds}");
+    drop(source);
+}
+
 #[test]
 fn config_defaults() {
     let config = LiveConfig::new().unwrap();
