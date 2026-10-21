@@ -295,6 +295,13 @@ const en = {
   'navidrome.notConnected': 'Navidrome is not connected. Sign in again in the settings.',
   'navidrome.offlineNotice': 'Navidrome is not reachable. Press Play to go on once it is back.',
 
+  'playlists.remote.lead': 'Playlists from your server. Edit them in Navidrome.',
+  'playlist.readOnly': 'Read-only',
+  'playlist.readOnlyHint': 'This playlist belongs to your Navidrome server. Change it there.',
+  'playlist.owner': 'by {owner}',
+  'playlist.remoteMissing': 'Not available from Navidrome',
+  'playlist.remoteEmptyLead': 'Add songs to it in Navidrome and they show up here after the next sync.',
+
   'about.version': 'Version {version}',
   'about.tagline': 'One player, every color of sound.',
   'about.madeBy': 'Made by',
@@ -598,6 +605,13 @@ const de: Record<Key, string> = {
   'navidrome.error.withDetail': '{text} Der Server meldet: {detail}',
   'navidrome.notConnected': 'Navidrome ist nicht verbunden. Melde dich in den Einstellungen wieder an.',
   'navidrome.offlineNotice': 'Navidrome ist nicht erreichbar. Drücke Wiedergabe, sobald der Server wieder da ist.',
+
+  'playlists.remote.lead': 'Playlists von deinem Server. Bearbeiten kannst du sie in Navidrome.',
+  'playlist.readOnly': 'Schreibgeschützt',
+  'playlist.readOnlyHint': 'Diese Playlist gehört zu deinem Navidrome-Server. Ändern kannst du sie dort.',
+  'playlist.owner': 'von {owner}',
+  'playlist.remoteMissing': 'Von Navidrome nicht verfügbar',
+  'playlist.remoteEmptyLead': 'Füge in Navidrome Titel hinzu, dann erscheinen sie hier nach dem nächsten Abgleich.',
 
   'about.version': 'Version {version}',
   'about.tagline': 'Ein Player, jede Farbe des Klangs.',

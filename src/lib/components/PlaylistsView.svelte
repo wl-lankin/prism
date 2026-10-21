@@ -7,15 +7,18 @@
   import { saveScroll, savedScroll } from '../scroll';
   import Icon from './Icon.svelte';
   import PlaylistCover from './PlaylistCover.svelte';
+  import { playRemotePlaylist, remoteSeed } from './PlaylistView.svelte';
   import ViewHead from './ViewHead.svelte';
 
   /** Every playlist as a card with its cover mosaic. "New playlist" creates one with a free
-   *  name and opens it with the title ready to type over. */
+   *  name and opens it with the title ready to type over. The Navidrome server's playlists
+   *  follow in their own section, marked read-only. */
   const KEY = 'playlists';
   let scroller = $state<HTMLDivElement>();
   let creating = $state(false);
 
   const list = $derived(playlists.list);
+  const remote = $derived(playlists.remote ?? []);
 
   $effect(() => {
     if (!scroller || !list) return;
@@ -99,6 +102,62 @@
         </li>
       {/each}
     </ul>
+  {/if}
+
+  {#if list !== null && remote.length}
+    <section class="remote" aria-labelledby="pl-remote-head">
+      <header class="section-head">
+        <h2 id="pl-remote-head">
+          <!-- The Navidrome source dot; unified with the shared source badge at merge. -->
+          <span class="source-dot" data-source="navidrome"></span>
+          {t('source.navidrome')}
+        </h2>
+        <p class="section-lead">{t('playlists.remote.lead')}</p>
+      </header>
+      <ul class="grid">
+        {#each remote as playlist (playlist.id)}
+          <li class="card">
+            <button type="button" class="open" onclick={() => go('playlist', playlist.id)}>
+              <span class="art">
+                <PlaylistCover coverIds={playlist.coverIds} seed={remoteSeed(playlist.id)} fluid radius="12px" />
+              </span>
+              <span class="name">{playlist.name}</span>
+              <span class="meta">
+                <span class="readonly" title={t('playlist.readOnlyHint')}>
+                  <svg
+                    width="12"
+                    height="12"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.8"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    aria-hidden="true"
+                  >
+                    <rect x="5.5" y="10.5" width="13" height="9" rx="2" />
+                    <path d="M8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5" />
+                  </svg>
+                  {t('playlist.readOnly')}
+                </span>
+                <span class="count">{tc('view.count.songs', playlist.trackCount)}</span>
+              </span>
+            </button>
+            {#if playlist.trackCount > 0}
+              <button
+                type="button"
+                class="play"
+                aria-label={t('album.playTitle', { title: playlist.name })}
+                title={t('album.playTitle', { title: playlist.name })}
+                onclick={() => playRemotePlaylist(playlist.id)}
+              >
+                <Icon name="play" size={18} filled />
+              </button>
+            {/if}
+          </li>
+        {/each}
+      </ul>
+    </section>
   {/if}
 </div>
 
@@ -216,6 +275,59 @@
   .play:focus-visible {
     outline: 2px solid var(--spec-4);
     outline-offset: 2px;
+  }
+
+  /* The Navidrome section: a hairline above, the source in its color, then the same cards. */
+  .remote {
+    margin-top: 40px;
+    padding-top: 26px;
+    border-top: 1px solid var(--line);
+  }
+
+  .section-head {
+    margin-bottom: 20px;
+  }
+
+  .section-head h2 {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 0 0 4px;
+  }
+
+  .section-lead {
+    margin: 0;
+    font-size: 13px;
+    color: var(--text-dim);
+  }
+
+  .source-dot {
+    flex: none;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--src-navidrome);
+    box-shadow: 0 0 10px color-mix(in srgb, var(--src-navidrome) 55%, transparent);
+  }
+
+  .remote .meta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .readonly {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    color: color-mix(in srgb, var(--src-navidrome) 70%, var(--text-dim));
+  }
+
+  .count {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   /* No playlists: three sheets fanned out, an invitation to start the first. */

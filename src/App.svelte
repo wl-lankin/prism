@@ -373,7 +373,7 @@
             {:else if nav.view === 'playlists'}
               <PlaylistsView />
             {:else if nav.view === 'playlist' && nav.param}
-              <PlaylistView playlistId={Number(nav.param)} />
+              <PlaylistView playlistId={nav.param.startsWith('navidrome:') ? nav.param : Number(nav.param)} />
             {:else}
               <div class="placeholder">
                 <h1>{t(titles[nav.view])}</h1>
