@@ -103,7 +103,8 @@ pub fn station_uuid(id: &str) -> Option<&str> {
     (is_uuid_shape(uuid) && !uuid.bytes().any(|byte| byte.is_ascii_uppercase())).then_some(uuid)
 }
 
-fn http_url(url: &str) -> Option<&str> {
+/// An http(s) URL without whitespace or control characters, of at most 2 048 bytes.
+pub(crate) fn http_url(url: &str) -> Option<&str> {
     let lower = url.get(..8).unwrap_or(url).to_ascii_lowercase();
     let schemed = lower.starts_with("http://") || lower.starts_with("https://");
     let clean = !url.chars().any(|ch| ch.is_control() || ch.is_whitespace());
@@ -120,6 +121,16 @@ fn hashed_cover_id(key: &str) -> String {
 /// `rb-<first 20 hex of sha1(url)>` for an http(s) URL of at most 2 048 bytes.
 pub fn favicon_cover_id(url: &str) -> Option<String> {
     http_url(url).map(hashed_cover_id)
+}
+
+/// The 20 lowercase hex digits of a logo cover id, `None` for anything else.
+pub fn radio_cover_raw(id: &str) -> Option<&str> {
+    let raw = id.strip_prefix(RADIO_COVER_PREFIX)?;
+    let hex = raw.len() == 20
+        && raw
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    hex.then_some(raw)
 }
 
 /// The cover id of a homepage logo: `rb-<first 20 hex of sha1("home:" + homepage)>`.
@@ -347,6 +358,15 @@ pub(crate) mod tests {
         let long = format!("https://example.test/{}", "a".repeat(3000));
         assert_eq!(favicon_cover_id(&long), None);
         assert_eq!(favicon_cover_id("https://example.test/a b.png"), None);
+        assert_eq!(radio_cover_raw(&id), Some(&id[3..]));
+        for bad in [
+            "rb-",
+            "rb-../x",
+            "nd-0123456789abcdef0123",
+            "rb-0123456789ABCDEF0123",
+        ] {
+            assert_eq!(radio_cover_raw(bad), None, "{bad}");
+        }
     }
 
     #[test]
