@@ -4,6 +4,7 @@
   import { playerNext, playerPrev, playerSeek, playerSetVolume } from '../ipc';
   import { back, go, nav } from '../stores/nav.svelte';
   import { player } from '../stores/player.svelte';
+  import { QUEUE_TOGGLE_ID } from '../queue';
   import { queuePanel, toggleQueuePanel } from '../stores/queue.svelte';
   import Cover from './Cover.svelte';
   import Heart from './Heart.svelte';
@@ -114,6 +115,7 @@
     <PlayModes />
     <button
       type="button"
+      id={QUEUE_TOGGLE_ID}
       class="btn small toggle"
       class:on={queuePanel.open}
       aria-pressed={queuePanel.open}

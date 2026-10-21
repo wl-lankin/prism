@@ -67,13 +67,16 @@ it('shows each mode with its own name and icon, and cycles repeat on click', asy
 });
 
 it('is unavailable in Flow and says why', () => {
-  player.flow = { kind: 'favorites' };
+  // The modes are kept for later but do not apply: not pressed.
+  Object.assign(player, { flow: { kind: 'favorites' }, repeat: 'all', shuffle: true });
   component = mount(PlayModes, { target });
   flushSync();
   const { shuffle, repeat } = buttons();
   expect(repeat.getAttribute('aria-disabled')).toBe('true');
   expect(repeat.title).toMatch(/Flow never ends/);
   expect(shuffle.getAttribute('aria-disabled')).toBe('true');
+  expect(repeat.getAttribute('aria-pressed')).toBe('false');
+  expect(shuffle.getAttribute('aria-pressed')).toBe('false');
   repeat.click();
   shuffle.click();
   flushSync();

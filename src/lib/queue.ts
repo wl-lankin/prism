@@ -3,6 +3,9 @@
 /** The localStorage key that remembers whether the queue panel is open. */
 export const QUEUE_PANEL_KEY = 'prism.queuePanel';
 
+/** The id of the transport strip's queue toggle: focus returns there when the panel closes. */
+export const QUEUE_TOGGLE_ID = 'queue-toggle';
+
 /** A drag in progress: the row at `from` is `dy` px off its place and would land on `to`. */
 export interface QueueDrag {
   from: number;

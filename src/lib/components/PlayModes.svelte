@@ -29,7 +29,7 @@
     type="button"
     class="mode"
     class:on={shuffle && !flow}
-    aria-pressed={shuffle}
+    aria-pressed={shuffle && !flow}
     aria-disabled={flow}
     aria-label={labels.shuffle}
     title={labels.shuffle}
@@ -43,7 +43,7 @@
     type="button"
     class="mode"
     class:on={repeat !== 'off' && !flow}
-    aria-pressed={repeat !== 'off'}
+    aria-pressed={repeat !== 'off' && !flow}
     aria-disabled={flow}
     aria-label={labels.repeat}
     title={labels.repeat}

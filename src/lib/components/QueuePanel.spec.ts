@@ -176,6 +176,52 @@ it('closes with Escape and is inert while closed', async () => {
   expect(panel.hasAttribute('inert') || (panel as HTMLElement & { inert?: boolean }).inert).toBe(true);
 });
 
+it('closes with Escape from the close button and the played toggle too', async () => {
+  await render();
+  target.querySelector('.close')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  flushSync();
+  expect(queuePanel.open).toBe(false);
+  queuePanel.open = true;
+  await settle();
+  target.querySelector('.played')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  flushSync();
+  expect(queuePanel.open).toBe(false);
+});
+
+it('moves focus onto the playing row when it opens, not when it starts open', async () => {
+  await render();
+  expect(document.activeElement).not.toBe(list());
+  queuePanel.open = false;
+  await settle();
+  queuePanel.open = true;
+  await settle();
+  expect(document.activeElement).toBe(list());
+  expect(list().getAttribute('aria-activedescendant')).toBe('upnext-2');
+});
+
+it('hands focus back to the queue toggle when it closes with focus inside', async () => {
+  const toggle = document.createElement('button');
+  toggle.id = 'queue-toggle';
+  document.body.append(toggle);
+  try {
+    await render();
+    list().focus();
+    list().dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    flushSync();
+    expect(document.activeElement).toBe(toggle);
+
+    // Closed from outside (the toggle itself): focus stays where it is.
+    queuePanel.open = true;
+    await settle();
+    toggle.focus();
+    queuePanel.open = false;
+    flushSync();
+    expect(document.activeElement).toBe(toggle);
+  } finally {
+    toggle.remove();
+  }
+});
+
 it('names the Flow in its heading and leaves out the end note', async () => {
   Object.assign(player, { flow: { kind: 'genre', genre: 'Jazz' }, queueIndex: 7 });
   await render();
@@ -192,6 +238,12 @@ it('says what follows the last track', async () => {
   player.repeat = 'all';
   flushSync();
   expect(target.querySelector('.tail')!.textContent).toMatch(/starts over/);
+  player.repeat = 'one';
+  flushSync();
+  expect(target.querySelector('.tail')!.textContent).toBe('This song repeats.');
+  setLang('de');
+  flushSync();
+  expect(target.querySelector('.tail')!.textContent).toBe('Dieser Song wiederholt sich.');
 });
 
 it('shows an empty state with nothing playing', async () => {

@@ -1,10 +1,10 @@
 <script lang="ts">
-  import { untrack } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import { formatDuration } from '../format';
   import { t, tc } from '../i18n';
   import { playerJump, playerMove, playerQueueRange, playerRemove } from '../ipc';
   import { evictPages, pagesFor } from '../pages';
-  import { dragTarget, firstRow, stepAside, type QueueDrag } from '../queue';
+  import { dragTarget, firstRow, QUEUE_TOGGLE_ID, stepAside, type QueueDrag } from '../queue';
   import { FAVORITE_KEY, isFavoriteKey, toggleFavorite } from '../stores/favorites.svelte';
   import { player } from '../stores/player.svelte';
   import { queuePanel, toggleQueuePanel } from '../stores/queue.svelte';
@@ -39,6 +39,11 @@
   let showPlayed = $state(false);
   const start = $derived(firstRow(current, total, showPlayed));
   const count = $derived(Math.max(0, total - start));
+
+  /** Under the last entry: what comes after it. */
+  const tailNote = $derived(
+    player.repeat === 'one' ? t('queue.repeatsOne') : player.repeat === 'all' ? t('queue.wraps') : t('queue.last'),
+  );
 
   const heading = $derived(flow ? t('nowPlaying.flow', { variant: variantName(flow) }) : t('queue.title'));
 
@@ -179,12 +184,45 @@
     else if (top + ROW > scroller.scrollTop + viewport) scroller.scrollTop = top + ROW - viewport;
   }
 
-  function onkeydown(event: KeyboardEvent) {
-    if (event.key === 'Escape') {
-      event.preventDefault();
-      toggleQueuePanel(false);
-      return;
+  /** Escape closes the panel from anywhere inside it. */
+  function onPanelKeydown(event: KeyboardEvent) {
+    if (event.key !== 'Escape' || event.defaultPrevented) return;
+    event.preventDefault();
+    toggleQueuePanel(false);
+  }
+
+  // Focus follows the panel: opening it (the button or Ctrl+Q) moves focus onto the playing
+  // row; closing it while focus is inside hands focus back to the transport's toggle before
+  // the panel turns inert, so it never falls to the page. A panel that is open at start (as
+  // it was left) does not take focus.
+  let panelEl = $state<HTMLElement>();
+  let wasOpen = queuePanel.open;
+
+  $effect.pre(() => {
+    const now = open;
+    untrack(() => {
+      if (now === wasOpen) return;
+      wasOpen = now;
+      if (now) {
+        void tick().then(focusInside);
+      } else if (panelEl?.contains(document.activeElement)) {
+        document.getElementById(QUEUE_TOGGLE_ID)?.focus();
+      }
+    });
+  });
+
+  function focusInside() {
+    if (!queuePanel.open) return;
+    if (listEl) {
+      if (count > 0) selected = current;
+      listEl.focus({ preventScroll: true });
+      keepVisible(current);
+    } else {
+      panelEl?.querySelector<HTMLElement>('.close')?.focus();
     }
+  }
+
+  function onkeydown(event: KeyboardEvent) {
     if (count === 0) return;
     const step = Math.max(1, Math.floor(viewport / ROW) - 1);
     const from = selected >= start ? selected : current;
@@ -293,11 +331,16 @@
   }
 </script>
 
+<!-- Escape bubbles up from the controls inside; the aside itself takes no input. -->
+<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <aside
   class="panel"
   class:open
   aria-label={t('queue.title')}
   inert={!open}
+  bind:this={panelEl}
+  aria-keyshortcuts="Escape"
+  onkeydown={onPanelKeydown}
   style="--c1:{ring.colors[0]};--c2:{ring.colors[1]};--c3:{ring.colors[2]};--c4:{ring.colors[3]}"
 >
   <header class="head">
@@ -437,7 +480,7 @@
         </div>
       </div>
       {#if upcoming === 0 && !flow}
-        <p class="tail">{player.repeat === 'all' ? t('queue.wraps') : t('queue.last')}</p>
+        <p class="tail">{tailNote}</p>
       {/if}
     </div>
   {/if}
