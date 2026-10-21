@@ -2,6 +2,7 @@
   import { t } from '../i18n';
   import { favorites, heartable, isFavorite, setFavorite } from '../stores/favorites.svelte';
   import { notify } from '../stores/notice.svelte';
+  import { ensureStation, findStation, toggleStationFavorite } from '../stores/radio.svelte';
   import type { FavKind } from '../types';
   import Icon from './Icon.svelte';
 
@@ -43,7 +44,13 @@
   const ids = $derived(typeof id === 'string' ? [id] : id);
   /** The ids a click may change now. */
   const usable = $derived(ids.filter((x) => heartable(x)));
-  const disabled = $derived(usable.length === 0);
+  /** A station is saved with all its fields, so its heart needs the station itself. */
+  const station = $derived(kind === 'station' ? findStation(ids[0]) : null);
+  const disabled = $derived(kind === 'station' ? !station : usable.length === 0);
+
+  $effect(() => {
+    if (kind === 'station') ensureStation(ids[0]);
+  });
 
   const on = $derived.by(() => {
     // Read the set itself so a reload of the whole set is followed too.
@@ -59,6 +66,12 @@
 
   function toggle(event: MouseEvent) {
     event.stopPropagation();
+    if (kind === 'station') {
+      if (!station) return;
+      if (!on) bursts++;
+      void toggleStationFavorite(station);
+      return;
+    }
     if (disabled) {
       notify(t('navidrome.notConnected'));
       return;
@@ -81,7 +94,7 @@
   aria-hidden={hidden ? 'true' : undefined}
   aria-pressed={on}
   aria-label={label ?? t('favorites.toggle')}
-  title={disabled ? t('navidrome.notConnected') : on ? t('favorites.remove') : t('favorites.add')}
+  title={kind === 'station' ? (on ? t('favorites.remove') : t('favorites.add')) : disabled ? t('navidrome.notConnected') : on ? t('favorites.remove') : t('favorites.add')}
   {tabindex}
   onclick={toggle}
   onfocus={() => (focused = true)}

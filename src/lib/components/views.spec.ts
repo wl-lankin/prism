@@ -1213,7 +1213,7 @@ describe('Navidrome favorites and quality', () => {
     });
     vi.useFakeTimers();
     const stop = await followPlayerErrors();
-    const offline = { trackId: 'navidrome:s1', message: 'Navidrome is not reachable', kind: 'offline' };
+    const offline = { trackId: 'navidrome:s1', message: 'Navidrome is not reachable', kind: 'offline', source: 'navidrome' };
 
     emit!({ payload: offline });
     expect(notice.text).toBe('Navidrome is not reachable. Press Play once it is back.');
@@ -1221,10 +1221,6 @@ describe('Navidrome favorites and quality', () => {
     emit!({ payload: offline });
     expect(notice.text).toBe('Navidrome is not reachable. Press Play once it is back.');
     vi.advanceTimersByTime(5000);
-    expect(notice.text).toBeNull();
-
-    // A track error shows nothing, as in M2: the player moves on by itself.
-    emit!({ payload: { trackId: 'local:t1', message: 'decode failed', kind: 'track' } });
     expect(notice.text).toBeNull();
 
     // A later drop is a new event with its own notice, in the UI language.

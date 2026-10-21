@@ -1,12 +1,13 @@
 <script lang="ts">
   import { tick, untrack } from 'svelte';
-  import { formatDuration } from '../format';
+  import { formatDuration, isLive, stationInitials } from '../format';
   import { t, tc } from '../i18n';
   import { playerJump, playerMove, playerQueueRange, playerRemove } from '../ipc';
   import { evictPages, pagesFor } from '../pages';
   import { dragTarget, firstRow, QUEUE_TOGGLE_ID, stepAside, type QueueDrag } from '../queue';
   import { FAVORITE_KEY, isFavoriteKey, toggleFavorite } from '../stores/favorites.svelte';
   import { player } from '../stores/player.svelte';
+  import { findStation, toggleStationFavorite } from '../stores/radio.svelte';
   import { queuePanel, toggleQueuePanel } from '../stores/queue.svelte';
   import { ring } from '../stores/ring.svelte';
   import type { FlowVariant, QueueItem } from '../types';
@@ -14,6 +15,7 @@
   import Cover from './Cover.svelte';
   import Heart from './Heart.svelte';
   import Icon from './Icon.svelte';
+  import LivePill from './LivePill.svelte';
   import RowPlay from './RowPlay.svelte';
 
   /** "Up next": a sheet that slides in from the right over the content. The list starts at
@@ -33,6 +35,8 @@
   const current = $derived(player.queueIndex);
   const idle = $derived(player.status === 'idle' || !player.track);
   const empty = $derived(idle || total === 0);
+  /** A station is a queue of one: no "up next" count and no tail note. */
+  const live = $derived(!idle && isLive(player.track));
   const flow = $derived((player.flow ?? null) as FlowVariant | null);
   const upcoming = $derived(Math.max(0, total - current - 1));
 
@@ -254,7 +258,10 @@
       const item = cache[selected]?.track;
       if (!item || item.id.startsWith('file:')) return;
       event.preventDefault();
-      void toggleFavorite('track', item.id);
+      if (isLive(item)) {
+        const station = findStation(item.id);
+        if (station) void toggleStationFavorite(station);
+      } else void toggleFavorite('track', item.id);
     }
   }
 
@@ -346,7 +353,7 @@
   <header class="head">
     <div class="titles">
       <h2 id="upnext-heading" class:flow={!!flow}>{heading}</h2>
-      {#if !empty && !flow}
+      {#if !empty && !flow && !live}
         <p class="sub">{tc('queue.count', upcoming)}</p>
       {/if}
     </div>
@@ -437,7 +444,7 @@
               </span>
               {#if item?.track}
                 {@const q = item.track}
-                <Cover coverId={q.coverId} size={40} cache={96} radius="7px" />
+                <Cover coverId={q.coverId} size={40} cache={96} radius="7px" initials={isLive(q) ? stationInitials(q.title) : undefined} />
                 <span class="name">
                   <span class="title">{q.title}</span>
                   <span class="artist">{isCurrent ? t('queue.nowPlaying') : q.artist}</span>
@@ -445,9 +452,11 @@
                 {#if q.id.startsWith('file:')}
                   <span></span>
                 {:else}
-                  <Heart kind="track" id={q.id} size={16} tabindex={-1} ghost revealed={selected === row.index} label={t('favorites.toggleItem', { name: q.title })} />
+                  <Heart kind={isLive(q) ? 'station' : 'track'} id={q.id} size={16} tabindex={-1} ghost revealed={selected === row.index} label={t('favorites.toggleItem', { name: q.title })} />
                 {/if}
-                <span class="time">{formatDuration(q.durationMs)}</span>
+                <span class="time">
+                  {#if isLive(q)}<LivePill size="small" />{:else}{formatDuration(q.durationMs)}{/if}
+                </span>
               {:else if item}
                 <span class="ghost-cover"></span>
                 <span class="name"><span class="artist">{t('queue.missing')}</span></span>
@@ -479,7 +488,7 @@
           {/each}
         </div>
       </div>
-      {#if upcoming === 0 && !flow}
+      {#if upcoming === 0 && !flow && !live}
         <p class="tail">{tailNote}</p>
       {/if}
     </div>
@@ -653,7 +662,7 @@
   .row {
     position: relative;
     display: grid;
-    grid-template-columns: 26px 40px minmax(0, 1fr) 26px 38px 24px;
+    grid-template-columns: 26px 40px minmax(0, 1fr) 26px minmax(38px, auto) 24px;
     column-gap: 10px;
     align-items: center;
     height: 56px;

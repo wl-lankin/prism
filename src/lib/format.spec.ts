@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatDuration, qualityLabel, sourceQualityLabel, streamedFrom } from './format';
+import { formatDuration, isLive, qualityLabel, sourceQualityLabel, streamedFrom } from './format';
 import type { Source, Track } from './types';
 
 describe('formatDuration', () => {
@@ -51,6 +51,25 @@ describe('sourceQualityLabel', () => {
     expect(sourceQualityLabel(track({ source: 'navidrome', format: 'mp3', bitrateKbps: 320 }), name)).toBe(
       'Navidrome · MP3 320',
     );
+  });
+
+  it('radio_quality_label', () => {
+    const station = { source: 'radio', format: 'MP3', bitrateKbps: 128, durationMs: 0 } as const;
+    expect(sourceQualityLabel(track(station), name)).toBe('Radio · MP3 128');
+    expect(sourceQualityLabel(track({ ...station, format: 'AAC+', bitrateKbps: 64 }), name, '128')).toBe('Radio · AAC+ 64');
+  });
+
+  it('radio_label_without_bitrate', () => {
+    expect(sourceQualityLabel(track({ source: 'radio', format: 'MP3', bitrateKbps: null }), name)).toBe('Radio · MP3');
+    expect(sourceQualityLabel(track({ source: 'radio', format: '', bitrateKbps: null }), name)).toBe('Radio');
+  });
+
+  it('is_live_needs_radio_and_no_duration', () => {
+    expect(isLive(track({ source: 'radio', durationMs: 0 }))).toBe(true);
+    expect(isLive(track({ source: 'radio', durationMs: 1000 }))).toBe(false);
+    expect(isLive(track({ source: 'navidrome', durationMs: 0 }))).toBe(false);
+    expect(isLive(null)).toBe(false);
+    expect(isLive(undefined)).toBe(false);
   });
 
   it('shows only the source name for a track without quality', () => {

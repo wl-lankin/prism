@@ -1,4 +1,6 @@
 <script lang="ts" module>
+  import type { Station } from '../types';
+
   /** What a view keeps while its track menu is open (everything but `onclose`). */
   export interface TrackMenuState {
     trackIds: string[];
@@ -8,6 +10,8 @@
     artist?: string;
     album?: boolean;
     onremove?: () => void;
+    /** Set for a station: the menu then has only Favorite and Open homepage. */
+    station?: Station;
   }
 
   /** Keeps menus off the window edges and out of the transparent strip below the card. */
@@ -23,11 +27,13 @@
 </script>
 
 <script lang="ts">
+  import { openUrl } from '@tauri-apps/plugin-opener';
   import { onMount, tick, untrack } from 'svelte';
   import { t, tc } from '../i18n';
   import { isFavorite, setFavorite } from '../stores/favorites.svelte';
   import { go } from '../stores/nav.svelte';
   import { addToPlaylist, createWithTracks, playlists, suggestName } from '../stores/playlists.svelte';
+  import { toggleStationFavorite } from '../stores/radio.svelte';
   import type { Playlist } from '../types';
   import Cover from './Cover.svelte';
   import Icon from './Icon.svelte';
@@ -44,6 +50,7 @@
     artist,
     album = false,
     onremove,
+    station,
     onclose,
   }: TrackMenuState & { onclose: () => void } = $props();
 
@@ -167,6 +174,20 @@
     close();
   }
 
+  const stationFavorite = $derived(station ? isFavorite('station', station.id) : false);
+  const homepage = $derived(station?.homepage && /^https?:\/\//i.test(station.homepage) ? station.homepage : null);
+
+  function toggleStation() {
+    if (station) void toggleStationFavorite(station);
+    close();
+  }
+
+  function openHomepage() {
+    const url = homepage;
+    close();
+    if (url) openUrl(url).catch((err) => console.error('opening the homepage failed', err));
+  }
+
   function goTo(view: 'album' | 'artist', param: string) {
     close();
     go(view, param);
@@ -236,6 +257,19 @@
   onpointermove={follow}
   oncontextmenu={(event) => event.preventDefault()}
 >
+  {#if station}
+    <!-- A station is not a track: no queue, playlist, album or artist items. -->
+    <button type="button" role="menuitem" tabindex="-1" class="item" class:fav={stationFavorite} onclick={toggleStation}>
+      <Icon name="heart" size={16} filled={stationFavorite} />
+      <span class="label">{stationFavorite ? t('favorites.remove') : t('radio.menu.favorite')}</span>
+    </button>
+    {#if homepage}
+      <button type="button" role="menuitem" tabindex="-1" class="item" onclick={openHomepage}>
+        <Icon name="external" size={16} />
+        <span class="label">{t('radio.menu.homepage')}</span>
+      </button>
+    {/if}
+  {:else}
   <div class="has-sub" role="none">
     <button
       bind:this={parentItem}
@@ -368,6 +402,7 @@
       <Icon name="remove" size={16} />
       <span class="label">{t('menu.removeFromPlaylist')}</span>
     </button>
+  {/if}
   {/if}
 </div>
 

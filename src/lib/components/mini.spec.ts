@@ -121,7 +121,7 @@ it('shows the streamed quality and the offline notice of a Navidrome track witho
   expect(source.title).toBe('Navidrome · MP3 192 from FLAC 24/96');
 
   handlers.get('player://error')!({
-    payload: { trackId: 'navidrome:s1', message: 'Navidrome is not reachable', kind: 'offline' },
+    payload: { trackId: 'navidrome:s1', message: 'Navidrome is not reachable', kind: 'offline', source: 'navidrome' },
   });
   await settle();
   expect(target.querySelector('[role="status"]')?.textContent).toBe(
@@ -129,6 +129,48 @@ it('shows the streamed quality and the offline notice of a Navidrome track witho
   );
   expect(focus).not.toHaveBeenCalled();
   focus.mockRestore();
+  unmount(mini);
+});
+
+it('mini_shows_live_and_title', async () => {
+  const id = 'radio:11111111-2222-3333-4444-555555555555';
+  state = {
+    ...state,
+    positionMs: 5_000,
+    durationMs: 0,
+    track: {
+      ...track,
+      id,
+      source: 'radio',
+      title: 'Radio Testhausen',
+      artist: 'Testland, DE',
+      album: '',
+      albumId: '',
+      durationMs: 0,
+      format: 'MP3',
+      bitrateKbps: 128,
+      path: null,
+    },
+  };
+  const mini = mount(MiniPlayer, { target });
+  await vi.waitFor(async () => {
+    await settle();
+    expect(target.querySelector('.title')?.textContent?.trim()).toBe('Radio Testhausen');
+  });
+  expect(target.querySelector('.pill')?.textContent?.trim()).toBe('LIVE');
+  expect(target.querySelector('.source')?.textContent?.replace(/\s+/g, ' ').trim()).toBe('LIVE Radio · MP3 128');
+  expect(target.querySelector<HTMLButtonElement>('button[aria-label="Next"]')!.disabled).toBe(true);
+  // The mini player is a separate webview: it asks for the current title itself ...
+  expect(invoke).toHaveBeenCalledWith('radio_now_playing', undefined);
+  // ... and then shows it over the station name.
+  handlers.get('radio://now-playing')!({ payload: { stationId: id, title: 'Glass Tides - Lumen Field' } });
+  await settle();
+  expect(target.querySelector('.title')?.textContent?.trim()).toBe('Glass Tides - Lumen Field');
+  expect(target.querySelector('.sub')?.textContent?.trim()).toBe('Radio Testhausen');
+  // A title of another station is ignored.
+  handlers.get('radio://now-playing')!({ payload: { stationId: 'radio:other', title: 'Not mine' } });
+  await settle();
+  expect(target.querySelector('.title')?.textContent?.trim()).toBe('Radio Testhausen');
   unmount(mini);
 });
 

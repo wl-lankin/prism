@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { sourceQualityLabel, streamedFrom } from '../format';
+  import { isLive, liveLines, sourceQualityLabel, stationInitials, streamedFrom } from '../format';
   import { holdToOpen } from '../flow';
   import { t } from '../i18n';
   import {
@@ -19,6 +19,7 @@
   import { notice, notify } from '../stores/notice.svelte';
   import { initNavidrome } from '../stores/navidrome.svelte';
   import { followPlayerErrors, initPlayer, player } from '../stores/player.svelte';
+  import { currentTitle, initRadio } from '../stores/radio.svelte';
   import { initRing, ring } from '../stores/ring.svelte';
   import { followSettings, initSettings, settings } from '../stores/settings.svelte';
   import type { FlowVariant } from '../types';
@@ -28,6 +29,7 @@
   import FlowRing, { type RingMode } from './FlowRing.svelte';
   import Heart from './Heart.svelte';
   import Icon from './Icon.svelte';
+  import LivePill from './LivePill.svelte';
   import PlayModes from './PlayModes.svelte';
   import Slider from './Slider.svelte';
 
@@ -63,6 +65,19 @@
     initFavorites()
       .then((cleanup) => (gone ? cleanup() : (stop = cleanup)))
       .catch((err) => console.error('loading the favorites failed', err));
+    return () => {
+      gone = true;
+      stop?.();
+    };
+  });
+
+  // The station's stream title arrives as an event of its own; this window loads late.
+  $effect(() => {
+    let stop: (() => void) | undefined;
+    let gone = false;
+    initRadio()
+      .then((cleanup) => (gone ? cleanup() : (stop = cleanup)))
+      .catch((err) => console.error('following the radio titles failed', err));
     return () => {
       gone = true;
       stop?.();
@@ -137,7 +152,12 @@
   const idle = $derived(player.status === 'idle' || !track);
   const mode: RingMode = $derived(player.status === 'idle' ? 'flow' : player.status === 'playing' ? 'pause' : 'play');
   const progress = $derived(player.durationMs > 0 ? player.positionMs / player.durationMs : 0);
+  const live = $derived(!idle && isLive(track));
   const byline = $derived(track ? [track.artist, track.album].filter(Boolean).join(' · ') : '');
+  /** A station shows the stream title over its name; a track its title over the byline. */
+  const lines = $derived(
+    track && live ? liveLines(track, currentTitle(track)) : { title: track?.title ?? '', sub: byline },
+  );
   const source = $derived(track ? sourceQualityLabel(track, (s) => t(`source.${s}`), settings.navidromeQuality) : '');
   /** The line's tooltip also names the file behind a transcode; the line itself stays short. */
   const sourceTitle = $derived.by(() => {
@@ -259,7 +279,7 @@
           title={t('mini.openNowPlaying')}
           onclick={openNowPlaying}
         >
-          <Cover coverId={track.coverId} size={COVER} alt="" />
+          <Cover coverId={track.coverId} size={COVER} alt="" initials={live ? stationInitials(track.title) : undefined} />
         </button>
       {/if}
       <div class="meta" class:noticed={notice.text}>
@@ -269,17 +289,20 @@
             <div class="sub wrap">{t('mini.idleHint')}</div>
           </div>
         {:else if track}
-          <div class="title" title={track.title}>{track.title}</div>
+          <div class="title" title={lines.title}>{lines.title}</div>
           <div class="lines">
-            <div class="sub" title={byline}>{player.status === 'loading' ? t('transport.loading') : byline}</div>
-            <div class="source" style="--dot:var(--src-{track.source})" title={sourceTitle}><span>{source}</span></div>
+            <div class="sub" title={lines.sub}>{player.status === 'loading' ? t('transport.loading') : lines.sub}</div>
+            <div class="source" class:live style="--dot:var(--src-{track.source})" title={sourceTitle}>
+              {#if live}<LivePill size="small" />{/if}
+              <span>{source}</span>
+            </div>
           </div>
         {/if}
         <p class="notice" role="status" aria-live="polite">{notice.text ?? ''}</p>
       </div>
       {#if !idle && track && !track.id.startsWith('file:')}
         <span class="heart">
-          <Heart kind="track" id={track.id} size={16} label={t('favorites.toggleItem', { name: track.title })} />
+          <Heart kind={live ? 'station' : 'track'} id={track.id} size={16} label={t('favorites.toggleItem', { name: track.title })} />
         </span>
       {/if}
     </div>
@@ -288,9 +311,9 @@
       <button
         type="button"
         class="btn"
-        disabled={idle}
+        disabled={idle || live}
         aria-label={t('transport.previous')}
-        title={t('transport.previous')}
+        title={live ? t('radio.noSkip') : t('transport.previous')}
         onclick={() => playerPrev().catch(report('previous'))}
       >
         <Icon name="prev" size={16} />
@@ -298,9 +321,9 @@
       <button
         type="button"
         class="btn"
-        disabled={idle}
+        disabled={idle || live}
         aria-label={t('transport.next')}
-        title={t('transport.next')}
+        title={live ? t('radio.noSkip') : t('transport.next')}
         onclick={() => playerNext().catch(report('next'))}
       >
         <Icon name="next" size={16} />
@@ -500,6 +523,19 @@
     line-height: 14px;
     color: rgba(243, 243, 245, 0.46);
     font-variant-numeric: tabular-nums;
+  }
+
+  /* The pill stands in for the source dot and is trimmed to the 14 px line. */
+  .source.live::before {
+    display: none;
+  }
+
+  .source :global(.pill) {
+    flex: none;
+    height: 14px;
+    padding: 0 5px 0 4px;
+    gap: 4px;
+    font-size: 8.5px;
   }
 
   .source span {

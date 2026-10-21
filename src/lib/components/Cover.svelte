@@ -9,6 +9,7 @@
     alt = '',
     fluid = false,
     cache,
+    initials,
   }: {
     coverId: string | null;
     /** Rendered size in CSS px; the cached image size is picked from it. */
@@ -19,6 +20,8 @@
     fluid?: boolean;
     /** Forces a cached size instead of picking one from `size`. */
     cache?: CoverSize;
+    /** A station without a logo: these letters in radio blue replace the empty icon. */
+    initials?: string;
   } = $props();
 
   // Covers are cached at 96, 300 and 600 px; pick the smallest that stays sharp on 2x screens.
@@ -31,8 +34,12 @@
 </script>
 
 <div class="cover" class:fluid style="--s:{size}px; --r:{radius}">
-  <div class="empty" aria-hidden="true">
-    <Icon name="songs" size={Math.round(size * 0.38)} />
+  <div class="empty" class:station={!!initials} aria-hidden="true">
+    {#if initials}
+      <span class="initials" style="font-size:{Math.round(size * 0.34)}px">{initials}</span>
+    {:else}
+      <Icon name="songs" size={Math.round(size * 0.38)} />
+    {/if}
   </div>
   <!-- A fresh element per image, so the old picture never shows under the new id. -->
   {#key src}
@@ -74,6 +81,16 @@
     display: grid;
     place-items: center;
     color: rgba(243, 243, 245, 0.28);
+  }
+
+  .empty.station {
+    background: color-mix(in srgb, var(--src-radio) 16%, #18181d);
+    color: var(--src-radio);
+  }
+
+  .initials {
+    font-weight: 700;
+    letter-spacing: 0.02em;
   }
 
   img {

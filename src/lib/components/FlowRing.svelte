@@ -21,7 +21,9 @@
 </script>
 
 <script lang="ts">
+  import { isLive } from '../format';
   import { t } from '../i18n';
+  import { player } from '../stores/player.svelte';
 
   let {
     mode,
@@ -51,7 +53,10 @@
     oncontextmenu?: (event: MouseEvent) => void;
   } = $props();
 
-  const p = $derived(mode === 'flow' ? 1 : Math.min(Math.max(progress || 0, 0), 1));
+  // A station has no progress: the arc stays full and steady (the window and the mini player
+  // both mount this ring, so it reads the player itself instead of taking a prop from each).
+  const live = $derived(mode !== 'flow' && isLive(player.track));
+  const p = $derived(mode === 'flow' || live ? 1 : Math.min(Math.max(progress || 0, 0), 1));
   const thickness = $derived(Math.max(3, Math.round(size / 17)));
   const metered = $derived(level !== undefined && mode === 'pause');
   const loud = $derived(metered ? Math.min(Math.max(level || 0, 0), 1) : 0);
@@ -91,7 +96,7 @@
   <span class="glow" aria-hidden="true"></span>
   <span class="track" aria-hidden="true"></span>
   <span class="arc" aria-hidden="true"></span>
-  {#if mode !== 'flow' && p > 0}
+  {#if mode !== 'flow' && !live && p > 0}
     <span class="cap start" aria-hidden="true"></span>
     {#if p < 0.995}
       <!-- At the very end the head would sit on the start cap. -->
