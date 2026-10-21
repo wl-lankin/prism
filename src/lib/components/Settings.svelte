@@ -362,7 +362,7 @@
   const qualityOptions = $derived(
     qualities.map((q) => ({
       value: q,
-      label: q === 'original' ? t('settings.navidrome.quality.original') : t('settings.navidrome.quality.kbps', { rate: q }),
+      label: q === 'original' ? t('settings.navidrome.quality.original') : q,
     })),
   );
 

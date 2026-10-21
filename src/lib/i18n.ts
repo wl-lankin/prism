@@ -326,9 +326,8 @@ const en = {
   'settings.navidrome.state.justNow': 'just now',
   'settings.navidrome.state.offline': 'Server not reachable, showing the saved library',
   'settings.navidrome.quality': 'Streaming quality',
-  'settings.navidrome.qualityHint': 'Original plays the file as it is on the server. A lower rate saves data on slow or mobile networks.',
+  'settings.navidrome.qualityHint': 'Original plays the file as it is on the server. 320, 192 and 128 kbps stream as MP3 and save data on slow or mobile networks.',
   'settings.navidrome.quality.original': 'Original',
-  'settings.navidrome.quality.kbps': '{rate} kbps',
 
   'about.version': 'Version {version}',
   'about.tagline': 'One player, every color of sound.',
@@ -665,9 +664,8 @@ const de: Record<Key, string> = {
   'settings.navidrome.state.justNow': 'gerade eben',
   'settings.navidrome.state.offline': 'Server nicht erreichbar, die gespeicherte Mediathek bleibt verfügbar',
   'settings.navidrome.quality': 'Streaming-Qualität',
-  'settings.navidrome.qualityHint': 'Original spielt die Datei so, wie sie auf dem Server liegt. Eine niedrigere Rate spart Daten in langsamen oder mobilen Netzen.',
+  'settings.navidrome.qualityHint': 'Original spielt die Datei so, wie sie auf dem Server liegt. 320, 192 und 128 kbps kommen als MP3 und sparen Daten in langsamen oder mobilen Netzen.',
   'settings.navidrome.quality.original': 'Original',
-  'settings.navidrome.quality.kbps': '{rate} kbps',
 
   'about.version': 'Version {version}',
   'about.tagline': 'Ein Player, jede Farbe des Klangs.',
