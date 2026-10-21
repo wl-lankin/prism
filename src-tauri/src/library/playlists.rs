@@ -160,8 +160,8 @@ pub(crate) struct EntryTotals {
     pub cover_ids: Vec<String>,
 }
 
-/// The scan behind [`entry_totals`]: every entry of `entries` with its track's duration and
-/// cover, in primary key order (`playlist_id`, `position`), so it needs no sort.
+/// The scan behind [`entry_totals`] for a few entries: every entry of `entries` with its track's
+/// duration and cover, in primary key order (`playlist_id`, `position`), so it needs no sort.
 pub(crate) fn entry_scan_sql(entries: &str) -> String {
     format!(
         "SELECT p.playlist_id, t.duration_ms, t.cover_id
@@ -170,49 +170,149 @@ pub(crate) fn entry_scan_sql(entries: &str) -> String {
     )
 }
 
+/// The entry scan of [`EntryJoin::Scan`]: every entry's track id in primary key order.
+pub(crate) fn entry_order_sql(entries: &str) -> String {
+    format!("SELECT playlist_id, track_id FROM {entries} ORDER BY playlist_id, position")
+}
+
+/// Above this many entries in all, [`entry_totals`] reads the tracks once instead of looking
+/// up the track of every entry. On a library file whose `tracks` table is larger than SQLite's
+/// default page cache (2 MB, about 8k tracks), every lookup reads a page from the OS: 100k
+/// entries over 30k tracks took about 450 ms that way, one sequential scan of the tracks and
+/// a hash lookup per entry about 45 ms. Below it, the lookups cost less than the scan.
+const ENTRY_LOOKUP_MAX: i64 = 5_000;
+
+/// How [`entry_totals`] finds the track of an entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EntryJoin {
+    /// One indexed lookup per entry ([`entry_scan_sql`]).
+    Lookup,
+    /// One scan of `tracks` into a map, then a hash lookup per entry.
+    Scan,
+}
+
 /// Count, duration and the first four distinct covers of every playlist of the entry table
-/// `entries` (columns `playlist_id`, `position`, `track_id`), folded from one ordered scan.
-/// Entries whose track is not in the index count, but add no duration and no cover. A playlist
-/// without entries is absent.
+/// `entries` (columns `playlist_id`, `position`, `track_id`), folded from one scan in playlist
+/// order. Entries whose track is not in the index count, but add no duration and no cover. A
+/// playlist without entries is absent.
 pub(crate) fn entry_totals<K: FromSql + Eq + Hash>(
     conn: &Connection,
     entries: &str,
 ) -> anyhow::Result<HashMap<K, EntryTotals>> {
-    let mut stmt = conn.prepare(&entry_scan_sql(entries))?;
-    let mut rows = stmt.query([])?;
-    let mut out: HashMap<K, EntryTotals> = HashMap::new();
-    // The rows come grouped by playlist: the key is decoded once per playlist, not per row.
-    let mut current: Option<(Value, EntryTotals)> = None;
-    while let Some(row) = rows.next()? {
-        let key = row.get_ref(0)?;
-        if current
+    let count: i64 = conn.query_row(&format!("SELECT COUNT(*) FROM {entries}"), [], |row| {
+        row.get(0)
+    })?;
+    let join = if count > ENTRY_LOOKUP_MAX {
+        EntryJoin::Scan
+    } else {
+        EntryJoin::Lookup
+    };
+    entry_totals_by(conn, entries, join)
+}
+
+/// [`entry_totals`] with the join chosen by the caller.
+pub(crate) fn entry_totals_by<K: FromSql + Eq + Hash>(
+    conn: &Connection,
+    entries: &str,
+    join: EntryJoin,
+) -> anyhow::Result<HashMap<K, EntryTotals>> {
+    let mut fold = Fold::default();
+    match join {
+        EntryJoin::Lookup => {
+            let mut stmt = conn.prepare(&entry_scan_sql(entries))?;
+            let mut rows = stmt.query([])?;
+            while let Some(row) = rows.next()? {
+                fold.add(
+                    row.get_ref(0)?,
+                    row.get_ref(1)?.as_i64_or_null()?,
+                    row.get_ref(2)?.as_str_or_null()?,
+                )?;
+            }
+        }
+        EntryJoin::Scan => {
+            let mut tracks: HashMap<String, (i64, Option<String>)> = HashMap::new();
+            let mut stmt = conn.prepare("SELECT id, duration_ms, cover_id FROM tracks")?;
+            let mut rows = stmt.query([])?;
+            while let Some(row) = rows.next()? {
+                tracks.insert(row.get(0)?, (row.get(1)?, row.get(2)?));
+            }
+            let mut stmt = conn.prepare(&entry_order_sql(entries))?;
+            let mut rows = stmt.query([])?;
+            while let Some(row) = rows.next()? {
+                let track = tracks.get(row.get_ref(1)?.as_str()?);
+                fold.add(
+                    row.get_ref(0)?,
+                    track.map(|(duration, _)| *duration),
+                    track.and_then(|(_, cover)| cover.as_deref()),
+                )?;
+            }
+        }
+    }
+    fold.finish()
+}
+
+/// Folds entries that come grouped by playlist into [`EntryTotals`]. The key is decoded once
+/// per playlist, not per entry.
+struct Fold<K> {
+    out: HashMap<K, EntryTotals>,
+    current: Option<(Value, EntryTotals)>,
+}
+
+impl<K> Default for Fold<K> {
+    fn default() -> Self {
+        Fold {
+            out: HashMap::new(),
+            current: None,
+        }
+    }
+}
+
+impl<K: FromSql + Eq + Hash> Fold<K> {
+    /// One entry of playlist `key`; `duration_ms` and `cover` are `None` when its track is not
+    /// in the index.
+    fn add(
+        &mut self,
+        key: ValueRef,
+        duration_ms: Option<i64>,
+        cover: Option<&str>,
+    ) -> anyhow::Result<()> {
+        if self
+            .current
             .as_ref()
             .is_none_or(|(known, _)| ValueRef::from(known) != key)
         {
-            if let Some((known, totals)) = current.take() {
-                out.insert(K::column_result(ValueRef::from(&known))?, totals);
-            }
-            current = Some((Value::column_result(key)?, EntryTotals::default()));
+            self.flush()?;
+            self.current = Some((Value::column_result(key)?, EntryTotals::default()));
         }
-        let Some((_, totals)) = current.as_mut() else {
-            continue;
+        let Some((_, totals)) = self.current.as_mut() else {
+            return Ok(());
         };
         totals.track_count = totals.track_count.saturating_add(1);
-        if let Some(duration) = row.get_ref(1)?.as_i64_or_null()? {
+        if let Some(duration) = duration_ms {
             totals.duration_ms = totals.duration_ms.saturating_add(duration.max(0) as u64);
         }
         if totals.cover_ids.len() < COVER_MOSAIC {
-            if let Some(cover) = row.get_ref(2)?.as_str_or_null()? {
+            if let Some(cover) = cover {
                 if !totals.cover_ids.iter().any(|known| known == cover) {
                     totals.cover_ids.push(cover.to_owned());
                 }
             }
         }
+        Ok(())
     }
-    if let Some((known, totals)) = current {
-        out.insert(K::column_result(ValueRef::from(&known))?, totals);
+
+    fn flush(&mut self) -> anyhow::Result<()> {
+        if let Some((known, totals)) = self.current.take() {
+            self.out
+                .insert(K::column_result(ValueRef::from(&known))?, totals);
+        }
+        Ok(())
     }
-    Ok(out)
+
+    fn finish(mut self) -> anyhow::Result<HashMap<K, EntryTotals>> {
+        self.flush()?;
+        Ok(self.out)
+    }
 }
 
 /// Every playlist, most recently changed first: one query for the playlists and one ordered
@@ -405,6 +505,16 @@ pub(crate) fn assert_scan_needs_no_sort(conn: &Connection, entries: &str) {
         !plan.iter().any(|step| step.starts_with("SCAN t")),
         "{text}"
     );
+    // The entry scan of the map join walks the primary key too.
+    let mut stmt = conn
+        .prepare(&format!("EXPLAIN QUERY PLAN {}", entry_order_sql(entries)))
+        .unwrap();
+    let plan: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(3))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert!(!plan.join(" | ").contains("TEMP B-TREE"), "{plan:?}");
 }
 
 #[cfg(test)]
@@ -755,6 +865,14 @@ mod tests {
         assert_eq!(by_id(mixed).cover_ids, strings(&["c2", "c1"]));
         assert_eq!(by_id(many).cover_ids, strings(&["c5", "c4", "c1", "c3"]));
         assert_eq!(by_id(one).cover_ids, strings(&["c3"]));
+
+        // Both ways of finding the tracks give the same totals.
+        let lookup: HashMap<i64, EntryTotals> =
+            entry_totals_by(&conn, "playlist_tracks", EntryJoin::Lookup).unwrap();
+        let scan: HashMap<i64, EntryTotals> =
+            entry_totals_by(&conn, "playlist_tracks", EntryJoin::Scan).unwrap();
+        assert_eq!(lookup.len(), 4);
+        assert_eq!(lookup, scan);
     }
 
     #[test]

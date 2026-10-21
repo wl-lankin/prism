@@ -643,6 +643,214 @@ pub(crate) mod tests {
         assert_eq!(search(&conn, "", 10).unwrap(), SearchResult::default());
     }
 
+    /// Title words of the scale fixture: every pair of them names about 20 of 32k tracks.
+    const WORDS: [&str; 40] = [
+        "amber", "blue", "cedar", "dawn", "echo", "falling", "garden", "harbor", "iron", "jade",
+        "kingdom", "lantern", "meadow", "night", "ocean", "paper", "quiet", "river", "silver",
+        "thunder", "under", "velvet", "winter", "yellow", "zero", "broken", "crystal", "desert",
+        "electric", "forest", "golden", "hollow", "island", "jungle", "kites", "lonely", "mirror",
+        "northern", "orbit", "purple",
+    ];
+
+    /// A library database file of the size of a large real one: `navidrome` server tracks
+    /// (10 per album, 2 albums per artist, artist ids set, every album with a cover) and `local`
+    /// tracks (10 per album, 3 albums per artist, grouped by name). Artist names overlap
+    /// between the sources, as one person's local files and server usually do.
+    pub(crate) fn scale_db(dir: &std::path::Path, navidrome: usize, local: usize) -> Db {
+        let db = Db::open(&dir.join("library.db")).unwrap();
+        let mut conn = db.0.lock().unwrap();
+        let tx = conn.transaction().unwrap();
+        tx.execute(
+            "INSERT INTO folders (path, online) VALUES ('/music', 1)",
+            [],
+        )
+        .unwrap();
+        {
+            let mut track = tx
+                .prepare(
+                    "INSERT INTO tracks (id, source, title, artist, album_artist, album, album_id,
+                        track_no, disc_no, duration_ms, year, genre, format, cover_id, path,
+                        folder)
+                     VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6, ?7, 1, ?8, ?9, 'Rock', 'flac', ?10,
+                        ?11, ?12)",
+                )
+                .unwrap();
+            let mut album = tx
+                .prepare(
+                    "INSERT INTO albums (id, source, title, artist, artist_id, year, cover_id,
+                        track_count, duration_ms)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 10, 2400000)",
+                )
+                .unwrap();
+            let title = |i: usize| format!("{} {} {i}", WORDS[i % 40], WORDS[(i / 40) % 40]);
+            for (source, count, per_artist) in [("navidrome", navidrome, 2), ("local", local, 3)] {
+                for a in 0..count / 10 {
+                    let artist_n = a / per_artist;
+                    let artist = format!("Artist {artist_n}");
+                    let album_title = format!("Album {a} {}", WORDS[a % 40]);
+                    let year = 1970 + (a % 50) as i32;
+                    let (album_id, artist_id, cover) = if source == "navidrome" {
+                        (
+                            format!("navidrome:al-{a}"),
+                            Some(format!("navidrome:ar-{artist_n}")),
+                            format!("nd-al-{a}_cover"),
+                        )
+                    } else {
+                        (
+                            crate::library::model::album_id(&artist, &album_title),
+                            None,
+                            format!("local-cover-{a}"),
+                        )
+                    };
+                    album
+                        .execute(params![
+                            album_id,
+                            source,
+                            album_title,
+                            artist,
+                            artist_id,
+                            year,
+                            cover
+                        ])
+                        .unwrap();
+                    for t in 0..10 {
+                        let i = a * 10 + t;
+                        let (id, path, folder) = if source == "navidrome" {
+                            (format!("navidrome:tr-{i}"), None, None)
+                        } else {
+                            (
+                                format!("local:{i}"),
+                                Some(format!("/music/{i}.flac")),
+                                Some("/music"),
+                            )
+                        };
+                        track
+                            .execute(params![
+                                id,
+                                source,
+                                title(i),
+                                artist,
+                                album_title,
+                                album_id,
+                                t as i64 + 1,
+                                180_000 + (i % 120) as i64 * 1000,
+                                year,
+                                cover,
+                                path,
+                                folder
+                            ])
+                            .unwrap();
+                    }
+                }
+            }
+        }
+        tx.commit().unwrap();
+        drop(conn);
+        db
+    }
+
+    /// The median wall time of 5 runs of `run`, after one warm-up run.
+    pub(crate) fn median_of_5(mut run: impl FnMut()) -> std::time::Duration {
+        run();
+        let mut times: Vec<std::time::Duration> = (0..5)
+            .map(|_| {
+                let started = std::time::Instant::now();
+                run();
+                started.elapsed()
+            })
+            .collect();
+        times.sort();
+        times[2]
+    }
+
+    /// Timing is only meaningful in an optimized build: `cargo test --release
+    /// --manifest-path src-tauri/Cargo.toml with_30k -- --nocapture`.
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "timing; run with --release")]
+    fn search_with_30k_tracks_under_100ms() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = scale_db(dir.path(), 30_000, 2_000);
+        let conn = db.0.lock().unwrap();
+        assert_eq!(track_count(&conn, None).unwrap(), 32_000);
+        // A two-word query as typed into the palette: both words as prefixes.
+        let found = search(&conn, "river nigh", 50).unwrap();
+        assert!(found
+            .tracks
+            .iter()
+            .any(|t| t.title.contains("river") && t.title.contains("night")));
+        let two_words = median_of_5(|| {
+            search(&conn, "river nigh", 50).unwrap();
+        });
+        // The worst case: one word that is in every artist name, so every row matches.
+        let every_row = median_of_5(|| {
+            search(&conn, "artist", 50).unwrap();
+        });
+        println!("search, 30k + 2k tracks: two words {two_words:?}, every row {every_row:?}");
+        assert!(two_words.as_millis() < 100, "two words took {two_words:?}");
+        assert!(every_row.as_millis() < 100, "every row took {every_row:?}");
+    }
+
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "timing; run with --release")]
+    fn songs_page_with_30k_under_20ms() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = scale_db(dir.path(), 30_000, 2_000);
+        let conn = db.0.lock().unwrap();
+        let page = tracks_range(&conn, 15_000, 200, Some(Source::Navidrome)).unwrap();
+        assert_eq!(page.len(), 200);
+        assert!(page.iter().all(|t| t.source == Source::Navidrome));
+        let navidrome = median_of_5(|| {
+            tracks_range(&conn, 15_000, 200, Some(Source::Navidrome)).unwrap();
+        });
+        let all = median_of_5(|| {
+            tracks_range(&conn, 15_000, 200, None).unwrap();
+        });
+        println!("songs page at 15000, 30k + 2k tracks: navidrome {navidrome:?}, all {all:?}");
+        assert!(
+            navidrome.as_millis() < 20,
+            "navidrome page took {navidrome:?}"
+        );
+        assert!(all.as_millis() < 20, "all-sources page took {all:?}");
+    }
+
+    /// The artist list over 30k server and 30k local tracks: the whole list, one source's
+    /// list, and the artist part of a search.
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "timing; run with --release")]
+    fn artists_with_30k_and_30k_under_100ms() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = scale_db(dir.path(), 30_000, 30_000);
+        let conn = db.0.lock().unwrap();
+        let listed = artists(&conn).unwrap();
+        // 1500 server artists (2 albums each) and 1000 local ones (3 albums each).
+        assert_eq!(listed.len(), 2_500);
+        assert!(listed.iter().all(|a| a.cover_id.is_some()));
+        let by_source = |source: &str| {
+            let sql = artist_select("a.source = ?1");
+            collect(&conn, &sql, [source], artist_from_row).unwrap()
+        };
+        assert_eq!(by_source("navidrome").len(), 1_500);
+        assert_eq!(by_source("local").len(), 1_000);
+        let all = median_of_5(|| {
+            artists(&conn).unwrap();
+        });
+        let navidrome = median_of_5(|| {
+            by_source("navidrome");
+        });
+        let local = median_of_5(|| {
+            by_source("local");
+        });
+        println!(
+            "artists, 30k + 30k tracks: all {all:?}, navidrome {navidrome:?}, local {local:?}"
+        );
+        assert!(all.as_millis() < 100, "all artists took {all:?}");
+        assert!(
+            navidrome.as_millis() < 100,
+            "navidrome artists took {navidrome:?}"
+        );
+        assert!(local.as_millis() < 100, "local artists took {local:?}");
+    }
+
     #[test]
     fn fts_query_quotes_every_word() {
         assert_eq!(fts_query("glo bo").as_deref(), Some("\"glo\"* \"bo\"*"));

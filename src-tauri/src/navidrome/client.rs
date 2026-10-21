@@ -2000,4 +2000,337 @@ mod tests {
         let failure = NavidromeFailure::from(&NavidromeError::WrongCredentials);
         assert_eq!(failure.detail, None);
     }
+
+    /// The Subsonic methods [`smoke`] may call: reads only, never a star, scrobble or edit.
+    const SMOKE_METHODS: &[&str] = &[
+        "ping",
+        "getAlbumList2",
+        "search3",
+        "getCoverArt",
+        "stream",
+        "getPlaylists",
+        "getPlaylist",
+    ];
+
+    /// The most playlists [`smoke`] opens with `getPlaylist`.
+    const SMOKE_PLAYLISTS: usize = 25;
+
+    /// Unwraps a smoke step; a failure panics with the step and the error code only, never the
+    /// error text (it can quote the server).
+    fn step<T>(name: &str, result: Result<T, NavidromeError>) -> T {
+        result.unwrap_or_else(|err| panic!("{name} failed: {}", err.code()))
+    }
+
+    fn ms(started: std::time::Instant) -> u128 {
+        started.elapsed().as_millis()
+    }
+
+    /// The codec the first bytes of a stream look like.
+    fn sniff(bytes: &[u8]) -> &'static str {
+        match bytes {
+            [b'I', b'D', b'3', ..] => "mp3 (ID3)",
+            [0xFF, b, ..] if b & 0xE0 == 0xE0 => "mp3",
+            [b'f', b'L', b'a', b'C', ..] => "flac",
+            [b'O', b'g', b'g', b'S', ..] => "ogg",
+            [b'R', b'I', b'F', b'F', ..] => "wav",
+            [_, _, _, _, b'f', b't', b'y', b'p', ..] => "mp4",
+            [] => "empty",
+            _ => "unknown",
+        }
+    }
+
+    /// A file suffix as a format name; anything that does not look like one is not printed.
+    fn format_of(suffix: Option<&str>) -> String {
+        match suffix {
+            Some(s)
+                if !s.is_empty()
+                    && s.len() <= 8
+                    && s.chars().all(|c| c.is_ascii_alphanumeric()) =>
+            {
+                s.to_ascii_lowercase()
+            }
+            Some(_) => "other".into(),
+            None => "none".into(),
+        }
+    }
+
+    /// A response header as printable text: media types and numbers only.
+    fn header(response: &reqwest::blocking::Response, name: reqwest::header::HeaderName) -> String {
+        match response.headers().get(name).and_then(|v| v.to_str().ok()) {
+            Some(v)
+                if v.len() <= 64
+                    && v.chars().all(|c| {
+                        c.is_ascii_alphanumeric()
+                            || matches!(c, '/' | '-' | '+' | '.' | ';' | '=' | ' ')
+                    }) =>
+            {
+                v.to_owned()
+            }
+            Some(_) => "unprintable".into(),
+            None => "none".into(),
+        }
+    }
+
+    /// Opens a stream and reads at most `limit` bytes of it. Returns the response (headers
+    /// only by then), the bytes and the time to the headers.
+    fn stream_head(
+        client: &SubsonicClient,
+        id: &str,
+        quality: StreamQuality,
+        limit: u64,
+    ) -> Result<(reqwest::blocking::Response, Vec<u8>, u128), NavidromeError> {
+        let url = client.stream_url(id, quality, None);
+        let started = std::time::Instant::now();
+        let response = client
+            .stream_http()
+            .get(url.expose())
+            .send()
+            .map_err(classify_reqwest)?;
+        let headers_ms = ms(started);
+        let mut bytes = Vec::new();
+        if response.status().is_success() {
+            // Reading through `&mut` keeps the response, so its headers can still be printed.
+            let mut body = response;
+            (&mut body)
+                .take(limit)
+                .read_to_end(&mut bytes)
+                .map_err(classify_io)?;
+            return Ok((body, bytes, headers_ms));
+        }
+        Ok((response, bytes, headers_ms))
+    }
+
+    /// The read-only checks of [`live_server_smoke`], as printable lines: counts, timings,
+    /// formats and status codes only, never a name, id, URL or credential.
+    fn smoke(account: Account) -> Vec<String> {
+        let client = SubsonicClient::new(account).unwrap();
+        let mut out = Vec::new();
+
+        let started = std::time::Instant::now();
+        let info = step("ping", client.ping());
+        out.push(format!(
+            "ping: {} ms, api {}, openSubsonic {}",
+            ms(started),
+            if info.api_version.len() <= 16
+                && info
+                    .api_version
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || c == '.')
+            {
+                info.api_version.as_str()
+            } else {
+                "other"
+            },
+            info.open_subsonic
+        ));
+
+        let started = std::time::Instant::now();
+        let five = step("getAlbumList2 (5)", client.album_list2(0, 5));
+        out.push(format!(
+            "getAlbumList2 page of 5: {} albums in {} ms",
+            five.len(),
+            ms(started)
+        ));
+        let started = std::time::Instant::now();
+        let page = step("getAlbumList2 (500)", client.album_list2(0, PAGE));
+        let no_artist_id = page
+            .iter()
+            .filter(|a| a.artist_id.as_deref().is_none_or(str::is_empty))
+            .count();
+        out.push(format!(
+            "getAlbumList2 page of {PAGE}: {} albums in {} ms; without artistId: {no_artist_id}",
+            page.len(),
+            ms(started)
+        ));
+
+        let started = std::time::Instant::now();
+        let songs = step("search3", client.search3_songs(0, PAGE));
+        let count_missing =
+            |missing: fn(&Child) -> bool| songs.iter().filter(|s| missing(s)).count();
+        out.push(format!(
+            "search3 page of {PAGE}: {} songs in {} ms; without albumId: {}, without artistId: {}, \
+             without duration: {}",
+            songs.len(),
+            ms(started),
+            count_missing(|s| s.album_id.as_deref().is_none_or(str::is_empty)),
+            count_missing(|s| s.artist_id.as_deref().is_none_or(str::is_empty)),
+            count_missing(|s| s.duration.is_none()),
+        ));
+        let mut formats: Vec<(String, usize)> = Vec::new();
+        for song in &songs {
+            let format = format_of(song.suffix.as_deref());
+            match formats.iter_mut().find(|(known, _)| *known == format) {
+                Some((_, n)) => *n += 1,
+                None => formats.push((format, 1)),
+            }
+        }
+        formats.sort();
+        let formats: Vec<String> = formats.iter().map(|(f, n)| format!("{f} {n}")).collect();
+        out.push(format!("formats in that page: {}", formats.join(", ")));
+
+        match page.iter().chain(&five).find_map(|a| a.cover_art.clone()) {
+            Some(cover) => {
+                let started = std::time::Instant::now();
+                let bytes = step("getCoverArt", client.cover_art(&cover, 96));
+                out.push(format!(
+                    "getCoverArt at 96: {} bytes in {} ms",
+                    bytes.len(),
+                    ms(started)
+                ));
+            }
+            None => out.push("getCoverArt: no album with a cover in the first page".into()),
+        }
+
+        match songs.first() {
+            Some(song) => {
+                let started = std::time::Instant::now();
+                let (response, bytes, headers_ms) = step(
+                    "stream (original)",
+                    stream_head(&client, &song.id, StreamQuality::Original, 64 * 1024),
+                );
+                out.push(format!(
+                    "stream original ({}): status {}, headers in {headers_ms} ms, {} bytes in {} ms, \
+                     content-type {}, content-length {}, accept-ranges {}, looks like {}",
+                    format_of(song.suffix.as_deref()),
+                    response.status().as_u16(),
+                    bytes.len(),
+                    ms(started),
+                    header(&response, reqwest::header::CONTENT_TYPE),
+                    if response.headers().contains_key(reqwest::header::CONTENT_LENGTH) {
+                        "set"
+                    } else {
+                        "none"
+                    },
+                    header(&response, reqwest::header::ACCEPT_RANGES),
+                    sniff(&bytes),
+                ));
+            }
+            None => out.push("stream: no song in the first search3 page".into()),
+        }
+
+        // Task 17 labels a stream at a bitrate cap as MP3 unless the file is an MP3 at or below
+        // the cap: this shows whether the server really transcodes a non-MP3 file.
+        let other = songs.iter().find(|s| {
+            s.suffix
+                .as_deref()
+                .is_some_and(|suffix| !suffix.eq_ignore_ascii_case("mp3"))
+        });
+        match other {
+            Some(song) => {
+                let (response, bytes, headers_ms) = step(
+                    "stream (320)",
+                    stream_head(&client, &song.id, StreamQuality::Kbps320, 16 * 1024),
+                );
+                out.push(format!(
+                    "stream format=mp3&maxBitRate=320 of a {} file: status {}, headers in \
+                     {headers_ms} ms, content-type {}, content-length {}, looks like {}",
+                    format_of(song.suffix.as_deref()),
+                    response.status().as_u16(),
+                    header(&response, reqwest::header::CONTENT_TYPE),
+                    header(&response, reqwest::header::CONTENT_LENGTH),
+                    sniff(&bytes),
+                ));
+            }
+            None => out.push("transcode check: no non-MP3 song in the first search3 page".into()),
+        }
+
+        // A playlist whose listed songCount or changed differ from its getPlaylist answer is
+        // fetched again every cycle (Task 12's change check).
+        let started = std::time::Instant::now();
+        let listed = step("getPlaylists", client.playlists());
+        out.push(format!(
+            "getPlaylists: {} playlists in {} ms",
+            listed.len(),
+            ms(started)
+        ));
+        let (mut checked, mut count_differs, mut changed_differs, mut changed_missing) =
+            (0, 0, 0, 0);
+        let mut entries_differ = 0;
+        let started = std::time::Instant::now();
+        for summary in listed.iter().take(SMOKE_PLAYLISTS) {
+            let full = step("getPlaylist", client.playlist(&summary.id));
+            checked += 1;
+            count_differs += usize::from(summary.song_count != full.summary.song_count);
+            changed_differs += usize::from(summary.changed != full.summary.changed);
+            changed_missing += usize::from(summary.changed.is_none());
+            entries_differ += usize::from(full.entry.len() as u32 != full.summary.song_count);
+        }
+        out.push(format!(
+            "getPlaylist of {checked} in {} ms: songCount differs from the listing in \
+             {count_differs}, changed differs in {changed_differs}, changed missing in the listing \
+             in {changed_missing}, entries differ from songCount in {entries_differ}",
+            ms(started)
+        ));
+        out
+    }
+
+    /// Read-only checks against a real server, for the owner to run by hand. The server comes
+    /// from `PRISM_LIVE_SUBSONIC_URL`, `PRISM_LIVE_SUBSONIC_USER` and
+    /// `PRISM_LIVE_SUBSONIC_PASSWORD` only; without them the test passes with a message. It
+    /// prints counts, timings, formats and status codes, never names, ids, URLs or credentials.
+    #[test]
+    #[ignore = "talks to the server in PRISM_LIVE_SUBSONIC_URL; run by hand"]
+    fn live_server_smoke() {
+        let var = |name: &str| std::env::var(name).ok().filter(|v| !v.trim().is_empty());
+        let (Some(url), Some(user), Some(password)) = (
+            var("PRISM_LIVE_SUBSONIC_URL"),
+            var("PRISM_LIVE_SUBSONIC_USER"),
+            var("PRISM_LIVE_SUBSONIC_PASSWORD"),
+        ) else {
+            println!(
+                "live_server_smoke skipped: set PRISM_LIVE_SUBSONIC_URL, PRISM_LIVE_SUBSONIC_USER \
+                 and PRISM_LIVE_SUBSONIC_PASSWORD"
+            );
+            return;
+        };
+        let url = normalize_url(&url)
+            .unwrap_or_else(|err| panic!("PRISM_LIVE_SUBSONIC_URL is not usable: {}", err.code()));
+        let account = Account {
+            url,
+            user: user.trim().to_owned(),
+            password: Secret::new(password),
+        };
+        for line in smoke(account) {
+            println!("{line}");
+        }
+    }
+
+    /// The smoke test itself, against the fake server: it only reads, and nothing it prints
+    /// names the server, the account or the library.
+    #[test]
+    fn smoke_reads_only_and_prints_no_names() {
+        let lib = FakeLibrary::synthetic(3, 4)
+            .with_audio("tr-0", [b"ID3".as_slice(), &[0u8; 70_000]].concat())
+            .with_wav("tr-5", 2);
+        let server = FakeServer::start(lib);
+        let lines = smoke(server.account());
+        let text = lines.join("\n");
+        println!("{text}");
+        let lower = text.to_lowercase();
+        for secret in [
+            "demo",
+            "127.0.0.1",
+            "http",
+            "tr-",
+            "al-",
+            "pl-",
+            FAKE_PASSWORD,
+        ] {
+            assert!(!lower.contains(secret), "{secret:?} in:\n{text}");
+        }
+        assert!(text.contains("without artistId: 0"), "{text}");
+        assert!(text.contains("65536 bytes"), "{text}");
+        assert!(text.contains("of a wav file: status 200"), "{text}");
+        assert!(text.contains("getPlaylist of 2 in"), "{text}");
+        assert!(
+            text.contains("songCount differs from the listing in 0"),
+            "{text}"
+        );
+        let methods: HashSet<String> = server.requests().into_iter().map(|r| r.method).collect();
+        assert!(
+            methods.iter().all(|m| SMOKE_METHODS.contains(&m.as_str())),
+            "{methods:?}"
+        );
+        assert!(server.starred().0.is_empty() && server.scrobbles().is_empty());
+    }
 }

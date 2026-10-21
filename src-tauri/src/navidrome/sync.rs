@@ -1394,6 +1394,47 @@ mod tests {
         assert_eq!(env.nd_tracks(), 20);
     }
 
+    /// A first sync of 30k songs in 3000 albums into a database file, as on a real machine,
+    /// then a full pass after the server's `lastModified` moved with nothing else changed.
+    /// Timing is only meaningful in an optimized build: `cargo test --release
+    /// --manifest-path src-tauri/Cargo.toml sync_30k_synthetic -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "30k songs over HTTP; run with --release"]
+    fn sync_30k_synthetic() {
+        let server = FakeServer::start(FakeLibrary::synthetic(3000, 10));
+        let client = SubsonicClient::new(server.account()).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("library.db")).unwrap();
+
+        let started = Instant::now();
+        let report = sync_library(&db, &client, NOW, &|_| {}, &|| {}).unwrap();
+        let first = started.elapsed();
+        assert_eq!(
+            report,
+            SyncReport {
+                full_pass: true,
+                tracks: 30_000,
+                albums: 3_000,
+                changed: true,
+            }
+        );
+
+        server.edit(|lib| lib.last_modified += 1);
+        let started = Instant::now();
+        let report = sync_library(&db, &client, NOW + 60_000, &|_| {}, &|| {}).unwrap();
+        let again = started.elapsed();
+        assert!(report.full_pass);
+        assert!(!report.changed, "{report:?}");
+        assert_eq!(report.tracks, 30_000);
+
+        println!("sync of 30000 songs: first {first:?}, unchanged full pass {again:?}");
+        let conn = db.0.lock().unwrap();
+        let found = query::search(&conn, "Demo Song 29999", 10).unwrap();
+        assert!(found.tracks.iter().any(|t| t.id == "navidrome:tr-29998"));
+        assert!(first.as_secs() < 60, "first sync took {first:?}");
+        assert!(again.as_secs() < 60, "unchanged full pass took {again:?}");
+    }
+
     #[test]
     fn cancelled_pass_writes_nothing_more() {
         let env = env(FakeLibrary::synthetic(100, 12));
