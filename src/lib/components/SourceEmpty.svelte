@@ -4,6 +4,7 @@
   import { go } from '../stores/nav.svelte';
   import { failureText, navidrome, navidromeErrorText } from '../stores/navidrome.svelte';
   import type { Source } from '../types';
+  import navidromeLogo from '../../../assets/navidrome.png';
   import EmptyLibrary from './EmptyLibrary.svelte';
 
   /** A source view with nothing in the index yet. Local files keep the add-a-folder screen;
@@ -74,10 +75,10 @@
 {:else}
   <div class="empty" data-stage={stage}>
     <div class="panel">
-      <!-- The source's own dot, grown into a quiet emblem: hollow while the server is away. -->
+      <!-- Navidrome's own logo on a soft halo; greyed while the server is away. -->
       <div class="emblem" class:hollow={stage === 'offline' || stage === 'error'} class:dim={stage === 'connect'} aria-hidden="true">
         <span class="halo"></span>
-        <span class="core"></span>
+        <img class="core" src={navidromeLogo} alt="" draggable="false" />
       </div>
       <h1>{t(titles[stage])}</h1>
       <!-- Screen readers hear the state when it changes, not every progress number. -->
@@ -140,28 +141,24 @@
 
   .halo {
     position: absolute;
-    inset: 0;
+    inset: -12px;
     border-radius: 50%;
-    background: radial-gradient(circle, color-mix(in srgb, var(--c) 22%, transparent) 0%, transparent 68%);
+    background: radial-gradient(circle, rgba(42, 130, 255, 0.24) 0%, transparent 68%);
     transition: opacity var(--dur) ease-out;
   }
 
   .core {
-    width: 26px;
-    height: 26px;
-    border-radius: 50%;
-    background: var(--c);
-    box-shadow:
-      0 0 0 6px color-mix(in srgb, var(--c) 10%, transparent),
-      0 0 26px color-mix(in srgb, var(--c) 55%, transparent);
+    position: relative;
+    width: 72px;
+    height: 72px;
     transition:
-      background-color var(--dur) ease-out,
-      box-shadow var(--dur) ease-out;
+      opacity var(--dur) ease-out,
+      filter var(--dur) ease-out;
   }
 
   .emblem.hollow .core {
-    background: transparent;
-    box-shadow: inset 0 0 0 2.5px var(--c);
+    filter: grayscale(1);
+    opacity: 0.5;
   }
 
   .emblem.hollow .halo,
@@ -170,8 +167,7 @@
   }
 
   .emblem.dim .core {
-    opacity: 0.55;
-    box-shadow: none;
+    opacity: 0.85;
   }
 
   h1 {
