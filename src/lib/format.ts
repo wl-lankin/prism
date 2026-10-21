@@ -1,4 +1,4 @@
-import type { Source, Track } from './types';
+import type { Source, StreamQuality, Track } from './types';
 
 /** "3:07", or "1:02:03" from one hour on. Invalid and negative values show "0:00". */
 export function formatDuration(ms: number): string {
@@ -10,7 +10,7 @@ export function formatDuration(ms: number): string {
 }
 
 export type QualityInput = Pick<Track, 'format'> &
-  Partial<Pick<Track, 'bitDepth' | 'sampleRate' | 'bitrateKbps'>>;
+  Partial<Pick<Track, 'source' | 'bitDepth' | 'sampleRate' | 'bitrateKbps'>>;
 
 const LOSSLESS = new Set(['flac', 'wav', 'aiff', 'aif', 'alac', 'ape', 'wv', 'dsf', 'dff']);
 const NAMES: Record<string, string> = { aif: 'AIFF', oga: 'OGG', wv: 'WAVPACK' };
@@ -20,12 +20,16 @@ function khz(hz: number): string {
   return String(Math.round(hz / 100) / 10);
 }
 
-/** "FLAC 24/96", "MP3 320", "OPUS". The format is the file extension the scanner stored. */
-export function qualityLabel(track: QualityInput): string {
+function isLossless(format: string, bitDepth: number | null | undefined): boolean {
+  // m4a holds either ALAC (which reports a bit depth) or AAC.
+  return LOSSLESS.has(format) || (format === 'm4a' && !!bitDepth);
+}
+
+/** The file's own label: "FLAC 24/96", "MP3 320", "OPUS". The format is the file extension. */
+function fileLabel(track: QualityInput): string {
   const format = track.format.toLowerCase();
   const { bitDepth, sampleRate, bitrateKbps } = track;
-  // m4a holds either ALAC (which reports a bit depth) or AAC.
-  const lossless = LOSSLESS.has(format) || (format === 'm4a' && !!bitDepth);
+  const lossless = isLossless(format, bitDepth);
   const name = format === 'm4a' ? (lossless ? 'ALAC' : 'AAC') : (NAMES[format] ?? format.toUpperCase());
 
   if (lossless) {
@@ -34,10 +38,36 @@ export function qualityLabel(track: QualityInput): string {
   return bitrateKbps ? `${name} ${Math.round(bitrateKbps)}` : name;
 }
 
-/** "Local files · FLAC 24/96": where a track comes from and how it is encoded. A track whose
- *  format is unknown shows the source name alone. */
-export function sourceQualityLabel(track: Track, sourceName: (s: Source) => string): string {
+/** The MP3 bitrate a Navidrome track streams at under `stream`, or null when it streams the
+ *  file as it is. A cap transcodes a lossless file, a file of unknown bitrate and one above
+ *  the cap; a file at or below the cap keeps its own label. Local tracks never transcode. */
+function transcodeKbps(track: QualityInput, stream: StreamQuality | undefined): number | null {
+  if (track.source !== 'navidrome' || !stream || stream === 'original') return null;
+  const cap = Number(stream);
+  const format = track.format.toLowerCase();
+  const { bitrateKbps } = track;
+  if (isLossless(format, track.bitDepth) || !bitrateKbps || bitrateKbps > cap) return cap;
+  return null;
+}
+
+/** "FLAC 24/96", "MP3 320", "OPUS": how the track sounds as it plays. A Navidrome track that
+ *  `stream` transcodes shows the transcode ("MP3 192"). */
+export function qualityLabel(track: QualityInput, stream?: StreamQuality): string {
+  const kbps = transcodeKbps(track, stream);
+  return kbps ? `MP3 ${kbps}` : fileLabel(track);
+}
+
+/** The file's label behind a transcode ("FLAC 24/96" streamed as MP3 192), or null when the
+ *  track plays as it is or nothing is known about the file. */
+export function streamedFrom(track: QualityInput, stream?: StreamQuality): string | null {
+  if (!transcodeKbps(track, stream) || !track.format) return null;
+  return fileLabel(track);
+}
+
+/** "Local files · FLAC 24/96": where a track comes from and how it plays (see `qualityLabel`).
+ *  A track whose format is unknown, and that is not transcoded, shows the source name alone. */
+export function sourceQualityLabel(track: Track, sourceName: (s: Source) => string, stream?: StreamQuality): string {
   const source = sourceName(track.source);
-  const quality = track.format ? qualityLabel(track) : '';
+  const quality = track.format || transcodeKbps(track, stream) ? qualityLabel(track, stream) : '';
   return quality ? `${source} · ${quality}` : source;
 }

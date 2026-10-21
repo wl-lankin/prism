@@ -1,9 +1,10 @@
 <script lang="ts">
-  import { formatDuration, qualityLabel } from '../format';
+  import { formatDuration, qualityLabel, streamedFrom } from '../format';
   import { t } from '../i18n';
   import { playerNext, playerPrev, playerSeek, playerSetVolume } from '../ipc';
   import { back, go, nav } from '../stores/nav.svelte';
   import { player } from '../stores/player.svelte';
+  import { settings } from '../stores/settings.svelte';
   import { QUEUE_TOGGLE_ID } from '../queue';
   import { queuePanel, toggleQueuePanel } from '../stores/queue.svelte';
   import Cover from './Cover.svelte';
@@ -20,6 +21,13 @@
   const track = $derived(player.track);
   const idle = $derived(player.status === 'idle' || !track);
   const duration = $derived(player.durationMs || track?.durationMs || 0);
+
+  /** How the track plays; a Navidrome transcode names the file behind it in the tooltip. */
+  const quality = $derived(track ? qualityLabel(track, settings.navidromeQuality) : '');
+  const streamNote = $derived.by(() => {
+    const file = track ? streamedFrom(track, settings.navidromeQuality) : null;
+    return file ? t('quality.streamedFrom', { stream: quality, file }) : undefined;
+  });
 
   // While the seek bar is dragged it shows the drag position, not the engine's.
   let seeking = $state<number | null>(null);
@@ -95,7 +103,7 @@
       {/if}
     </div>
     {#if !idle && track}
-      <span class="quality" style="--dot:var(--src-{track.source})">{qualityLabel(track)}</span>
+      <span class="quality" style="--dot:var(--src-{track.source})" title={streamNote}>{quality}</span>
     {/if}
   </div>
 

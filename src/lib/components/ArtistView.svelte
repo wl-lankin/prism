@@ -35,6 +35,16 @@
   });
 
   const info = $derived(library.artists?.find((a) => a.name === name) ?? null);
+
+  /** The page is a union over sources, keyed by name; its heart stands for every artist of
+   *  that name: the name for a local artist (as in M2), `navidrome:<id>` for a Navidrome one,
+   *  both when both exist. It is on when any of them is a favorite, and a click sets all of
+   *  them alike, so the local favorite and the server star stay in step. Before the artists
+   *  are loaded it falls back to the name. */
+  const heartIds = $derived.by(() => {
+    const ids = (library.artists ?? []).filter((a) => a.name === name).map((a) => a.id);
+    return ids.length ? ids : [name];
+  });
   const coverId = $derived(info?.coverId ?? albums?.find((a) => a.coverId)?.coverId ?? null);
   const trackCount = $derived(info?.trackCount ?? albums?.reduce((n, a) => n + a.trackCount, 0) ?? 0);
 
@@ -75,7 +85,7 @@
           <Icon name="shuffle" size={16} />
           {t('album.shuffle')}
         </button>
-        <Heart kind="artist" id={name} round label={t('favorites.toggleItem', { name })} />
+        <Heart kind="artist" id={heartIds} round label={t('favorites.toggleItem', { name })} />
       </div>
     </div>
   </header>

@@ -106,6 +106,32 @@ it('shows the title, artist and album, and the source with the quality', async (
   unmount(mini);
 });
 
+it('shows the streamed quality and the offline notice of a Navidrome track without taking focus', async () => {
+  state = { ...state, track: { ...track, id: 'navidrome:s1', source: 'navidrome', path: null } };
+  const focus = vi.spyOn(HTMLElement.prototype, 'focus');
+  const mini = mount(MiniPlayer, { target });
+  await vi.waitFor(async () => {
+    await settle();
+    expect(target.querySelector('.source')?.textContent?.trim()).toBe('Navidrome · FLAC 24/96');
+  });
+  handlers.get('settings://changed')!({ payload: { ...DEFAULT_SETTINGS, navidromeQuality: '192' } });
+  await settle();
+  const source = target.querySelector<HTMLElement>('.source')!;
+  expect(source.textContent?.trim()).toBe('Navidrome · MP3 192');
+  expect(source.title).toBe('Navidrome · MP3 192 from FLAC 24/96');
+
+  handlers.get('player://error')!({
+    payload: { trackId: 'navidrome:s1', message: 'Navidrome is not reachable', kind: 'offline' },
+  });
+  await settle();
+  expect(target.querySelector('[role="status"]')?.textContent).toBe(
+    'Navidrome is not reachable. Press Play once it is back.',
+  );
+  expect(focus).not.toHaveBeenCalled();
+  focus.mockRestore();
+  unmount(mini);
+});
+
 it('opens Prism with the open button', async () => {
   const mini = mount(MiniPlayer, { target });
   await settle();

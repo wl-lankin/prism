@@ -62,13 +62,14 @@
   const keepSource = <T extends { source: Source }>(item: T) => source === 'all' || item.source === source;
   const shownTracks = $derived((tracks ?? []).filter((x) => isFavorite('track', x.id) && keepSource(x)));
   const shownAlbums = $derived((albums ?? []).filter((x) => isFavorite('album', x.id) && keepSource(x)));
-  // Artists carry no source yet; every artist in the index is local until other sources land.
-  const shownArtists = $derived((artists ?? []).filter((x) => isFavorite('artist', x.id)));
+  // Artists are hearted by id (the name for a local artist, `navidrome:<id>` for a Navidrome
+  // one), so an artist found in both sources is listed once per source.
+  const shownArtists = $derived((artists ?? []).filter((x) => isFavorite('artist', x.id) && keepSource(x)));
 
   /** All, then every source that has favorites, Local files always among them. */
   const sources = $derived.by(() => {
     const present = new Set<Source>(['local']);
-    for (const item of [...(tracks ?? []), ...(albums ?? [])]) present.add(item.source);
+    for (const item of [...(tracks ?? []), ...(albums ?? []), ...(artists ?? [])]) present.add(item.source);
     return [...present];
   });
 
@@ -83,7 +84,7 @@
     if (source === 'all') return false;
     if (tab === 'track') return (tracks ?? []).some((x) => isFavorite('track', x.id));
     if (tab === 'album') return (albums ?? []).some((x) => isFavorite('album', x.id));
-    return false;
+    return (artists ?? []).some((x) => isFavorite('artist', x.id));
   });
 
   const tabs: { kind: FavKind; label: Key; count: Key; icon: 'songs' | 'album' | 'artist' }[] = [
@@ -122,10 +123,16 @@
     if (tab === 'track') return play(0, shuffled);
     const ids: string[] = [];
     try {
+      // An artist's albums come from every source; an artist listed once per source counts once,
+      // and the chosen chip narrows the albums too.
+      const names = [...new Set(shownArtists.map((x) => x.name))];
       const albumIds =
         tab === 'album'
           ? shownAlbums.map((x) => x.id)
-          : (await Promise.all(shownArtists.map((x) => libraryArtistAlbums(x.name)))).flat().map((x) => x.id);
+          : (await Promise.all(names.map((name) => libraryArtistAlbums(name))))
+              .flat()
+              .filter(keepSource)
+              .map((x) => x.id);
       for (const list of await Promise.all(albumIds.map((id) => libraryAlbumTracks(id)))) {
         for (const track of list) ids.push(track.id);
       }

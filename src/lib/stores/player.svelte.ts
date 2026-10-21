@@ -1,5 +1,7 @@
-import { onPlayerState, playerState } from '../ipc';
-import type { PlayerState } from '../types';
+import { t } from '../i18n';
+import { onPlayerError, onPlayerState, playerState } from '../ipc';
+import type { PlayerError, PlayerState } from '../types';
+import { notice, notify } from './notice.svelte';
 
 /** The player as the engine last reported it. Call `initPlayer()` once per window. */
 export const player: PlayerState = $state({
@@ -46,4 +48,19 @@ export async function initPlayer(): Promise<() => void> {
     console.error('loading the player state failed', err);
   }
   return unlisten;
+}
+
+/** What the window shows for one `player://error`. `offline`: the player paused on a Navidrome
+ *  track it could not reach, so one notice says why and how to go on; a second report while
+ *  that notice still shows adds nothing. `track`: nothing, as in M2 (the player moves on by
+ *  itself, and a dead queue ends with the player idle). */
+export function showPlayerError(error: PlayerError): void {
+  if (error?.kind !== 'offline') return;
+  const text = t('navidrome.offlineNotice');
+  if (notice.text !== text) notify(text);
+}
+
+/** Follows `player://error` in this window. Resolves with the cleanup. */
+export function followPlayerErrors(): Promise<() => void> {
+  return onPlayerError(showPlayerError);
 }
