@@ -204,8 +204,12 @@ it('favorites_stations_tab_lists_stations', async () => {
     'Test FM 2',
   ]);
   expect(target.querySelector('.viewhead .meta')?.textContent).toBe('2 stations');
-  // Stations cannot be queued: no Play or Shuffle.
-  expect(target.querySelector('.viewhead .actions')).toBeNull();
+  // Stations cannot be queued: Play and Shuffle keep their room (the header does not jump)
+  // but are hidden and disabled.
+  const plays = target.querySelector('.viewhead .plays')!;
+  expect(plays.classList.contains('away')).toBe(true);
+  expect(plays.getAttribute('aria-hidden')).toBe('true');
+  expect([...plays.querySelectorAll('button')].every((b) => (b as HTMLButtonElement).disabled)).toBe(true);
   // The songs empty state stays away on this tab.
   expect(target.textContent).not.toContain('No favorite songs yet');
 
@@ -243,7 +247,7 @@ it('favorites_stations_tab_empty_state_finds_stations', async () => {
   );
   expect(target.textContent).not.toContain('No favorite songs yet');
   expect(target.querySelectorAll('.empty')).toHaveLength(1);
-  expect(target.querySelector('.viewhead .actions')).toBeNull();
+  expect(target.querySelector('.viewhead .plays')?.classList.contains('away')).toBe(true);
 
   const find = [...target.querySelectorAll<HTMLButtonElement>('.empty button')].find(
     (x) => x.textContent?.trim() === 'Find stations',
