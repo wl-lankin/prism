@@ -280,11 +280,16 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
                 }
             }),
         ]),
-        navidrome_opener(
-            Arc::clone(&navidrome),
-            Arc::clone(&settings),
-            audio::http::spill_dir(&dirs.cache),
-            default_opener(),
+        radio::stream::radio_opener(
+            radio.lookup(),
+            Arc::new(audio::live::LiveConfig::new()?),
+            radio.title_sinks(),
+            navidrome_opener(
+                Arc::clone(&navidrome),
+                Arc::clone(&settings),
+                audio::http::spill_dir(&dirs.cache),
+                default_opener(),
+            ),
         ),
         PlayerOptions {
             volume: initial.volume,
