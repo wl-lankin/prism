@@ -165,6 +165,9 @@ pub fn window_vibrancy(vibrancy: State<'_, Vibrancy>) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::path::{Path, PathBuf};
+
     use super::{passed_lparam, KEEP_FRAME_UNPAINTED};
 
     /// Only `WM_NCACTIVATE` loses its lParam, so the classic frame is never painted on an
@@ -205,21 +208,439 @@ mod tests {
         assert!(dev.contains("ws://localhost:1441"), "{dev}");
     }
 
-    /// Each window has its own capability; the mini player gets the commands and events
-    /// (`core:default`) and nothing that lets a script close, move or resize it.
+    /// Each window has its own capability; the mini player gets the events (`core:default`)
+    /// and its app commands, and nothing that lets a script close, move or resize it.
     #[test]
     fn capabilities_split_main_and_mini() {
-        let main: serde_json::Value =
-            serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
+        let main = json(include_str!("../capabilities/default.json"));
         assert_eq!(main["identifier"], "main");
         assert_eq!(main["windows"], serde_json::json!(["main"]));
         let main_permissions = main["permissions"].to_string();
         assert!(main_permissions.contains("core:window:allow-close"));
 
-        let mini: serde_json::Value =
-            serde_json::from_str(include_str!("../capabilities/mini.json")).unwrap();
+        let mini = json(include_str!("../capabilities/mini.json"));
         assert_eq!(mini["identifier"], "mini");
         assert_eq!(mini["windows"], serde_json::json!(["mini"]));
-        assert_eq!(mini["permissions"], serde_json::json!(["core:default"]));
+        let permissions = mini["permissions"].as_array().unwrap();
+        assert_eq!(permissions[0], "core:default");
+        for permission in &permissions[1..] {
+            let name = permission.as_str().unwrap();
+            assert!(name.starts_with("allow-"), "{name}");
+        }
+    }
+
+    fn json(text: &str) -> serde_json::Value {
+        serde_json::from_str(text).unwrap()
+    }
+
+    /// The text between the first `start` and the next `end`.
+    fn between<'a>(text: &'a str, start: &str, end: &str) -> &'a str {
+        let from = text.find(start).unwrap_or_else(|| panic!("no {start}")) + start.len();
+        let len = text[from..].find(end).unwrap_or_else(|| panic!("no {end}"));
+        &text[from..from + len]
+    }
+
+    fn manifest_commands() -> Vec<String> {
+        between(
+            include_str!("../build.rs"),
+            "const COMMANDS: &[&str] = &[",
+            "];",
+        )
+        .split(',')
+        .map(|item| item.trim().trim_matches('"'))
+        .filter(|item| !item.is_empty())
+        .map(String::from)
+        .collect()
+    }
+
+    fn handler_commands() -> Vec<String> {
+        between(include_str!("lib.rs"), "generate_handler![", "]")
+            .split(',')
+            .map(|item| item.trim().rsplit("::").next().unwrap())
+            .filter(|item| !item.is_empty())
+            .map(String::from)
+            .collect()
+    }
+
+    /// The app commands a capability allows (`allow-<command>` entries).
+    fn allowed(capability: &serde_json::Value) -> BTreeSet<String> {
+        capability["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|permission| permission.as_str()?.strip_prefix("allow-"))
+            .map(|name| name.replace('-', "_"))
+            .collect()
+    }
+
+    /// Wrapper name to command name, for every `call('<command>')` wrapper in `ipc.ts`.
+    fn ipc_wrappers() -> BTreeMap<String, String> {
+        let mut wrappers = BTreeMap::new();
+        for part in include_str!("../../src/lib/ipc.ts")
+            .split("export const ")
+            .skip(1)
+        {
+            let name: String = part
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            let Some(at) = part.find("call<").or_else(|| part.find("call(")) else {
+                continue;
+            };
+            wrappers.insert(name, quoted_after(&part[at..], "('").unwrap().to_string());
+        }
+        assert!(wrappers.len() > 50, "{wrappers:?}");
+        wrappers
+    }
+
+    fn quoted_after<'a>(text: &'a str, opener: &str) -> Option<&'a str> {
+        let from = text.find(opener)? + opener.len();
+        let len = text[from..].find('\'')?;
+        Some(&text[from..from + len])
+    }
+
+    fn frontend() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../src")
+            .canonicalize()
+            .unwrap()
+    }
+
+    /// The code module behind `spec`, or `None` for a package or an asset (CSS, SVG, JSON).
+    fn resolve(dir: &Path, spec: &str) -> Option<PathBuf> {
+        if !spec.starts_with('.') {
+            return None;
+        }
+        let base = dir.join(spec).to_string_lossy().into_owned();
+        for candidate in ["", ".ts", ".svelte", "/index.ts"] {
+            let path = PathBuf::from(format!("{base}{candidate}"));
+            if path.is_file() {
+                let path = path.canonicalize().unwrap();
+                let code = matches!(
+                    path.extension().and_then(|ext| ext.to_str()),
+                    Some("ts" | "js" | "svelte")
+                );
+                return code.then_some(path);
+            }
+        }
+        panic!("{spec} from {} does not resolve", dir.display());
+    }
+
+    fn is_ident(c: char) -> bool {
+        c.is_alphanumeric() || c == '_' || c == '$'
+    }
+
+    /// `*` stands for a whole module (a default or namespace import, a component).
+    const WHOLE: &str = "*";
+    const INIT: &str = "init";
+
+    /// A frontend module as the scan sees it: local import names (to module and exported
+    /// name), the modules it loads, its top-level declarations, and the code that runs on
+    /// load. A Svelte component is all load code.
+    #[derive(Clone, Default)]
+    struct Module {
+        imports: BTreeMap<String, (PathBuf, String)>,
+        loads: Vec<PathBuf>,
+        decls: BTreeMap<String, String>,
+        init: String,
+    }
+
+    fn decl_name(line: &str) -> Option<String> {
+        let rest = line.strip_prefix("export ").unwrap_or(line);
+        let rest = rest.strip_prefix("async ").unwrap_or(rest);
+        ["function ", "const ", "let ", "class "]
+            .iter()
+            .find_map(|keyword| rest.strip_prefix(keyword))
+            .map(|rest| {
+                rest.chars()
+                    .take_while(|c| is_ident(*c))
+                    .collect::<String>()
+            })
+            .filter(|name| !name.is_empty())
+    }
+
+    fn parse_module(file: &Path) -> Module {
+        let text = std::fs::read_to_string(file).unwrap();
+        let dir = file.parent().unwrap();
+        let mut module = Module::default();
+
+        let mut offset = 0;
+        for line in text.split_inclusive('\n') {
+            let start = offset;
+            offset += line.len();
+            if !line.trim_start().starts_with("import ") {
+                continue;
+            }
+            let statement = &text[start..start + text[start..].find(';').unwrap()];
+            let statement = statement.trim_start().trim_start_matches("import ");
+            if statement.starts_with("type ") {
+                continue;
+            }
+            let (clause, spec) = match statement.rsplit_once(" from ") {
+                Some((clause, spec)) => (clause, spec),
+                None => ("", statement),
+            };
+            let Some(target) = resolve(dir, spec.trim().trim_matches('\'')) else {
+                continue;
+            };
+            module.loads.push(target.clone());
+            let (default, named) = match clause.split_once('{') {
+                Some((default, named)) => (default, named.trim_end().trim_end_matches('}')),
+                None => (clause, ""),
+            };
+            let default = default.trim().trim_end_matches(',').trim();
+            if !default.is_empty() {
+                let local = default.trim_start_matches("* as ").trim();
+                module
+                    .imports
+                    .insert(local.to_string(), (target.clone(), WHOLE.to_string()));
+            }
+            for name in named.split(',').map(str::trim) {
+                if name.is_empty() || name.starts_with("type ") {
+                    continue;
+                }
+                let (exported, local) = name.split_once(" as ").unwrap_or((name, name));
+                module.imports.insert(
+                    local.trim().to_string(),
+                    (target.clone(), exported.trim().to_string()),
+                );
+            }
+        }
+
+        if file.extension().and_then(|ext| ext.to_str()) == Some("svelte") {
+            module.init = text;
+            return module;
+        }
+        let mut current: Option<String> = None;
+        let mut skipping = false;
+        for line in text.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("//") || trimmed.starts_with("/*") || trimmed.starts_with('*') {
+                continue;
+            }
+            let top_level = line.starts_with(|c: char| !c.is_whitespace() && !"})]".contains(c));
+            if top_level {
+                skipping = line.starts_with("import ");
+                current = decl_name(line);
+            }
+            if skipping {
+                continue;
+            }
+            let target = match &current {
+                Some(name) => module.decls.entry(name.clone()).or_default(),
+                None => &mut module.init,
+            };
+            target.push_str(line);
+            target.push('\n');
+        }
+        module
+    }
+
+    /// The app commands one window's page may invoke: the `ipc.ts` wrappers named by the
+    /// code it can reach from `main.ts` (following imported names and the top-level
+    /// declarations they use, so a shared store counts only with the functions this page
+    /// uses), plus any direct `invoke('<command>'`. `other_root` is the other window's
+    /// component, which `main.ts` loads only there.
+    fn page_commands(other_root: &str) -> BTreeSet<String> {
+        let root = frontend();
+        let ipc = root.join("lib/ipc.ts");
+        let skip = root.join(other_root).canonicalize().unwrap();
+        let wrappers = ipc_wrappers();
+        let mut modules: BTreeMap<PathBuf, Module> = BTreeMap::new();
+        let mut done = BTreeSet::new();
+        let mut todo = vec![(root.join("main.ts"), WHOLE.to_string())];
+        let mut used = BTreeSet::new();
+        while let Some((file, symbol)) = todo.pop() {
+            if file == skip || file == ipc || !done.insert((file.clone(), symbol.clone())) {
+                continue;
+            }
+            let module = modules
+                .entry(file.clone())
+                .or_insert_with(|| parse_module(&file))
+                .clone();
+            let text = match symbol.as_str() {
+                WHOLE => {
+                    todo.push((file.clone(), INIT.to_string()));
+                    todo.extend(module.decls.keys().map(|name| (file.clone(), name.clone())));
+                    continue;
+                }
+                INIT => {
+                    todo.extend(
+                        module
+                            .loads
+                            .iter()
+                            .map(|load| (load.clone(), INIT.to_string())),
+                    );
+                    module.init.clone()
+                }
+                name => {
+                    todo.push((file.clone(), INIT.to_string()));
+                    module.decls.get(name).cloned().unwrap_or_default()
+                }
+            };
+            for token in text.split(|c: char| !is_ident(c)) {
+                if let Some((target, exported)) = module.imports.get(token) {
+                    if *target == ipc {
+                        used.extend(wrappers.get(exported).cloned());
+                    } else {
+                        todo.push((target.clone(), exported.clone()));
+                    }
+                } else if module.decls.contains_key(token) {
+                    todo.push((file.clone(), token.to_string()));
+                }
+            }
+            for (at, _) in text.match_indices("import('") {
+                let spec = quoted_after(&text[at..], "('").unwrap();
+                todo.extend(resolve(file.parent().unwrap(), spec).map(|m| (m, WHOLE.to_string())));
+            }
+            for opener in ["invoke(", "invoke<"] {
+                for (at, _) in text.match_indices(opener) {
+                    let command = quoted_after(&text[at..], "('")
+                        .unwrap_or_else(|| panic!("{}: invoke without a literal", file.display()));
+                    used.insert(command.to_string());
+                }
+            }
+        }
+        used
+    }
+
+    fn missing(used: &BTreeSet<String>, allowed: &BTreeSet<String>) -> Vec<String> {
+        used.difference(allowed).cloned().collect()
+    }
+
+    /// The handler list, the manifest in `build.rs`, the `ipc.ts` wrappers and the
+    /// capabilities all name the same commands.
+    #[test]
+    fn every_command_is_in_the_manifest() {
+        let manifest = manifest_commands();
+        let handlers = handler_commands();
+        let manifest_set: BTreeSet<_> = manifest.iter().cloned().collect();
+        let handler_set: BTreeSet<_> = handlers.iter().cloned().collect();
+        assert_eq!(manifest_set.len(), manifest.len(), "duplicates in build.rs");
+        assert_eq!(handler_set.len(), handlers.len(), "duplicates in lib.rs");
+        assert_eq!(manifest_set, handler_set);
+        assert!(manifest_set.contains("ytm_report"));
+
+        let wrapped: BTreeSet<_> = ipc_wrappers().into_values().collect();
+        assert_eq!(missing(&wrapped, &manifest_set), Vec::<String>::new());
+        for capability in [
+            include_str!("../capabilities/default.json"),
+            include_str!("../capabilities/mini.json"),
+            include_str!("../capabilities/ytm.json"),
+        ] {
+            let allowed = allowed(&json(capability));
+            assert_eq!(missing(&allowed, &manifest_set), Vec::<String>::new());
+        }
+    }
+
+    /// Allowed beyond what the page calls today: the YouTube Music view commands its store
+    /// will call, and two `ipc.ts` wrappers no code calls yet.
+    const MAIN_EXTRA: &[&str] = &[
+        "ytm_show",
+        "ytm_hide",
+        "ytm_control",
+        "ytm_state",
+        "ytm_sign_in",
+        "ytm_sign_out",
+        "player_append",
+        "radio_place",
+    ];
+    /// The mini player will show and drive YouTube Music.
+    const MINI_EXTRA: &[&str] = &["ytm_state", "ytm_control"];
+
+    /// The capability allows exactly what the page calls plus `extra`, so a new call fails
+    /// here instead of at runtime, and a dropped one does not linger.
+    fn assert_capability_matches(capability: &str, mut used: BTreeSet<String>, extra: &[&str]) {
+        used.extend(extra.iter().map(|name| name.to_string()));
+        let allowed = allowed(&json(capability));
+        assert_eq!(
+            missing(&used, &allowed),
+            Vec::<String>::new(),
+            "not allowed"
+        );
+        assert_eq!(missing(&allowed, &used), Vec::<String>::new(), "not called");
+    }
+
+    #[test]
+    fn main_capability_covers_the_main_page() {
+        let used = page_commands("lib/components/MiniPlayer.svelte");
+        assert!(used.contains("settings_set") && used.contains("navidrome_connect"));
+        assert!(!used.contains("main_show"));
+        assert_capability_matches(
+            include_str!("../capabilities/default.json"),
+            used,
+            MAIN_EXTRA,
+        );
+    }
+
+    #[test]
+    fn mini_capability_covers_the_mini_page() {
+        let used = page_commands("App.svelte");
+        assert!(used.contains("main_show") && used.contains("player_toggle"));
+        assert!(!used.contains("library_search"));
+        assert_capability_matches(include_str!("../capabilities/mini.json"), used, MINI_EXTRA);
+    }
+
+    /// The mini player plays and shows; it never manages the library, playlists, stations,
+    /// the Navidrome account or the YouTube Music view. It reads the settings and the
+    /// Navidrome status, and saves repeat and shuffle (they are settings) through
+    /// `settings_set`.
+    #[test]
+    fn mini_has_no_settings_or_navidrome_commands() {
+        let mini = allowed(&json(include_str!("../capabilities/mini.json")));
+        let forbidden = [
+            "audio_devices",
+            "library_add_folder",
+            "library_remove_folder",
+            "library_rescan",
+            "playlist_create",
+            "playlist_rename",
+            "playlist_delete",
+            "playlist_add",
+            "playlist_remove",
+            "playlist_move",
+            "radio_search",
+            "radio_near",
+            "radio_redetect",
+            "radio_open_homepage",
+            "tray_set_labels",
+            "ytm_report",
+            "ytm_show",
+            "ytm_hide",
+            "ytm_sign_in",
+            "ytm_sign_out",
+        ];
+        for name in &mini {
+            assert!(
+                !name.starts_with("navidrome_") || name == "navidrome_status",
+                "{name}"
+            );
+            assert!(!forbidden.contains(&name.as_str()), "{name}");
+        }
+    }
+
+    /// The remote YouTube Music page can report and nothing else; no other capability
+    /// grants the report or opens itself to a remote origin.
+    #[test]
+    fn ytm_capability_has_only_ytm_report() {
+        let ytm = json(include_str!("../capabilities/ytm.json"));
+        assert_eq!(ytm["identifier"], "ytm");
+        assert_eq!(ytm["webviews"], serde_json::json!(["ytm"]));
+        assert!(ytm.get("windows").is_none());
+        assert_eq!(
+            ytm["remote"],
+            serde_json::json!({ "urls": ["https://music.youtube.com/*"] })
+        );
+        assert_eq!(ytm["permissions"], serde_json::json!(["allow-ytm-report"]));
+        assert!(ytm.get("platforms").is_none());
+
+        for capability in [
+            include_str!("../capabilities/default.json"),
+            include_str!("../capabilities/mini.json"),
+        ] {
+            let capability = json(capability);
+            assert!(capability.get("remote").is_none());
+            assert!(!allowed(&capability).contains("ytm_report"));
+        }
     }
 }

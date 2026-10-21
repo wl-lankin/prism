@@ -505,6 +505,13 @@ pub fn run() {
             commands::mini_menu,
             commands::main_show,
             commands::tray_set_labels,
+            commands::ytm_report,
+            commands::ytm_show,
+            commands::ytm_hide,
+            commands::ytm_control,
+            commands::ytm_state,
+            commands::ytm_sign_in,
+            commands::ytm_sign_out,
             window::window_vibrancy,
             startup::startup_notice,
         ])
