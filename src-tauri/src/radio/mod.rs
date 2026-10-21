@@ -11,6 +11,7 @@ pub mod location;
 pub mod model;
 pub mod near;
 pub mod store;
+pub mod stream;
 
 #[cfg(test)]
 mod tests;

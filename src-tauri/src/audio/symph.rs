@@ -39,6 +39,25 @@ fn read_failed(err: &std::io::Error) -> bool {
 
 /// Consecutive undecodable packets after which a stream is considered broken.
 const MAX_CONSECUTIVE_ERRORS: u32 = 32;
+/// A live chain link shorter than this is not followed: the stream counts as broken.
+const MIN_CHAIN_MS: u64 = 500;
+
+/// A live stream's next chain link could not be followed (it ended too soon, has no audio
+/// track or a codec symphonia lacks).
+#[derive(Debug)]
+pub struct ChainFailed(pub String);
+
+impl std::fmt::Display for ChainFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ChainFailed {}
+
+fn chain_failed(text: &str) -> anyhow::Error {
+    anyhow::Error::new(ChainFailed(text.into()))
+}
 
 pub struct SymphoniaSource {
     reader: Box<dyn FormatReader + 'static>,
@@ -59,6 +78,11 @@ pub struct SymphoniaSource {
     ended: bool,
     /// Set after a decoder panic; the decoder state is unknown from then on.
     poisoned: bool,
+    /// A live stream ([`SymphoniaSource::open_live`]): a new chain link (Ogg) is followed in
+    /// place, and its spec may differ.
+    live: bool,
+    /// Frames handed out since the open or the last chain link.
+    since_chain: u64,
 }
 
 impl SymphoniaSource {
@@ -102,6 +126,26 @@ impl SymphoniaSource {
         source: Box<dyn MediaSource>,
         extension: Option<&str>,
         label: &str,
+    ) -> anyhow::Result<Option<Self>> {
+        Self::open_with(source, extension, label, false)
+    }
+
+    /// Like [`open_media`](Self::open_media) for an endless live stream: when the stream starts
+    /// a new chain link (a chained Ogg), the decoder follows it in place, at whatever spec the
+    /// link has. A link that cannot be followed fails with [`ChainFailed`].
+    pub fn open_live(
+        source: Box<dyn MediaSource>,
+        extension: Option<&str>,
+        label: &str,
+    ) -> anyhow::Result<Option<Self>> {
+        Self::open_with(source, extension, label, true)
+    }
+
+    fn open_with(
+        source: Box<dyn MediaSource>,
+        extension: Option<&str>,
+        label: &str,
+        live: bool,
     ) -> anyhow::Result<Option<Self>> {
         let stream = MediaSourceStream::new(source, MediaSourceStreamOptions::default());
         let mut hint = Hint::new();
@@ -175,6 +219,8 @@ impl SymphoniaSource {
             skip: priming,
             ended: false,
             poisoned: false,
+            live,
+            since_chain: 0,
         };
         // Decoding the first packet fixes the real output spec and rejects broken streams early.
         let mut first = Vec::new();
@@ -222,6 +268,11 @@ impl SymphoniaSource {
                     }
                     continue;
                 }
+                // The reader already read the new chain link's headers and replaced its tracks.
+                Err(SymphoniaError::ResetRequired) if self.live => {
+                    self.rechain()?;
+                    continue;
+                }
                 Err(err) => return Err(symphonia_error(err)),
             };
             if packet.track_id != self.track_id {
@@ -251,7 +302,8 @@ impl SymphoniaSource {
                 sample_rate: buffer.spec().rate(),
                 channels: buffer.spec().channels().count() as u16,
             };
-            if self.spec.channels == 0 {
+            // A live chain link may come at another spec; a file may not change it.
+            if self.spec.channels == 0 || self.live {
                 self.spec = spec;
             } else if spec != self.spec {
                 bail!(
@@ -280,9 +332,48 @@ impl SymphoniaSource {
             }
             let channels = spec.channels as usize;
             out.extend_from_slice(&self.scratch[skip * channels..frames * channels]);
+            self.since_chain += (frames - skip) as u64;
             return Ok(frames - skip);
         }
         Ok(0)
+    }
+
+    /// Follows a live stream into its next chain link: a decoder for the link's audio track.
+    fn rechain(&mut self) -> anyhow::Result<()> {
+        let rate = u64::from(self.spec.sample_rate.max(1));
+        if self.since_chain < rate * MIN_CHAIN_MS / 1000 {
+            return Err(chain_failed("the stream's chain links end too soon"));
+        }
+        let track = self
+            .reader
+            .default_track(TrackType::Audio)
+            .ok_or_else(|| chain_failed("the next chain link has no audio"))?;
+        let Some(CodecParameters::Audio(params)) = &track.codec_params else {
+            return Err(chain_failed("the next chain link has no audio"));
+        };
+        let params = params.clone();
+        let (track_id, time_base, delay) = (track.id, track.time_base, track.delay);
+        let codecs = symphonia::default::get_codecs();
+        if codecs.get_audio_decoder(params.codec).is_none() {
+            return Err(chain_failed(
+                "the next chain link uses a codec symphonia cannot decode",
+            ));
+        }
+        self.decoder = guarded("symphonia decoder", || {
+            Ok(codecs.make_audio_decoder(&params, &AudioDecoderOptions::default())?)
+        })?;
+        self.track_id = track_id;
+        self.time_base = time_base;
+        self.priming = if params.codec == CODEC_ID_AAC && delay.is_none() {
+            1024
+        } else {
+            0
+        };
+        self.skip = self.priming;
+        self.seek_target = None;
+        self.ended = false;
+        self.since_chain = 0;
+        Ok(())
     }
 
     fn ts_to_frames(&self, ts: i64) -> usize {
@@ -412,6 +503,49 @@ mod tests {
                 assert!(opened.is_none(), "{name}: the FFmpeg fallback is kept");
             }
         }
+    }
+
+    /// Reads `source` to its end or first error: frames read, the specs seen, and the error.
+    fn drain(source: &mut SymphoniaSource) -> (usize, Vec<StreamSpec>, Option<anyhow::Error>) {
+        let mut frames = 0;
+        let mut specs = vec![source.spec()];
+        loop {
+            match source.read(&mut Vec::new()) {
+                Ok(0) => return (frames, specs, None),
+                Ok(read) => frames += read,
+                Err(err) => return (frames, specs, Some(err)),
+            }
+            if specs.last() != Some(&source.spec()) {
+                specs.push(source.spec());
+            }
+        }
+    }
+
+    #[test]
+    fn only_live_streams_follow_a_chain() {
+        let path = fixtures().join("radio/chain.ogg");
+        let open = |live: bool| {
+            let file = Box::new(File::open(&path).unwrap());
+            SymphoniaSource::open_with(file, Some("ogg"), "chain.ogg", live)
+                .unwrap()
+                .expect("symphonia opens Ogg Vorbis")
+        };
+        // A file keeps today's behavior: the second chain link is an error.
+        let (frames, specs, error) = drain(&mut open(false));
+        assert!(error.is_some(), "a local chained Ogg stops at the link");
+        assert_eq!(specs.len(), 1);
+        assert!(frames < 22_050 * 3, "{frames} frames");
+
+        let (frames, specs, error) = drain(&mut open(true));
+        assert!(error.is_none(), "{error:?}");
+        let rates: Vec<u32> = specs.iter().map(|spec| spec.sample_rate).collect();
+        assert_eq!(
+            rates,
+            vec![22_050, 44_100],
+            "the second link has its own rate"
+        );
+        // 2 s at 22.05 kHz, then 2 s at 44.1 kHz.
+        assert!(frames > 22_050 * 2 + 44_100 * 19 / 10, "{frames} frames");
     }
 
     #[test]

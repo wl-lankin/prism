@@ -107,7 +107,7 @@ pub fn open_source_with(
 }
 
 /// FFmpeg's output spec: the device rate (when known), always stereo.
-fn ffmpeg_target(device: Option<StreamSpec>) -> StreamSpec {
+pub(crate) fn ffmpeg_target(device: Option<StreamSpec>) -> StreamSpec {
     StreamSpec {
         sample_rate: device.map_or(FFMPEG_DEFAULT_SPEC.sample_rate, |spec| spec.sample_rate),
         channels: 2,

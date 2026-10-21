@@ -9,8 +9,10 @@ use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context};
 use crossbeam_channel::{Receiver, RecvTimeoutError};
+use reqwest::Url;
 
-use super::http::{Canceller, HttpStream};
+use super::http::{HttpStream, Offline, StreamFailure};
+use super::live::{NOT_AN_ADDRESS, NOT_AUDIO, OFFLINE_TEXT, USER_AGENT};
 use super::source::{
     describe, AudioSource, HttpInput, Input, StreamSpec, LIVE_NEEDS_THE_RADIO_OPENER,
 };
@@ -23,6 +25,10 @@ const STALL_TIMEOUT: Duration = Duration::from_secs(5);
 const FEEDER_EXIT_WAIT: Duration = Duration::from_secs(2);
 const CHUNK_BYTES: usize = 64 * 1024;
 const STDERR_LIMIT: usize = 4096;
+/// FFmpeg's own network read timeout for a URL input (`-rw_timeout`, in microseconds).
+const URL_RW_TIMEOUT: Duration = Duration::from_secs(10);
+/// What FFmpeg may open for a URL input: the playlist, its segments and keys, nothing local.
+const URL_PROTOCOLS: &str = "http,https,tls,tcp,crypto,httpproxy";
 
 /// Decodes with `ffmpeg ... -f f32le -ac 2 -ar <rate> pipe:1`. Seeking restarts FFmpeg with
 /// `-ss`; the child is killed on drop.
@@ -32,10 +38,12 @@ const STDERR_LIMIT: usize = 4096;
 /// stops the old feeder and FFmpeg first (one reader per stream at a time), then starts both
 /// again at byte 0 of the buffer with `-ss` after `-i` (bytes already buffered are not fetched
 /// again).
+///
+/// Radio comes in two more ways: a live byte stream through stdin ([`FfmpegSource::open_reader`])
+/// and an HLS station by URL ([`FfmpegSource::open_url`]). Radio URLs carry no Prism secret.
+/// Neither can seek.
 pub struct FfmpegSource {
-    input: Input,
-    /// The stream buffer of an `Input::Http`, held idle; each FFmpeg run reads a cursor of it.
-    feed: Option<HttpStream>,
+    origin: Origin,
     spec: StreamSpec,
     process: Process,
     /// Bytes of a sample split across two pipe reads.
@@ -44,21 +52,67 @@ pub struct FfmpegSource {
     pending: Vec<u8>,
 }
 
+/// What FFmpeg reads.
+enum Origin {
+    /// A file, or an HTTP stream with its buffer (held idle; each run reads a cursor of it).
+    Input {
+        input: Input,
+        feed: Option<HttpStream>,
+    },
+    /// A live byte stream through stdin. It is read once: taken by the first run.
+    Live {
+        label: String,
+        feed: Option<LiveFeed>,
+    },
+    /// A URL FFmpeg fetches itself (an HLS station).
+    Url { url: String, label: String },
+}
+
+impl Origin {
+    fn label(&self) -> String {
+        match self {
+            Origin::Input { input, .. } => describe(input),
+            Origin::Live { label, .. } | Origin::Url { label, .. } => label.clone(),
+        }
+    }
+}
+
+/// A live byte stream for [`FfmpegSource::open_reader`].
+pub struct LiveFeed {
+    pub reader: Box<dyn Read + Send>,
+    /// Ends a blocked read of `reader` from another thread (FFmpeg is being stopped).
+    pub cancel: Box<dyn Fn() + Send + Sync>,
+    /// How long a read of `reader` may wait for the network before it fails by itself.
+    pub wait: Duration,
+}
+
 struct Process {
     child: Child,
     chunks: Receiver<Vec<u8>>,
     stderr: Option<JoinHandle<String>>,
     feeder: Option<Feeder>,
-    /// How long FFmpeg may stay silent: [`STALL_TIMEOUT`], plus the stream's own stall timeout
-    /// when it reads a stream (the feeder may wait that long for the network).
+    /// How long FFmpeg may stay silent: [`STALL_TIMEOUT`], plus how long its input may wait for
+    /// the network (a stream's stall timeout, a live feed's wait, FFmpeg's own `-rw_timeout`).
     stall: Duration,
+    /// Set for radio: its failures are classified and name the station.
+    station: Option<Station>,
     finished: bool,
     stopped: bool,
 }
 
-/// The thread copying a stream buffer into FFmpeg's stdin.
+/// A radio input of a [`Process`], with the station label.
+enum Station {
+    /// A URL: a failure is offline or "not sending audio", and stderr (which names URLs) is
+    /// scrubbed.
+    Url(String),
+    /// A live stream through stdin: a failure that is not the stream's own is "not sending
+    /// audio".
+    Pipe(String),
+}
+
+/// The thread copying a stream into FFmpeg's stdin.
 struct Feeder {
-    canceller: Canceller,
+    cancel: Box<dyn Fn() + Send + Sync>,
     /// Disconnected once the thread has ended.
     done: Receiver<()>,
     /// Why the stream failed (offline, an HTTP error); FFmpeg only sees its input end early.
@@ -70,7 +124,13 @@ impl FfmpegSource {
     /// A stream is opened (downloaded) here; use [`FfmpegSource::open_stream`] to reuse a buffer.
     pub fn open(input: &Input, target: StreamSpec) -> anyhow::Result<Self> {
         match input {
-            Input::File(_) => Self::start(input.clone(), None, target),
+            Input::File(_) => Self::start(
+                Origin::Input {
+                    input: input.clone(),
+                    feed: None,
+                },
+                target,
+            ),
             Input::Http(http) => Self::open_stream(HttpStream::open(http)?, http, target),
             Input::Live(_) => bail!(LIVE_NEEDS_THE_RADIO_OPENER),
         }
@@ -83,23 +143,59 @@ impl FfmpegSource {
         input: &HttpInput,
         target: StreamSpec,
     ) -> anyhow::Result<Self> {
-        Self::start(Input::Http(input.clone()), Some(stream), target)
+        Self::start(
+            Origin::Input {
+                input: Input::Http(input.clone()),
+                feed: Some(stream),
+            },
+            target,
+        )
     }
 
-    fn start(input: Input, feed: Option<HttpStream>, target: StreamSpec) -> anyhow::Result<Self> {
+    /// Decodes a live byte stream through FFmpeg's stdin; `label` names it in errors. The
+    /// stream is read once, so the source cannot seek.
+    pub fn open_reader(feed: LiveFeed, label: &str, target: StreamSpec) -> anyhow::Result<Self> {
+        Self::start(
+            Origin::Live {
+                label: label.to_owned(),
+                feed: Some(feed),
+            },
+            target,
+        )
+    }
+
+    /// Lets FFmpeg fetch and decode `url` itself (an HLS station), reconnecting on its own. The
+    /// label, never the URL, appears in errors. Cannot seek.
+    pub fn open_url(url: &str, label: &str, target: StreamSpec) -> anyhow::Result<Self> {
+        let parsed = Url::parse(url.trim())
+            .ok()
+            .filter(|url| matches!(url.scheme(), "http" | "https") && url.host_str().is_some());
+        let Some(parsed) = parsed else {
+            return Err(anyhow::Error::new(StreamFailure(NOT_AN_ADDRESS.into()))
+                .context(format!("streaming {label}")));
+        };
+        Self::start(
+            Origin::Url {
+                url: parsed.to_string(),
+                label: label.to_owned(),
+            },
+            target,
+        )
+    }
+
+    fn start(mut origin: Origin, target: StreamSpec) -> anyhow::Result<Self> {
         if target.channels != 2 {
             bail!(
                 "FFmpeg output is always stereo, not {} channels",
                 target.channels
             );
         }
-        let mut process = Process::spawn(&input, feed.as_ref(), target.sample_rate, 0)?;
+        let mut process = Process::spawn(&mut origin, target.sample_rate, 0)?;
         let first = process
             .next_chunk()?
-            .ok_or_else(|| anyhow!("ffmpeg produced no audio for {}", describe(&input)))?;
+            .ok_or_else(|| anyhow!("ffmpeg produced no audio for {}", origin.label()))?;
         Ok(FfmpegSource {
-            input,
-            feed,
+            origin,
             spec: target,
             process,
             partial: Vec::new(),
@@ -115,6 +211,31 @@ impl FfmpegSource {
             .as_ref()
             .map(|feeder| feeder.done.clone())
     }
+
+    /// The FFmpeg child's process id, for tests that check it is reaped.
+    #[cfg(test)]
+    pub(crate) fn child_id(&self) -> u32 {
+        self.process.child.id()
+    }
+}
+
+/// The arguments every run starts with.
+fn base_args() -> Vec<OsString> {
+    ["-nostdin", "-hide_banner", "-loglevel", "error"]
+        .into_iter()
+        .map(OsString::from)
+        .collect()
+}
+
+/// f32 stereo at `rate` on stdout.
+fn push_output_args(args: &mut Vec<OsString>, rate: u32) {
+    args.extend(
+        ["-vn", "-f", "f32le", "-ac", "2", "-ar"]
+            .into_iter()
+            .map(OsString::from),
+    );
+    args.push(rate.to_string().into());
+    args.push("pipe:1".into());
 }
 
 /// FFmpeg's arguments for `input`, from `start_ms` on, as f32 stereo at `rate` on stdout.
@@ -123,10 +244,7 @@ impl FfmpegSource {
 /// from `pipe:0` with `-ss` after `-i` (FFmpeg decodes and drops up to the position, since a pipe
 /// cannot seek); no URL and no credential ever appear in the command line.
 pub(crate) fn ffmpeg_args(input: &Input, rate: u32, start_ms: u64) -> Vec<OsString> {
-    let mut args: Vec<OsString> = ["-nostdin", "-hide_banner", "-loglevel", "error"]
-        .into_iter()
-        .map(OsString::from)
-        .collect();
+    let mut args = base_args();
     let seek = (start_ms > 0).then(|| {
         [
             OsString::from("-ss"),
@@ -145,14 +263,122 @@ pub(crate) fn ffmpeg_args(input: &Input, rate: u32, start_ms: u64) -> Vec<OsStri
             args.extend(seek.into_iter().flatten());
         }
     }
-    args.extend(
-        ["-vn", "-f", "f32le", "-ac", "2", "-ar"]
-            .into_iter()
-            .map(OsString::from),
-    );
-    args.push(rate.to_string().into());
-    args.push("pipe:1".into());
+    push_output_args(&mut args, rate);
     args
+}
+
+/// Probing a live stream through stdin is capped, so opening stays within the stall budget:
+/// FFmpeg's defaults (5 MB, 5 s) would wait minutes for a slow station.
+const PIPE_PROBE_BYTES: &str = "131072";
+const PIPE_ANALYZE_US: &str = "2000000";
+
+/// FFmpeg's arguments for a live stream through stdin.
+pub(crate) fn pipe_args(rate: u32) -> Vec<OsString> {
+    let mut args = base_args();
+    args.extend(
+        [
+            "-probesize",
+            PIPE_PROBE_BYTES,
+            "-analyzeduration",
+            PIPE_ANALYZE_US,
+            "-i",
+            "pipe:0",
+        ]
+        .into_iter()
+        .map(OsString::from),
+    );
+    push_output_args(&mut args, rate);
+    args
+}
+
+/// FFmpeg's arguments for a URL it fetches itself (an HLS station): Prism's User-Agent, web
+/// protocols only, FFmpeg's own reconnect, and a 10 s network read timeout.
+pub(crate) fn url_args(url: &str, rate: u32) -> Vec<OsString> {
+    let mut args = base_args();
+    let rw_timeout = URL_RW_TIMEOUT.as_micros().to_string();
+    args.extend(
+        [
+            "-user_agent",
+            USER_AGENT,
+            "-protocol_whitelist",
+            URL_PROTOCOLS,
+            "-reconnect",
+            "1",
+            "-reconnect_streamed",
+            "1",
+            "-reconnect_delay_max",
+            "4",
+            "-rw_timeout",
+            &rw_timeout,
+            "-i",
+            url,
+        ]
+        .into_iter()
+        .map(OsString::from),
+    );
+    push_output_args(&mut args, rate);
+    args
+}
+
+/// Words in FFmpeg's stderr that mean the network or the server is away, not that the station
+/// sends something other than audio.
+const OFFLINE_SIGNS: &[&str] = &[
+    "connection refused",
+    "connection reset",
+    "connection timed out",
+    "timed out",
+    "network is unreachable",
+    "no route to host",
+    "failed to resolve",
+    "could not resolve",
+    "nodename nor servname",
+    "name or service not known",
+    "temporary failure in name resolution",
+    "server returned 5",
+    "input/output error",
+    "end of file",
+    "broken pipe",
+];
+
+/// `text` with every URL replaced, so FFmpeg's messages can be shown and logged.
+pub(crate) fn scrub_urls(text: &str) -> String {
+    text.split_whitespace()
+        .map(|word| {
+            if word.contains("://") {
+                "<address>"
+            } else {
+                word
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The error for a URL input FFmpeg could not play: offline when the network or the server is
+/// away, otherwise "not sending audio". Never names the URL.
+pub(crate) fn url_failure(label: &str, stderr: &str) -> anyhow::Error {
+    let lower = stderr.to_ascii_lowercase();
+    station_failure(
+        label,
+        stderr,
+        OFFLINE_SIGNS.iter().any(|sign| lower.contains(sign)),
+    )
+}
+
+/// A station FFmpeg could not play: offline, or "not sending audio", with FFmpeg's message
+/// (URLs scrubbed) for the logs.
+fn station_failure(label: &str, stderr: &str, offline: bool) -> anyhow::Error {
+    let detail: String = scrub_urls(stderr).chars().take(300).collect();
+    let error = if offline {
+        anyhow::Error::new(Offline(OFFLINE_TEXT.into()))
+    } else {
+        anyhow::Error::new(StreamFailure(NOT_AUDIO.into()))
+    };
+    if detail.is_empty() {
+        error.context(format!("streaming {label}"))
+    } else {
+        error.context(format!("streaming {label} (ffmpeg: {detail})"))
+    }
 }
 
 impl AudioSource for FfmpegSource {
@@ -191,12 +417,15 @@ impl AudioSource for FfmpegSource {
     /// Restarts FFmpeg at `ms` and waits for its first output (up to the 5 s stall timeout),
     /// so the following `read` does not block on FFmpeg starting up.
     fn seek(&mut self, ms: u64) -> anyhow::Result<()> {
-        if self.feed.is_some() {
-            // One reader per stream: the old feeder must be gone before the new one reads.
-            self.process.stop();
+        match &self.origin {
+            Origin::Live { .. } | Origin::Url { .. } => bail!("a live station cannot seek"),
+            Origin::Input { feed: Some(_), .. } => {
+                // One reader per stream: the old feeder must be gone before the new one reads.
+                self.process.stop();
+            }
+            Origin::Input { feed: None, .. } => {}
         }
-        let mut process =
-            Process::spawn(&self.input, self.feed.as_ref(), self.spec.sample_rate, ms)?;
+        let mut process = Process::spawn(&mut self.origin, self.spec.sample_rate, ms)?;
         // Past the end FFmpeg exits cleanly without output: the source is then finished.
         let first = process.next_chunk()?.unwrap_or_default();
         self.process = process;
@@ -210,23 +439,49 @@ impl AudioSource for FfmpegSource {
     }
 }
 
+/// What a run reads from stdin: the reader and how to cancel it.
+type StdinFeed = (Box<dyn Read + Send>, Box<dyn Fn() + Send + Sync>);
+
 impl Process {
-    /// Starts FFmpeg on `input`; `feed` is the buffer of a stream input, read through stdin.
-    fn spawn(
-        input: &Input,
-        feed: Option<&HttpStream>,
-        rate: u32,
-        start_ms: u64,
-    ) -> anyhow::Result<Self> {
+    /// Starts FFmpeg on `origin`, from `start_ms` on.
+    fn spawn(origin: &mut Origin, rate: u32, start_ms: u64) -> anyhow::Result<Self> {
         let program = tools::ffmpeg_path().context("ffmpeg was not found")?;
-        let feed = match (input, feed) {
-            (Input::File(_), _) => None,
-            (Input::Http(http), feed) => Some((feed.context("a stream needs its buffer")?, http)),
-            (Input::Live(_), _) => bail!(LIVE_NEEDS_THE_RADIO_OPENER),
-        };
+        let (args, feed, stall, station): (Vec<OsString>, Option<StdinFeed>, Duration, _) =
+            match origin {
+                Origin::Input { input, feed } => {
+                    let args = ffmpeg_args(input, rate, start_ms);
+                    match input {
+                        Input::File(_) => (args, None, STALL_TIMEOUT, None),
+                        Input::Http(http) => {
+                            let stream = feed.as_ref().context("a stream needs its buffer")?;
+                            let cursor = stream.cursor();
+                            let canceller = cursor.canceller();
+                            let feed: StdinFeed =
+                                (Box::new(cursor), Box::new(move || canceller.cancel()));
+                            (args, Some(feed), STALL_TIMEOUT + http.config.stall, None)
+                        }
+                        Input::Live(_) => bail!(LIVE_NEEDS_THE_RADIO_OPENER),
+                    }
+                }
+                Origin::Live { feed, label } => {
+                    let live = feed.take().context("a live stream is read only once")?;
+                    (
+                        pipe_args(rate),
+                        Some((live.reader, live.cancel)),
+                        STALL_TIMEOUT + live.wait,
+                        Some(Station::Pipe(label.clone())),
+                    )
+                }
+                Origin::Url { url, label } => (
+                    url_args(url, rate),
+                    None,
+                    STALL_TIMEOUT + URL_RW_TIMEOUT,
+                    Some(Station::Url(label.clone())),
+                ),
+            };
         let mut command = tools::command(&program);
         command
-            .args(ffmpeg_args(input, rate, start_ms))
+            .args(args)
             .stdin(if feed.is_some() {
                 Stdio::piped()
             } else {
@@ -241,9 +496,9 @@ impl Process {
             let stdout = child.stdout.take().context("ffmpeg stdout")?;
             let stderr = child.stderr.take().context("ffmpeg stderr")?;
             let feeder = match feed {
-                Some((stream, _)) => {
+                Some((reader, cancel)) => {
                     let stdin = child.stdin.take().context("ffmpeg stdin")?;
-                    Some(spawn_feeder(stream.cursor(), stdin)?)
+                    Some(spawn_feeder(reader, cancel, stdin)?)
                 }
                 None => None,
             };
@@ -257,16 +512,13 @@ impl Process {
                 return Err(err);
             }
         };
-        let stall = match feed {
-            Some((_, http)) => STALL_TIMEOUT + http.config.stall,
-            None => STALL_TIMEOUT,
-        };
         Ok(Process {
             child,
             chunks,
             stderr: Some(stderr),
             feeder,
             stall,
+            station,
             finished: false,
             stopped: false,
         })
@@ -292,10 +544,17 @@ impl Process {
             Ok(chunk) => Ok(Some(chunk)),
             Err(RecvTimeoutError::Timeout) => {
                 let _ = self.child.kill();
+                let _ = self.child.wait();
                 if let Some(err) = self.feed_error() {
                     return Err(err);
                 }
-                bail!("ffmpeg produced no audio for {} s", self.stall.as_secs())
+                match &self.station {
+                    // FFmpeg's own reconnect gave up quietly: the station is away.
+                    Some(Station::Url(label)) => Err(station_failure(label, "", true)),
+                    // The stream kept coming, FFmpeg made nothing of it.
+                    Some(Station::Pipe(label)) => Err(station_failure(label, "", false)),
+                    None => bail!("ffmpeg produced no audio for {} s", self.stall.as_secs()),
+                }
             }
             Err(RecvTimeoutError::Disconnected) => {
                 self.finished = true;
@@ -314,7 +573,11 @@ impl Process {
                     .take()
                     .and_then(|reader| reader.join().ok())
                     .unwrap_or_default();
-                bail!("ffmpeg failed ({status}): {}", stderr.trim())
+                match &self.station {
+                    Some(Station::Url(label)) => Err(url_failure(label, stderr.trim())),
+                    Some(Station::Pipe(label)) => Err(station_failure(label, stderr.trim(), false)),
+                    None => bail!("ffmpeg failed ({status}): {}", stderr.trim()),
+                }
             }
         }
     }
@@ -330,7 +593,7 @@ impl Process {
         }
         self.stopped = true;
         if let Some(feeder) = &self.feeder {
-            feeder.canceller.cancel();
+            (feeder.cancel)();
         }
         let _ = self.child.kill();
         let _ = self.child.wait();
@@ -354,18 +617,21 @@ impl Drop for Process {
         // cancel and kill; the feeder ends on its own right after.
         self.stopped = true;
         if let Some(feeder) = &self.feeder {
-            feeder.canceller.cancel();
+            (feeder.cancel)();
         }
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
 }
 
-/// Copies `stream` into FFmpeg's stdin until the end of the stream (stdin is then closed, which
-/// FFmpeg reads as the end of its input), a stream error (kept for [`Process::feed_error`]), a
-/// cancel, or a broken pipe (FFmpeg is gone).
-fn spawn_feeder(mut stream: HttpStream, mut stdin: ChildStdin) -> anyhow::Result<Feeder> {
-    let canceller = stream.canceller();
+/// Copies `reader` into FFmpeg's stdin until its end (stdin is then closed, which FFmpeg reads
+/// as the end of its input), a read error (kept for [`Process::feed_error`]), a cancel, or a
+/// broken pipe (FFmpeg is gone).
+fn spawn_feeder(
+    mut reader: Box<dyn Read + Send>,
+    cancel: Box<dyn Fn() + Send + Sync>,
+    mut stdin: ChildStdin,
+) -> anyhow::Result<Feeder> {
     let (done_tx, done) = crossbeam_channel::bounded::<()>(0);
     let error: Arc<Mutex<Option<io::Error>>> = Arc::default();
     let failed = Arc::clone(&error);
@@ -375,7 +641,7 @@ fn spawn_feeder(mut stream: HttpStream, mut stdin: ChildStdin) -> anyhow::Result
             let _done = done_tx;
             let mut buf = vec![0u8; CHUNK_BYTES];
             loop {
-                let read = match stream.read(&mut buf) {
+                let read = match reader.read(&mut buf) {
                     Ok(0) => return,
                     Ok(read) => read,
                     Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
@@ -391,7 +657,7 @@ fn spawn_feeder(mut stream: HttpStream, mut stdin: ChildStdin) -> anyhow::Result
         })
         .context("spawning the ffmpeg feeder thread")?;
     Ok(Feeder {
-        canceller,
+        cancel,
         done,
         error,
     })
@@ -440,6 +706,7 @@ fn collect_stderr(mut stderr: ChildStderr) -> anyhow::Result<JoinHandle<String>>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audio::is_offline;
     use crate::library::tags::fixtures;
 
     const FFMPEG_TEST_SPEC: StreamSpec = StreamSpec {
@@ -490,5 +757,92 @@ mod tests {
         source.seek(5_000).unwrap();
         assert!(source.pending.is_empty());
         assert_eq!(source.read(&mut Vec::new()).unwrap(), 0, "past the end");
+    }
+
+    #[test]
+    fn url_args_name_the_agent_and_web_protocols_only() {
+        let args: Vec<String> = url_args("https://radio.example/live.m3u8", 44_100)
+            .into_iter()
+            .map(|arg| arg.into_string().unwrap())
+            .collect();
+        let joined = args.join(" ");
+        assert!(
+            joined.contains(&format!("-user_agent {USER_AGENT}")),
+            "{joined}"
+        );
+        assert!(
+            joined.contains("-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 4"),
+            "{joined}"
+        );
+        assert!(joined.contains("-rw_timeout 10000000"), "{joined}");
+        assert!(
+            joined.contains("-protocol_whitelist http,https,tls,tcp,crypto,httpproxy"),
+            "{joined}"
+        );
+        assert!(
+            joined.ends_with(
+                "-i https://radio.example/live.m3u8 -vn -f f32le -ac 2 -ar 44100 pipe:1"
+            ),
+            "{joined}"
+        );
+    }
+
+    #[test]
+    fn url_failures_are_classified_and_scrubbed() {
+        let refused = url_failure(
+            "Demo Radio 1",
+            "[tcp @ 0x1] Connection to tcp://127.0.0.1:9 failed: Connection refused\nhttp://127.0.0.1:9/live.m3u8: Connection refused",
+        );
+        assert!(is_offline(&refused), "{refused:#}");
+        let missing = url_failure(
+            "Demo Radio 1",
+            "[http @ 0x1] HTTP error 404 Not Found\nhttp://127.0.0.1:9/live.m3u8: Server returned 404 Not Found",
+        );
+        assert!(!is_offline(&missing), "{missing:#}");
+        for err in [refused, missing] {
+            let text = format!("{err:#} {err:?}");
+            assert!(text.contains("Demo Radio 1"), "{text}");
+            assert!(!text.contains("://"), "{text}");
+            assert!(!text.contains("live.m3u8"), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_live_pipe_caps_its_probe_and_fails_as_not_audio() {
+        let joined = pipe_args(48_000)
+            .into_iter()
+            .map(|arg| arg.into_string().unwrap())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            joined.contains("-probesize 131072 -analyzeduration 2000000 -i pipe:0"),
+            "{joined}"
+        );
+        let err = station_failure(
+            "Demo Radio 1",
+            "Invalid data found when processing input",
+            false,
+        );
+        assert!(!is_offline(&err), "{err:#}");
+        assert!(format!("{err:#}").contains(NOT_AUDIO), "{err:#}");
+        assert!(
+            format!("{err:#}").contains("streaming Demo Radio 1"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn open_url_refuses_anything_but_a_web_address() {
+        for url in [
+            "file:///etc/passwd",
+            "-i",
+            "pipe:0",
+            "ftp://radio.example/x",
+        ] {
+            let err = FfmpegSource::open_url(url, "Demo Radio 1", FFMPEG_TEST_SPEC)
+                .err()
+                .expect("not a web address");
+            assert!(format!("{err:#}").contains(NOT_AN_ADDRESS), "{err:#}");
+        }
     }
 }
