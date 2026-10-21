@@ -316,12 +316,16 @@ fn opening_makes_one_request() {
     read_ms(&mut source, 500);
     let requests = env.stream_requests();
     assert_eq!(requests.len(), 1, "{requests:?}");
-    // Seeking still uses ranges once the decoder is open.
+    // Seeking still uses ranges once the decoder is open, unless a fast loopback already
+    // downloaded the whole file and the seek needs no request at all.
     source.seek(29_000).unwrap();
     assert_seconds_left(&mut source, 1.0);
     let requests = env.stream_requests();
-    assert_eq!(requests.len(), 2, "{requests:?}");
-    assert!(requests[1].range.is_some());
+    assert!(requests.len() <= 2, "{requests:?}");
+    assert!(
+        requests[1..].iter().all(|r| r.range.is_some()),
+        "{requests:?}"
+    );
 }
 
 #[test]
