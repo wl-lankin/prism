@@ -98,6 +98,27 @@ pub fn is_offline(err: &anyhow::Error) -> bool {
     })
 }
 
+/// A stream read that failed for another reason than [`Offline`] (an HTTP error status, a
+/// full disk, a cancelled reader). Tags the `io::Error`s an [`HttpStream`] returns, so a decoder
+/// error can be told apart from a failure of the stream itself.
+#[derive(Debug)]
+pub struct StreamFailure(pub String);
+
+impl fmt::Display for StreamFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for StreamFailure {}
+
+/// True when `err` is an [`HttpStream`] read failure ([`Offline`] or [`StreamFailure`]), not
+/// an IO error a decoder raised over malformed data.
+pub fn is_stream_failure(err: &io::Error) -> bool {
+    err.get_ref()
+        .is_some_and(|inner| inner.is::<Offline>() || inner.is::<StreamFailure>())
+}
+
 /// The `<spill_dir>` under an app cache dir.
 pub fn spill_dir(cache: &Path) -> PathBuf {
     cache.join("streams")
@@ -194,7 +215,7 @@ impl Failure {
             Failure::Offline(text) => {
                 io::Error::new(io::ErrorKind::ConnectionAborted, Offline(text))
             }
-            Failure::Other(text) => io::Error::other(text),
+            Failure::Other(text) => io::Error::other(StreamFailure(text)),
         }
     }
 }

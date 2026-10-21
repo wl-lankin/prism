@@ -201,7 +201,9 @@ impl NavidromeSource {
                 if is_offline(&err) {
                     return Err(err);
                 }
-                // The decoder cannot even seek forward here: drop the frames up to `ms`.
+                // The decoder cannot even seek forward here: drop the frames up to `ms`. The
+                // failed decoder goes first (one reader per stream).
+                drop(source);
                 source = open_decoder(&self.stream, &self.input, self.device)?;
                 self.skip = self.frames_for_ms(ms);
             }

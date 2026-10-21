@@ -477,6 +477,25 @@ fn a_cut_stream_is_offline_after_the_buffered_audio() {
 }
 
 #[test]
+fn offline_during_the_probe_is_offline() {
+    let env = env(FakeLibrary::synthetic(1, 1).with_audio(SONG, fixture("tagged.flac")));
+    // The connection drops inside the FLAC header, and the server cannot resume.
+    env.server.set_fault(Fault::CutOnceThen {
+        method: "stream",
+        after_bytes: 20,
+        then: Box::new(Fault::NoRanges),
+    });
+    let url = env.client.stream_url(SONG, StreamQuality::Original, None);
+    let err = NavidromeSource::open(env.request(StreamQuality::Original, "flac"), None)
+        .err()
+        .expect("the probe fails");
+    assert!(crate::audio::is_offline(&err), "{err:#}");
+    assert_clean(&err, &url);
+    // Not handed to FFmpeg: one request only.
+    assert_eq!(env.stream_requests().len(), 1);
+}
+
+#[test]
 fn ffmpeg_fallback_reads_stdin() {
     if !has_ffmpeg("ffmpeg_fallback_reads_stdin") {
         return;

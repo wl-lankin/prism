@@ -16,7 +16,7 @@ use symphonia::core::units::{Time, TimeBase, Timestamp};
 
 use symphonia::core::io::MediaSource;
 
-use super::http::HttpStream;
+use super::http::{is_stream_failure, HttpStream};
 use super::source::{describe, guarded, AudioSource, DecoderPanic, Input, StreamSpec};
 
 /// symphonia's error, with an IO error passed on as itself: symphonia's `Error` names its IO
@@ -28,10 +28,11 @@ fn symphonia_error(err: SymphoniaError) -> anyhow::Error {
     }
 }
 
-/// An IO error that is a failed read, not the end of the data (which a probe of an unknown
-/// format runs into).
+/// An IO error from the source itself (an HTTP stream gone offline or failed), not one symphonia
+/// raised over malformed data ("unexpected end of bitstream", a bogus atom length): only the
+/// former is an error at open; the latter falls back to FFmpeg as before.
 fn read_failed(err: &std::io::Error) -> bool {
-    err.kind() != ErrorKind::UnexpectedEof
+    is_stream_failure(err)
 }
 
 /// Consecutive undecodable packets after which a stream is considered broken.
@@ -337,5 +338,101 @@ impl AudioSource for SymphoniaSource {
 
     fn duration_ms(&self) -> Option<u64> {
         self.duration_ms
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{self, Cursor, Read, Seek, SeekFrom};
+
+    use super::*;
+    use crate::audio::http::{is_offline, Offline, StreamFailure};
+    use crate::library::tags::fixtures;
+
+    /// A source over a real file's bytes whose reads fail from byte `after` on, with `error`.
+    struct Failing {
+        bytes: Cursor<Vec<u8>>,
+        after: u64,
+        error: fn() -> io::Error,
+    }
+
+    impl Failing {
+        fn new(name: &str, after: u64, error: fn() -> io::Error) -> Box<Failing> {
+            let bytes = std::fs::read(fixtures().join(name)).unwrap();
+            Box::new(Failing {
+                bytes: Cursor::new(bytes),
+                after,
+                error,
+            })
+        }
+    }
+
+    impl Read for Failing {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let pos = self.bytes.position();
+            if pos >= self.after {
+                return Err((self.error)());
+            }
+            let n = buf.len().min((self.after - pos) as usize);
+            self.bytes.read(&mut buf[..n])
+        }
+    }
+
+    impl Seek for Failing {
+        fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+            self.bytes.seek(pos)
+        }
+    }
+
+    impl MediaSource for Failing {
+        fn is_seekable(&self) -> bool {
+            false
+        }
+
+        fn byte_len(&self) -> Option<u64> {
+            None
+        }
+    }
+
+    #[test]
+    fn malformed_data_during_the_probe_falls_back_to_ffmpeg() {
+        // IO errors symphonia raises over malformed data, not failures of the source.
+        let malformed: [fn() -> io::Error; 3] = [
+            || io::Error::other("unexpected end of bitstream"),
+            || io::Error::from(io::ErrorKind::OutOfMemory),
+            || io::Error::new(io::ErrorKind::InvalidData, "invalid codebook"),
+        ];
+        for error in malformed {
+            for name in ["tagged.flac", "tagged.mp3", "gap_a.wav"] {
+                let opened = SymphoniaSource::open_media(Failing::new(name, 30, error), None, name)
+                    .unwrap_or_else(|err| panic!("{name}: {err:#}"));
+                assert!(opened.is_none(), "{name}: the FFmpeg fallback is kept");
+            }
+        }
+    }
+
+    #[test]
+    fn a_stream_failure_during_the_probe_is_an_error() {
+        let offline = SymphoniaSource::open_media(
+            Failing::new("tagged.flac", 30, || {
+                io::Error::new(io::ErrorKind::ConnectionAborted, Offline("gone".into()))
+            }),
+            Some("flac"),
+            "Demo Artist 1 - Demo Song 1",
+        )
+        .err()
+        .expect("an offline stream is not handed to FFmpeg");
+        assert!(is_offline(&offline), "{offline:#}");
+
+        let failed = SymphoniaSource::open_media(
+            Failing::new("tagged.flac", 30, || {
+                io::Error::other(StreamFailure("the server answered HTTP 500".into()))
+            }),
+            Some("flac"),
+            "Demo Artist 1 - Demo Song 1",
+        )
+        .err()
+        .expect("a failed stream is not handed to FFmpeg");
+        assert!(!is_offline(&failed), "{failed:#}");
     }
 }

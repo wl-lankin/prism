@@ -331,7 +331,12 @@ impl Process {
         let _ = self.child.kill();
         let _ = self.child.wait();
         if let Some(feeder) = &self.feeder {
-            let _ = feeder.done.recv_timeout(FEEDER_EXIT_WAIT);
+            if let Err(RecvTimeoutError::Timeout) = feeder.done.recv_timeout(FEEDER_EXIT_WAIT) {
+                eprintln!(
+                    "the ffmpeg feeder did not end within {} s",
+                    FEEDER_EXIT_WAIT.as_secs()
+                );
+            }
         }
     }
 }
