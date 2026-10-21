@@ -38,6 +38,8 @@ pub const STALL_TIMEOUT: Duration = Duration::from_secs(20);
 pub const RETRIES: u32 = 3;
 /// A read this far past the downloaded run restarts the download there instead of waiting.
 pub const RESTART_GAP: u64 = 1024 * 1024;
+/// The backoff before the first resume; it doubles per attempt.
+pub const RETRY_BACKOFF: Duration = Duration::from_secs(1);
 
 const CHUNK: usize = 64 * 1024;
 const SPILL_EXTENSION: &str = "part";
@@ -45,23 +47,27 @@ const SPILL_MAX_AGE: Duration = Duration::from_secs(24 * 3600);
 
 /// How streams are fetched and buffered; shared by every [`HttpInput`] of one source.
 pub struct StreamConfig {
-    /// The stream client (`SubsonicClient::stream_http`): connect timeout, no total timeout,
-    /// no transparent decompression, same-host redirects only.
+    /// The stream client (`SubsonicClient::stream_http`): connect timeout, a per-read timeout
+    /// above `stall` (no bound on the whole response), no transparent decompression, same-host
+    /// redirects only.
     pub client: Client,
     /// Where the `.part` spill files go (`<cache>/streams`).
     pub spill_dir: PathBuf,
     pub stall: Duration,
     pub retries: u32,
+    /// The first resume's backoff; it doubles per attempt ([`RETRY_BACKOFF`]: 1, 2, 4 s).
+    pub backoff: Duration,
 }
 
 impl StreamConfig {
-    /// A config with the default stall timeout and retries.
+    /// A config with the default stall timeout, retries and backoff.
     pub fn new(client: Client, spill_dir: PathBuf) -> StreamConfig {
         StreamConfig {
             client,
             spill_dir,
             stall: STALL_TIMEOUT,
             retries: RETRIES,
+            backoff: RETRY_BACKOFF,
         }
     }
 }
@@ -207,6 +213,9 @@ struct Download {
     start: u64,
     pos: u64,
     status: Status,
+    /// A response of this generation arrived. Stays set when the body fails right after, so
+    /// `open` still succeeds and the bytes that came are read before the error.
+    answered: bool,
 }
 
 struct State {
@@ -230,6 +239,7 @@ struct Shared {
     secrets: Vec<String>,
     stall: Duration,
     retries: u32,
+    backoff: Duration,
     path: PathBuf,
     state: Mutex<State>,
     changed: Condvar,
@@ -357,6 +367,7 @@ fn start_download(shared: &Arc<Shared>, state: &mut State, at: u64) {
         start: at,
         pos: at,
         status: Status::Connecting,
+        answered: false,
     };
     state.progress = Instant::now();
     let generation = state.generation;
@@ -401,6 +412,7 @@ fn download(shared: &Shared, generation: u64, from: u64) {
                     pos = answer.start;
                     state.download.pos = pos;
                     state.download.status = Status::Running;
+                    state.download.answered = true;
                     state.progress = Instant::now();
                     shared.changed.notify_all();
                 }
@@ -425,7 +437,7 @@ fn download(shared: &Shared, generation: u64, from: u64) {
             return;
         }
         attempts += 1;
-        let backoff = Duration::from_secs(1u64 << (attempts - 1).min(5));
+        let backoff = shared.backoff * (1u32 << (attempts - 1).min(5));
         let until = Instant::now() + backoff;
         loop {
             if state.generation != generation || state.file.is_none() {
@@ -462,7 +474,11 @@ fn copy_body(
 ) -> BodyEnd {
     let mut buf = vec![0u8; CHUNK];
     loop {
-        let (read, error) = read_chunk(&mut response, &mut buf);
+        // A read timeout of the stream client comes back here too (classified offline).
+        let read = match read_chunk(&mut response, &mut buf) {
+            Ok(read) => read,
+            Err(err) => return BodyEnd::Failed(shared.failure(classify_io(err))),
+        };
         let mut state = shared.lock();
         if state.generation != generation {
             return BodyEnd::Stopped;
@@ -471,10 +487,6 @@ fn copy_body(
             return BodyEnd::Stopped;
         };
         if read == 0 {
-            if let Some(err) = error {
-                drop(state);
-                return BodyEnd::Failed(shared.failure(classify_io(err)));
-            }
             if state.len.is_some_and(|len| *pos < len) {
                 return BodyEnd::Failed(Failure::Offline("the stream ended early".into()));
             }
@@ -506,21 +518,16 @@ fn copy_body(
             }
         }
         shared.changed.notify_all();
-        if let Some(err) = error {
-            drop(state);
-            return BodyEnd::Failed(shared.failure(classify_io(err)));
-        }
     }
 }
 
 /// One read of up to a chunk: whatever arrived is handed on at once (a stalled server must not
-/// hold back bytes it already sent). `(0, None)` is the end of the body.
-fn read_chunk(response: &mut Response, buf: &mut [u8]) -> (usize, Option<io::Error>) {
+/// hold back bytes it already sent). `Ok(0)` is the end of the body.
+fn read_chunk(response: &mut Response, buf: &mut [u8]) -> io::Result<usize> {
     loop {
         match response.read(buf) {
-            Ok(n) => return (n, None),
             Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
-            Err(err) => return (0, Some(err)),
+            result => return result,
         }
     }
 }
@@ -555,6 +562,7 @@ impl HttpStream {
             secrets: url_secrets(input.url.expose()),
             stall: config.stall,
             retries: config.retries,
+            backoff: config.backoff,
             path,
             state: Mutex::new(State {
                 file: Some(file),
@@ -567,6 +575,7 @@ impl HttpStream {
                     start: 0,
                     pos: 0,
                     status: Status::Connecting,
+                    answered: false,
                 },
                 progress: Instant::now(),
             }),
@@ -578,17 +587,27 @@ impl HttpStream {
             let shared = &stream.shared;
             let mut state = shared.lock();
             start_download(shared, &mut state, 0);
+            #[cfg(test)]
+            {
+                let pause = tests::OPEN_PAUSE.with(std::cell::Cell::get);
+                if !pause.is_zero() {
+                    drop(state);
+                    std::thread::sleep(pause);
+                    state = shared.lock();
+                }
+            }
             loop {
-                match &state.download.status {
-                    Status::Connecting => {}
-                    Status::Failed(failure) => {
-                        let failure = failure.clone();
-                        drop(state);
-                        return Err(failure
-                            .into_anyhow()
-                            .context(format!("streaming {}", input.label)));
-                    }
-                    Status::Running | Status::Done => break,
+                // Once the server answered, `open` succeeds even when the body failed right
+                // after: the bytes that came are read first, then the error.
+                if state.download.answered {
+                    break;
+                }
+                if let Status::Failed(failure) = &state.download.status {
+                    let failure = failure.clone();
+                    drop(state);
+                    return Err(failure
+                        .into_anyhow()
+                        .context(format!("streaming {}", input.label)));
                 }
                 let waited = state.progress.elapsed();
                 if waited >= shared.stall {
@@ -748,6 +767,7 @@ impl MediaSource for HttpStream {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::fs;
     use std::sync::Arc;
     use std::time::{Instant, SystemTime};
@@ -756,7 +776,9 @@ mod tests {
 
     use super::*;
     use crate::audio::source::Input;
-    use crate::navidrome::client::{StreamQuality, SubsonicClient};
+    use crate::navidrome::client::{
+        StreamQuality, SubsonicClient, API_TIMEOUT, CONNECT_TIMEOUT, STREAM_READ_TIMEOUT,
+    };
     use crate::navidrome::testserver::{FakeLibrary, FakeServer, Fault, FAKE_PASSWORD};
     use crate::secret::SecretUrl;
 
@@ -774,17 +796,36 @@ mod tests {
         FakeServer::start(FakeLibrary::synthetic(1, 1).with_audio(SONG, body(len)))
     }
 
+    thread_local! {
+        /// How long `open` lets go of the lock right after starting the download (this test
+        /// thread only), so the download can get ahead of it deterministically.
+        pub(super) static OPEN_PAUSE: Cell<Duration> = const { Cell::new(Duration::ZERO) };
+    }
+
     /// A stream config over the shared stream client, spilling into a fresh temp dir.
     fn config(server: &FakeServer, stall: Duration) -> (tempfile::TempDir, Arc<StreamConfig>) {
+        config_with(server, stall, STREAM_READ_TIMEOUT, RETRY_BACKOFF)
+    }
+
+    /// Like [`config`], with the stream client's per-read timeout and the resume backoff.
+    fn config_with(
+        server: &FakeServer,
+        stall: Duration,
+        read_timeout: Duration,
+        backoff: Duration,
+    ) -> (tempfile::TempDir, Arc<StreamConfig>) {
         let spill = tempfile::tempdir().unwrap();
-        let client = SubsonicClient::new(server.account()).unwrap();
-        let config = Arc::new(StreamConfig {
-            client: client.stream_http(),
-            spill_dir: spill.path().to_path_buf(),
-            stall,
-            retries: RETRIES,
-        });
-        (spill, config)
+        let client = SubsonicClient::with_stream_timeout(
+            server.account(),
+            CONNECT_TIMEOUT,
+            API_TIMEOUT,
+            read_timeout,
+        )
+        .unwrap();
+        let mut config = StreamConfig::new(client.stream_http(), spill.path().to_path_buf());
+        config.stall = stall;
+        config.backoff = backoff;
+        (spill, Arc::new(config))
     }
 
     fn input_at(url: SecretUrl, config: &Arc<StreamConfig>) -> HttpInput {
@@ -969,9 +1010,10 @@ mod tests {
     #[test]
     fn cut_without_range_support_reports_offline_after_buffer() {
         let server = server_with(2_000_000);
-        server.set_fault(Fault::CutOnceNoRanges {
+        server.set_fault(Fault::CutOnceThen {
             method: "stream",
             after_bytes: 100_000,
+            then: Box::new(Fault::NoRanges),
         });
         let (_spill, config) = config(&server, STALL_TIMEOUT);
         let input = input(&server, &config);
@@ -1206,6 +1248,161 @@ mod tests {
         assert!(!is_offline(&anyhow::anyhow!("HTTP 404")));
         let other = io::Error::other("bad data");
         assert!(!is_offline(&anyhow::Error::new(other)));
+    }
+
+    #[test]
+    fn open_succeeds_when_the_body_fails_right_after_the_headers() {
+        let server = server_with(2_000_000);
+        server.set_fault(Fault::CutOnceThen {
+            method: "stream",
+            after_bytes: 1024,
+            then: Box::new(Fault::NoRanges),
+        });
+        let (_spill, config) = config(&server, STALL_TIMEOUT);
+        let input = input(&server, &config);
+        // `open` looks only after the download answered, got its 1 KB and failed on the cut.
+        OPEN_PAUSE.with(|pause| pause.set(Duration::from_secs(1)));
+        let opened = HttpStream::open(&input);
+        OPEN_PAUSE.with(|pause| pause.set(Duration::ZERO));
+        let mut stream = opened.unwrap_or_else(|err| panic!("open failed: {err:#}"));
+        assert!(!stream.seekable());
+        let (out, err) = read_until_error(&mut stream);
+        let err = anyhow::Error::new(err.expect("the cut surfaces as an error"));
+        assert!(is_offline(&err), "{err:#}");
+        assert_clean(&err, &input);
+        assert!(!out.is_empty() && out.len() <= 1024, "{} bytes", out.len());
+        assert!(
+            out == body(2_000_000)[..out.len()],
+            "the buffered bytes differ"
+        );
+        assert_eq!(server.requests().len(), 1);
+    }
+
+    #[test]
+    fn retries_run_out_then_offline_after_the_buffered_bytes() {
+        let server = server_with(2_000_000);
+        // One cut, then every resume gets a proxy 503.
+        server.set_fault(Fault::CutOnceThen {
+            method: "stream",
+            after_bytes: 100_000,
+            then: Box::new(Fault::Status(503)),
+        });
+        let (_spill, config) = config_with(
+            &server,
+            STALL_TIMEOUT,
+            STREAM_READ_TIMEOUT,
+            Duration::from_millis(20),
+        );
+        let input = input(&server, &config);
+        let mut stream = open(&input);
+        assert!(stream.seekable());
+        let (out, err) = read_until_error(&mut stream);
+        let err = anyhow::Error::new(err.expect("running out of retries surfaces as an error"));
+        assert!(is_offline(&err), "{err:#}");
+        assert_clean(&err, &input);
+        assert!(
+            !out.is_empty() && out.len() <= 100_000,
+            "{} bytes",
+            out.len()
+        );
+        assert!(
+            out == body(2_000_000)[..out.len()],
+            "the buffered bytes differ"
+        );
+        let requests = server.requests();
+        assert_eq!(requests.len(), 1 + RETRIES as usize, "{requests:?}");
+        assert!(requests[1..].iter().all(|r| r.range.is_some()));
+    }
+
+    #[test]
+    fn a_read_timeout_is_offline() {
+        // A transcoded stream (timeOffset): not byte-seekable, so nothing is resumed.
+        let server = FakeServer::start(FakeLibrary::synthetic(1, 1).with_wav(SONG, 3));
+        server.set_fault(Fault::Stall {
+            method: "stream",
+            after_bytes: 100_000,
+            wait: Duration::from_secs(20),
+        });
+        // The reader would wait 15 s; the stream client's read timeout (2 s) ends it first.
+        // The timeout also bounds the wait for the headers, so it stays well above what a
+        // machine busy with parallel test runs needs for those.
+        let (_spill, config) = config_with(
+            &server,
+            Duration::from_secs(15),
+            Duration::from_secs(2),
+            RETRY_BACKOFF,
+        );
+        let client = SubsonicClient::new(server.account()).unwrap();
+        let input = input_at(
+            client.stream_url(SONG, StreamQuality::Original, Some(0)),
+            &config,
+        );
+        let mut stream = open(&input);
+        assert!(!stream.seekable());
+        let started = Instant::now();
+        let (out, err) = read_until_error(&mut stream);
+        let err = anyhow::Error::new(err.expect("a read timeout surfaces as an error"));
+        assert!(is_offline(&err), "{err:#}");
+        assert_clean(&err, &input);
+        assert_eq!(out.len(), 100_000);
+        // Well before the reader's own stall timeout (15 s) and the server (20 s).
+        assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    #[test]
+    fn a_silent_server_ends_the_download_thread() {
+        let server = server_with(2_000_000);
+        server.set_fault(Fault::Stall {
+            method: "stream",
+            after_bytes: 100_000,
+            wait: Duration::from_secs(20),
+        });
+        let (_spill, config) = config_with(
+            &server,
+            STALL_TIMEOUT,
+            Duration::from_secs(2),
+            RETRY_BACKOFF,
+        );
+        let mut stream = open(&input(&server, &config));
+        let mut first = vec![0; 100_000];
+        stream.read_exact(&mut first).unwrap();
+        // The download thread holds the only other reference to the shared state.
+        let shared = Arc::downgrade(&stream.shared);
+        drop(stream);
+        let started = Instant::now();
+        while shared.upgrade().is_some() {
+            // The read timeout is 2 s; the server stays silent for 20 s.
+            assert!(
+                started.elapsed() < Duration::from_secs(12),
+                "the download thread is still blocked on the silent server"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn a_slow_but_steady_stream_is_not_cut() {
+        let server = server_with(200_000);
+        // 10 pieces 400 ms apart: about 4 s in all, far over the 1.5 s read timeout.
+        server.set_fault(Fault::Trickle {
+            method: "stream",
+            chunk: 20_000,
+            every: Duration::from_millis(400),
+        });
+        let read_timeout = Duration::from_millis(1500);
+        let (_spill, config) = config_with(
+            &server,
+            Duration::from_secs(10),
+            read_timeout,
+            RETRY_BACKOFF,
+        );
+        let mut stream = open(&input(&server, &config));
+        let started = Instant::now();
+        let mut out = Vec::new();
+        stream.read_to_end(&mut out).unwrap();
+        assert!(out == body(200_000), "the body differs");
+        assert!(started.elapsed() > read_timeout);
+        assert_eq!(server.requests().len(), 1);
     }
 
     #[test]
