@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "mini",
   "description": "The mini player: events and the app commands it calls (play, favorites, Flow, play modes, YouTube Music transport). It cannot close, move or resize itself from script; the backend shows, hides and places it.",
-  "windows": ["mini"],
+  "webviews": ["mini"],
   "permissions": [
     "core:default",
     "allow-player-toggle",

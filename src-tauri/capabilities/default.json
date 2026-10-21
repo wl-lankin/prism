@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main",
   "description": "The main window: its own title bar (minimize, maximize, close, drag, resize), the folder picker, the About links and the app commands its page calls.",
-  "windows": ["main"],
+  "webviews": ["main"],
   "permissions": [
     "core:default",
     "core:window:allow-minimize",

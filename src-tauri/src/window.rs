@@ -208,19 +208,33 @@ mod tests {
         assert!(dev.contains("ws://localhost:1441"), "{dev}");
     }
 
-    /// Each window has its own capability; the mini player gets the events (`core:default`)
-    /// and its app commands, and nothing that lets a script close, move or resize it.
+    /// Each webview has its own capability; the mini player gets the events (`core:default`)
+    /// and its app commands, and nothing that lets a script close, move or resize it. None
+    /// is bound by window: the `ytm` child lives in window `main` and must never get main's.
     #[test]
     fn capabilities_split_main_and_mini() {
+        for capability in [
+            include_str!("../capabilities/default.json"),
+            include_str!("../capabilities/mini.json"),
+            include_str!("../capabilities/ytm.json"),
+        ] {
+            let capability = json(capability);
+            assert!(
+                capability.get("windows").is_none(),
+                "{}",
+                capability["identifier"]
+            );
+        }
+
         let main = json(include_str!("../capabilities/default.json"));
         assert_eq!(main["identifier"], "main");
-        assert_eq!(main["windows"], serde_json::json!(["main"]));
+        assert_eq!(main["webviews"], serde_json::json!(["main"]));
         let main_permissions = main["permissions"].to_string();
         assert!(main_permissions.contains("core:window:allow-close"));
 
         let mini = json(include_str!("../capabilities/mini.json"));
         assert_eq!(mini["identifier"], "mini");
-        assert_eq!(mini["windows"], serde_json::json!(["mini"]));
+        assert_eq!(mini["webviews"], serde_json::json!(["mini"]));
         let permissions = mini["permissions"].as_array().unwrap();
         assert_eq!(permissions[0], "core:default");
         for permission in &permissions[1..] {
@@ -255,7 +269,9 @@ mod tests {
 
     fn handler_commands() -> Vec<String> {
         between(include_str!("lib.rs"), "generate_handler![", "]")
-            .split(',')
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .flat_map(|line| line.split(','))
             .map(|item| item.trim().rsplit("::").next().unwrap())
             .filter(|item| !item.is_empty())
             .map(String::from)
@@ -390,6 +406,11 @@ mod tests {
             };
             let default = default.trim().trim_end_matches(',').trim();
             if !default.is_empty() {
+                assert!(
+                    !(default.starts_with("* as ") && target == frontend().join("lib/ipc.ts")),
+                    "{}: `import * as` from ipc.ts hides which wrappers it calls; import them by name",
+                    file.display()
+                );
                 let local = default.trim_start_matches("* as ").trim();
                 module
                     .imports
@@ -418,6 +439,11 @@ mod tests {
             if trimmed.starts_with("//") || trimmed.starts_with("/*") || trimmed.starts_with('*') {
                 continue;
             }
+            assert!(
+                !line.starts_with("export {") && !line.starts_with("export *"),
+                "{}: the command scan does not follow re-exports: {line}",
+                file.display()
+            );
             let top_level = line.starts_with(|c: char| !c.is_whitespace() && !"})]".contains(c));
             if top_level {
                 skipping = line.starts_with("import ");
