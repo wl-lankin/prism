@@ -29,6 +29,7 @@
     colors = SPECTRUM,
     size = 84,
     level,
+    reach,
     onactivate,
     oncontextmenu,
   }: {
@@ -42,6 +43,10 @@
     /** 0..1, the loudness of what plays. While playing it drives the glow (in place of the
      *  slow breathing); left out, the ring breathes on its own. */
     level?: number;
+    /** How far from its centre the ring may paint, in px: the radius of the window shape
+     *  around it. The glow fades out before it, however loud the music or hovered the ring,
+     *  so the shape's edge never cuts it. Left out, the glow is not bounded. */
+    reach?: number;
     onactivate?: () => void;
     oncontextmenu?: (event: MouseEvent) => void;
   } = $props();
@@ -62,6 +67,7 @@
       `--c4:${colors[3]}`,
       `--head:${colorAt(colors, p)}`,
       ...(metered ? [`--glow-o:${(0.35 + 0.4 * loud).toFixed(3)}`, `--glow-s:${(1 + 0.12 * loud).toFixed(3)}`] : []),
+      ...(reach ? [`--reach:${reach}px`] : []),
     ].join(';'),
   );
 </script>
@@ -72,6 +78,7 @@
   class:flow={mode === 'flow'}
   class:playing={mode === 'pause'}
   class:metered
+  class:bounded={!!reach}
   {style}
   aria-label={label}
   title={label}
@@ -171,6 +178,19 @@
 
   .ring:active {
     transform: scale(0.965);
+  }
+
+  /* Inside a window shape (`reach`): everything the ring paints, its glow at full level and
+     hover included, fades to nothing over the last 24 px before the shape's edge. Without it
+     the shape cuts the glow's faint tail, and the cut shows as short light steps (the
+     region's circle is made of pixel rows). The mask is a circle of the shape's radius around
+     the ring's centre; outside the button's own box it must not clip (no-clip). */
+  .ring.bounded {
+    mask-image: radial-gradient(closest-side, #000 calc(100% - 24px), transparent 100%);
+    mask-size: calc(var(--reach) * 2) calc(var(--reach) * 2);
+    mask-position: 50% 50%;
+    mask-repeat: no-repeat;
+    mask-clip: no-clip;
   }
 
   .ring:focus-visible {

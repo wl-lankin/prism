@@ -43,6 +43,9 @@
   const TRANSPORT = 84;
   /** The notice floats this far above the card's bottom edge, clear of the seek rail. */
   const NOTICE_LIFT = TRANSPORT + 20;
+  /** The radius of the window shape's circle around the ring (`shell::shape::main_region`):
+   *  the ring's glow ends inside it. A maximized window has no shape. */
+  const RING_REACH = MAIN.ring / 2 + MAIN.bezel + MAIN.glow;
 
   const maximized = $derived(windowState.maximized);
   const ringSize = $derived(maximized ? MAIN.ringMaximized : MAIN.ring);
@@ -290,6 +293,7 @@
       colors={ring.colors}
       level={ring.level}
       size={ringSize}
+      reach={maximized ? undefined : RING_REACH}
       onactivate={activate}
       oncontextmenu={openFlowMenu}
     />
