@@ -7,7 +7,9 @@
   import PrismIllustration from './PrismIllustration.svelte';
 
   /** Shown while the library has no tracks: one action, adding a music folder, and the scan
-   *  progress right under it. */
+   *  progress right under it. `compact`: a left-aligned section under other Home content
+   *  (favorite stations), without the illustration. */
+  let { compact = false }: { compact?: boolean } = $props();
   let adding = $state(false);
   let error = $state<string | null>(null);
 
@@ -37,12 +39,16 @@
   }
 </script>
 
-<div class="empty">
+<div class="empty" class:compact>
   <div class="panel">
-    <div class="mark">
-      <PrismIllustration width={200} />
-    </div>
-    <h1>{t('library.emptyTitle')}</h1>
+    {#if compact}
+      <h2>{t('library.emptyTitle')}</h2>
+    {:else}
+      <div class="mark">
+        <PrismIllustration width={200} />
+      </div>
+      <h1>{t('library.emptyTitle')}</h1>
+    {/if}
     <p class="lead">{t('library.emptyLead')}</p>
 
     <button type="button" class="btn primary" disabled={busy} onclick={add}>
@@ -153,6 +159,34 @@
     margin: 12px 0 0;
     font-size: 13px;
     color: var(--spec-1);
+  }
+
+  .compact {
+    height: auto;
+    display: block;
+    padding: 0 32px 32px;
+  }
+
+  .compact .panel {
+    width: min(520px, 100%);
+    align-items: flex-start;
+    text-align: left;
+  }
+
+  .compact h2 {
+    margin: 0 0 6px;
+    font-family: var(--font-display);
+    font-size: 18px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+
+  .compact .lead {
+    margin-bottom: 16px;
+  }
+
+  .compact .progress {
+    align-items: flex-start;
   }
 
   @keyframes sweep {
