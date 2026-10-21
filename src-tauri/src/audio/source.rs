@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use super::ffmpeg::FfmpegSource;
-use super::http::StreamConfig;
+use super::http::{HttpStream, StreamConfig};
 use super::symph::SymphoniaSource;
 use crate::secret::SecretUrl;
 
@@ -89,14 +89,61 @@ pub fn open_source_with(
     input: &Input,
     device: Option<StreamSpec>,
 ) -> anyhow::Result<Box<dyn AudioSource>> {
+    if let Input::Http(http) = input {
+        return Ok(open_http(http, device)?.source);
+    }
     if let Some(source) = SymphoniaSource::open_if_supported(input)? {
         return Ok(Box::new(source));
     }
-    let target = StreamSpec {
+    Ok(Box::new(FfmpegSource::open(input, ffmpeg_target(device))?))
+}
+
+/// FFmpeg's output spec: the device rate (when known), always stereo.
+fn ffmpeg_target(device: Option<StreamSpec>) -> StreamSpec {
+    StreamSpec {
         sample_rate: device.map_or(FFMPEG_DEFAULT_SPEC.sample_rate, |spec| spec.sample_rate),
         channels: 2,
-    };
-    Ok(Box::new(FfmpegSource::open(input, target)?))
+    }
+}
+
+/// An opened HTTP stream: its buffer and a decoder reading it.
+pub struct OpenedStream {
+    /// The stream buffer, held idle (it never reads): the source of a fresh cursor when the
+    /// decoder has to be opened again on the same bytes. Keeps the spill file alive.
+    pub stream: HttpStream,
+    pub source: Box<dyn AudioSource>,
+}
+
+/// Downloads `input` and opens a decoder on it (symphonia, falling back to FFmpeg through
+/// stdin). One download serves both attempts.
+pub fn open_http(input: &HttpInput, device: Option<StreamSpec>) -> anyhow::Result<OpenedStream> {
+    let stream = HttpStream::open(input)?;
+    let source = open_decoder(&stream, input, device)?;
+    Ok(OpenedStream { stream, source })
+}
+
+/// Opens a decoder over a fresh cursor of `stream` (the buffer of `input`), from byte 0. Only one
+/// reader of a stream may be active at a time, so the caller drops any previous decoder of the
+/// same stream first.
+pub fn open_decoder(
+    stream: &HttpStream,
+    input: &HttpInput,
+    device: Option<StreamSpec>,
+) -> anyhow::Result<Box<dyn AudioSource>> {
+    // Prism builds symphonia without the trailing-tag readers (APEv2, ID3v1), so the probe never
+    // looks at the tail; of the containers it opens, only Ogg reads the end of a byte-seekable
+    // stream at open (one extra Range request), which its seeking needs.
+    let cursor = Box::new(stream.cursor());
+    if let Some(source) =
+        SymphoniaSource::open_media(cursor, input.extension.as_deref(), &input.label)?
+    {
+        return Ok(Box::new(source));
+    }
+    Ok(Box::new(FfmpegSource::open_stream(
+        stream.cursor(),
+        input,
+        ffmpeg_target(device),
+    )?))
 }
 
 /// A decoder panicked; the error a [`guarded`] call returns in that case.

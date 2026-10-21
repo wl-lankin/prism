@@ -19,6 +19,7 @@ use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -95,6 +96,27 @@ pub fn is_offline(err: &anyhow::Error) -> bool {
                 .and_then(io::Error::get_ref)
                 .is_some_and(|wrapped| wrapped.is::<Offline>())
     })
+}
+
+/// A stream read that failed for another reason than [`Offline`] (an HTTP error status, a
+/// full disk, a cancelled reader). Tags the `io::Error`s an [`HttpStream`] returns, so a decoder
+/// error can be told apart from a failure of the stream itself.
+#[derive(Debug)]
+pub struct StreamFailure(pub String);
+
+impl fmt::Display for StreamFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for StreamFailure {}
+
+/// True when `err` is an [`HttpStream`] read failure ([`Offline`] or [`StreamFailure`]), not
+/// an IO error a decoder raised over malformed data.
+pub fn is_stream_failure(err: &io::Error) -> bool {
+    err.get_ref()
+        .is_some_and(|inner| inner.is::<Offline>() || inner.is::<StreamFailure>())
 }
 
 /// The `<spill_dir>` under an app cache dir.
@@ -193,7 +215,7 @@ impl Failure {
             Failure::Offline(text) => {
                 io::Error::new(io::ErrorKind::ConnectionAborted, Offline(text))
             }
-            Failure::Other(text) => io::Error::other(text),
+            Failure::Other(text) => io::Error::other(StreamFailure(text)),
         }
     }
 }
@@ -538,6 +560,25 @@ fn read_chunk(response: &mut Response, buf: &mut [u8]) -> io::Result<usize> {
 pub struct HttpStream {
     shared: Arc<Shared>,
     pos: u64,
+    /// Set through a [`Canceller`]: every read of this reader fails from then on.
+    cancelled: Arc<AtomicBool>,
+}
+
+/// Stops one reader from another thread: its blocked or next read fails at once, so a reader
+/// that is being replaced (an FFmpeg feeder before a restart) never restarts the download at its
+/// old position.
+pub struct Canceller {
+    shared: Arc<Shared>,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl Canceller {
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+        // Under the lock, so a reader between its check and its wait cannot miss the wakeup.
+        let _state = self.shared.lock();
+        self.shared.changed.notify_all();
+    }
 }
 
 impl HttpStream {
@@ -582,7 +623,11 @@ impl HttpStream {
             changed: Condvar::new(),
         });
         // From here on, dropping `stream` on an error removes the spill file.
-        let stream = HttpStream { shared, pos: 0 };
+        let stream = HttpStream {
+            shared,
+            pos: 0,
+            cancelled: Arc::default(),
+        };
         {
             let shared = &stream.shared;
             let mut state = shared.lock();
@@ -649,6 +694,15 @@ impl HttpStream {
         HttpStream {
             shared: Arc::clone(&self.shared),
             pos: 0,
+            cancelled: Arc::default(),
+        }
+    }
+
+    /// A handle that cancels this reader (see [`Canceller`]).
+    pub fn canceller(&self) -> Canceller {
+        Canceller {
+            shared: Arc::clone(&self.shared),
+            cancelled: Arc::clone(&self.cancelled),
         }
     }
 
@@ -657,6 +711,9 @@ impl HttpStream {
         let pos = self.pos;
         let mut state = shared.lock();
         loop {
+            if self.cancelled.load(Ordering::SeqCst) {
+                return Err(Failure::Other("the stream reader was closed".into()));
+            }
             if state.len.is_some_and(|len| pos >= len) || buf.is_empty() {
                 return Ok(0);
             }
@@ -1210,6 +1267,37 @@ mod tests {
         assert_eq!(spill_files(spill.path()), 1);
         drop(cursor);
         assert_eq!(spill_files(spill.path()), 0);
+    }
+
+    #[test]
+    fn a_cancelled_reader_stops_waiting_at_once() {
+        let server = server_with(2_000_000);
+        server.set_fault(Fault::Stall {
+            method: "stream",
+            after_bytes: 100_000,
+            wait: Duration::from_secs(10),
+        });
+        let (_spill, config) = config(&server, STALL_TIMEOUT);
+        let stream = open(&input(&server, &config));
+        let mut cursor = stream.cursor();
+        let canceller = cursor.canceller();
+        let reader = std::thread::spawn(move || {
+            let mut buf = vec![0; 200_000];
+            let started = Instant::now();
+            // Waits at 100 000 for bytes the server holds back.
+            let result = cursor.read_exact(&mut buf);
+            (result, started.elapsed())
+        });
+        std::thread::sleep(Duration::from_millis(300));
+        canceller.cancel();
+        let (result, took) = reader.join().unwrap();
+        assert!(result.is_err());
+        assert!(took < Duration::from_secs(3), "took {took:?}");
+        // Other readers of the same stream are not affected.
+        let mut other = stream.cursor();
+        let mut first = vec![0; 1000];
+        other.read_exact(&mut first).unwrap();
+        assert!(first == body(2_000_000)[..1000]);
     }
 
     #[test]

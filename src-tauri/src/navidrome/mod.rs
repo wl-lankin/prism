@@ -16,6 +16,7 @@
 pub mod client;
 pub mod covers;
 pub mod keychain;
+pub mod stream;
 pub mod sync;
 
 #[cfg(test)]
