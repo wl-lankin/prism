@@ -91,6 +91,31 @@ const makeRadioStreams = () => {
     '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=48000:duration=2', ...mono, ...bitexact,
     ...opusArgs, '-b:a', '24k', '-f', 'matroska', join(out, 'radio/tone.mka'),
   ]);
+  // ADTS AAC, the way AAC stations send it (FFmpeg decodes it: symphonia's AAC is LC only).
+  ffmpeg([
+    '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=22050:duration=2', ...mono, ...bitexact,
+    '-c:a', 'aac', '-b:a', '32k', '-f', 'adts', join(out, 'radio/tone.aac'),
+  ]);
+  // A chained Ogg: two 2 s Vorbis streams back to back, the second at another rate, like a
+  // station that starts a new chain link for the next song. Stereo: FFmpeg's own Vorbis encoder
+  // (used when libvorbis is missing) has no mono, and writes silence at `-q:a 0`.
+  const vorbis = hasEncoder('libvorbis')
+    ? ['-c:a', 'libvorbis', '-q:a', '0']
+    : ['-c:a', 'vorbis', '-strict', '-2'];
+  const link = (name, rate, seconds) => {
+    const path = join(work, name);
+    ffmpeg([
+      '-f', 'lavfi', '-i', `sine=frequency=440:sample_rate=${rate}:duration=${seconds}`,
+      '-ac', '2', ...bitexact, '-metadata:s:a:0', 'encoder=', ...vorbis, path,
+    ]);
+    return readFileSync(path);
+  };
+  writeFileSync(
+    join(out, 'radio/chain.ogg'),
+    Buffer.concat([link('a.ogg', 22050, 2), link('b.ogg', 44100, 2)]),
+  );
+  // One 0.2 s Vorbis link: served back to back, every link ends before a decoder may rechain.
+  writeFileSync(join(out, 'radio/short.ogg'), link('short.ogg', 22050, 0.2));
 };
 
 // Hand-written fixtures (Subsonic and Radio Browser JSON) live next to the generated files.

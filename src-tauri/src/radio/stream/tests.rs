@@ -1,3 +1,4 @@
+use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -70,6 +71,26 @@ fn tone(server: &FakeRadio, path: &str, metaint: Option<usize>, titles: &[&str])
 
 fn ogg(server: &FakeRadio, path: &str) -> String {
     server.station(path, Body::Ogg, None, &[]);
+    server.url(path)
+}
+
+/// A station that sends a fixture file back to back.
+fn looped(
+    server: &FakeRadio,
+    path: &str,
+    name: &'static str,
+    content_type: &'static str,
+) -> String {
+    server.station(
+        path,
+        Body::Fixture {
+            name,
+            content_type,
+            endless: true,
+        },
+        None,
+        &[],
+    );
     server.url(path)
 }
 
@@ -339,50 +360,181 @@ fn mp3_joint_continues_without_a_reopen() {
     );
 }
 
+/// `radio/chain.ogg`: a 2 s link at 22.05 kHz, then a 2 s link at 44.1 kHz, back to back.
+fn chain(server: &FakeRadio, path: &str) -> String {
+    looped(server, path, "radio/chain.ogg", "application/ogg")
+}
+
+/// `radio/short.ogg`: 0.2 s links, each too short to follow, back to back.
+fn short_links(server: &FakeRadio, path: &str) -> String {
+    looped(server, path, "radio/short.ogg", "application/ogg")
+}
+
+const CHAIN_FIRST: StreamSpec = StreamSpec {
+    sample_rate: 22_050,
+    channels: 2,
+};
+
 #[test]
-fn decoder_end_reopens_while_the_stream_lives() {
+fn ogg_chains_continue_without_a_reconnect() {
     let server = FakeRadio::start();
-    // The fake Ogg station chains a fresh 1 s Ogg stream after every loop: the decoder stops at
-    // each chain boundary.
-    let mut source = open(station(ogg(&server, "/ogg"), Some("OGG"), false));
-    let spec = source.spec();
-    let heard = listen(&mut source, 2.5, Duration::from_secs(20));
-    assert_heard(&heard, spec, 2.5);
-    let reopens = source.reopens();
-    assert!(reopens >= 2, "{reopens} reopens");
-    assert_eq!(requests_for(&server, "/ogg"), 1 + reopens);
-    let silence = silent_frames(&heard.samples, spec.channels as usize);
-    let allowed = reopens * MAX_SILENCE_MS as usize * spec.sample_rate as usize / 1000;
-    assert!(
-        silence <= allowed + spec.sample_rate as usize / 20,
-        "{silence} silent frames for {reopens} reopens"
+    let mut source = open(station(chain(&server, "/chain"), Some("OGG"), false));
+    assert_eq!(source.spec(), CHAIN_FIRST);
+    // Two links of 2 s each and into the third.
+    let heard = listen(&mut source, 5.0, Duration::from_secs(20));
+    assert_heard(&heard, CHAIN_FIRST, 5.0);
+    assert_eq!(source.reopens(), 0, "no reconnect");
+    assert_eq!(
+        source.fresh_decoders(),
+        0,
+        "the decoder follows the chain itself"
     );
+    assert_eq!(requests_for(&server, "/chain"), 1);
+    let silence = silent_frames(&heard.samples, 2);
+    assert!(
+        silence <= CHAIN_FIRST.sample_rate as usize / 50,
+        "{silence} silent frames across the chain links"
+    );
+}
+
+#[test]
+fn a_chain_link_at_another_rate_keeps_the_first_spec() {
+    let server = FakeRadio::start();
+    let mut source = open(station(chain(&server, "/chain"), Some("OGG"), false));
+    let heard = listen(&mut source, 3.0, Duration::from_secs(20));
+    assert_heard(&heard, CHAIN_FIRST, 3.0);
+    assert_eq!(
+        source.decoder_spec(),
+        Some(StreamSpec {
+            sample_rate: 44_100,
+            channels: 2
+        }),
+        "1 s into the second link"
+    );
+    assert_eq!(
+        source.spec(),
+        CHAIN_FIRST,
+        "the spec handed out stays fixed"
+    );
+    // Back at the first link's rate: the adapter goes again.
+    let heard = listen(&mut source, 2.0, Duration::from_secs(20));
+    assert_heard(&heard, CHAIN_FIRST, 2.0);
+    assert_eq!(source.decoder_spec(), Some(CHAIN_FIRST));
+    assert_eq!(source.reopens(), 0);
 }
 
 #[test]
 fn reopens_are_capped() {
     let server = FakeRadio::start();
-    let mut source = open(station(ogg(&server, "/ogg"), Some("OGG"), false));
-    let heard = listen(&mut source, 60.0, Duration::from_secs(30));
-    let err = heard.error.expect("the fourth stop goes up");
-    assert!(!is_offline(&err), "{err:#}");
+    let mut source = open(station(short_links(&server, "/short"), Some("OGG"), false));
+    let heard = listen(&mut source, 600.0, Duration::from_secs(30));
+    let err = heard.error.expect("the decoder keeps breaking");
+    assert!(
+        is_offline(&err),
+        "a played station is held, not ended: {err:#}"
+    );
+    assert!(format!("{err:#}").contains(LABEL), "{err:#}");
     assert_eq!(source.reopens(), MAX_REOPENS);
-    assert_eq!(requests_for(&server, "/ogg"), 1 + MAX_REOPENS);
+    assert_eq!(requests_for(&server, "/short"), 1 + MAX_REOPENS);
 }
 
 #[test]
-fn a_reopened_decoder_keeps_the_first_spec() {
+fn a_failed_reconnect_after_play_is_offline() {
     let server = FakeRadio::start();
-    let url = ogg(&server, "/switch");
-    let mut source = open(station(url, Some("OGG"), false));
-    let first = source.spec();
-    assert_eq!(first.channels, 1);
-    // From the next connection on, the station sends 44.1 kHz stereo MP3.
-    tone(&server, "/switch", None, &[]);
-    let heard = listen(&mut source, 2.0, Duration::from_secs(20));
-    assert_heard(&heard, first, 2.0);
-    assert_eq!(source.spec(), first, "the spec stays fixed");
-    assert!(source.reopens() >= 1);
+    let mut live = station(short_links(&server, "/short"), Some("OGG"), false);
+    live.config = config(Duration::from_secs(1));
+    let mut source = open(live);
+    // The connection that is open keeps streaming; every new request gets a 404 (an Icecast
+    // mount while its encoder reconnects).
+    server.set_fault(Fault::Status(404));
+    let started = Instant::now();
+    let heard = listen(&mut source, 600.0, Duration::from_secs(20));
+    let err = heard.error.expect("the station does not come back");
+    assert!(is_offline(&err), "{err:#}");
+    assert!(format!("{err:#}").contains(LABEL), "{err:#}");
+    assert!(started.elapsed() < Duration::from_secs(10));
+    assert_eq!(source.reopens(), 1);
+    assert!(
+        requests_for(&server, "/short") > 2,
+        "the reconnect was retried within the outage"
+    );
+}
+
+#[test]
+fn aac_stations_go_to_ffmpeg() {
+    if !has_ffmpeg("aac_stations_go_to_ffmpeg") {
+        return;
+    }
+    let server = FakeRadio::start();
+    for (path, content_type, codec) in [
+        ("/aacp", "audio/aacp", None),
+        ("/aac", "audio/aac", Some("MP3")),
+        ("/plus", "application/octet-stream", Some("AAC+")),
+    ] {
+        let url = looped(&server, path, "radio/tone.aac", content_type);
+        let mut source = open(station(url, codec, false));
+        assert_eq!(source.decoder_kind(), DecoderKind::FfmpegReader, "{path}");
+        assert_eq!(source.spec(), DEVICE);
+        let heard = listen(&mut source, 1.0, Duration::from_secs(15));
+        assert_heard(&heard, DEVICE, 1.0);
+    }
+}
+
+#[test]
+fn only_stream_failures_skip_the_ffmpeg_fallback() {
+    use crate::audio::symph::ChainFailed;
+    assert!(!reader_failed(&anyhow!("malformed stream: bad frame")));
+    assert!(!reader_failed(&anyhow::Error::new(ChainFailed(
+        "no audio".into()
+    ))));
+    let offline = io::Error::new(io::ErrorKind::ConnectionAborted, Offline("gone".into()));
+    assert!(reader_failed(
+        &anyhow::Error::new(offline).context("reading")
+    ));
+    let failed = io::Error::other(StreamFailure("the station stream was closed".into()));
+    assert!(reader_failed(&anyhow::Error::new(failed)));
+}
+
+#[test]
+fn an_ffmpeg_reader_station_goes_offline() {
+    if !has_ffmpeg("an_ffmpeg_reader_station_goes_offline") {
+        return;
+    }
+    let server = FakeRadio::start();
+    let mut live = station(
+        looped(&server, "/aacp", "radio/tone.aac", "audio/aacp"),
+        None,
+        false,
+    );
+    live.config = config(Duration::from_secs(1));
+    let mut source = open(live);
+    assert_eq!(source.decoder_kind(), DecoderKind::FfmpegReader);
+    assert!(listen(&mut source, 0.3, Duration::from_secs(5))
+        .error
+        .is_none());
+    server.stop();
+    let heard = listen(&mut source, 6_000.0, Duration::from_secs(30));
+    let err = heard.error.expect("the station is gone");
+    assert!(is_offline(&err), "{err:#}");
+    assert_eq!(source.reopens(), 0);
+}
+
+#[test]
+fn an_hls_station_that_goes_away_is_offline() {
+    if !has_ffmpeg("an_hls_station_that_goes_away_is_offline") {
+        return;
+    }
+    let server = FakeRadio::start();
+    let playlist = server.hls_station("/hls");
+    let mut source = open(station(server.url(&playlist), None, true));
+    assert!(listen(&mut source, 0.2, Duration::from_secs(10))
+        .error
+        .is_none());
+    server.set_fault(Fault::Refuse);
+    let heard = listen(&mut source, 6_000.0, Duration::from_secs(60));
+    let err = heard.error.expect("the station is gone");
+    assert!(is_offline(&err), "{err:#}");
+    assert!(!format!("{err:#}").contains("://"), "{err:#}");
 }
 
 #[test]
@@ -468,7 +620,15 @@ fn other_sources_go_to_the_fallback() {
             anyhow::bail!("the fallback opener")
         })
     };
-    let (titles, _) = recorder();
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let (sink, seen) = recorder();
+    let titles: TitleSinks = {
+        let asked = Arc::clone(&asked);
+        Arc::new(move |id: &str| {
+            asked.lock().unwrap().push(id.to_owned());
+            Arc::clone(&sink)
+        })
+    };
     let opener = radio_opener(lookup, config(Duration::from_secs(2)), titles, fallback);
 
     let mut local = known.as_track();
@@ -481,12 +641,23 @@ fn other_sources_go_to_the_fallback() {
     assert_eq!(source.duration_ms(), None);
     assert!(source.read(&mut Vec::new()).unwrap() > 0);
     assert_eq!(requests_for(&server, "/mp3"), 1, "it plays url_resolved");
+    assert_eq!(
+        *asked.lock().unwrap(),
+        vec![known.id.clone()],
+        "the titles go to the sink of the station that sends them"
+    );
+    assert_eq!(seen.lock().unwrap().first(), Some(&None));
 
     let mut unknown = known.as_track();
     unknown.id = station_id("00000000-0000-4000-8000-000000000000").unwrap();
     let err = opener(&unknown, DEVICE).err().expect("an unknown station");
     assert!(!is_offline(&err), "{err:#}");
     assert_eq!(fallen.lock().unwrap().len(), 1, "radio never falls back");
+    assert_eq!(
+        asked.lock().unwrap().len(),
+        1,
+        "no sink for an unknown station"
+    );
 }
 
 #[test]

@@ -94,11 +94,20 @@ struct Process {
     /// How long FFmpeg may stay silent: [`STALL_TIMEOUT`], plus how long its input may wait for
     /// the network (a stream's stall timeout, a live feed's wait, FFmpeg's own `-rw_timeout`).
     stall: Duration,
-    /// The station label of a URL input: its failures are classified (offline or not audio)
-    /// and stderr, which names URLs, never reaches the error text.
-    url_label: Option<String>,
+    /// Set for radio: its failures are classified and name the station.
+    station: Option<Station>,
     finished: bool,
     stopped: bool,
+}
+
+/// A radio input of a [`Process`], with the station label.
+enum Station {
+    /// A URL: a failure is offline or "not sending audio", and stderr (which names URLs) is
+    /// scrubbed.
+    Url(String),
+    /// A live stream through stdin: a failure that is not the stream's own is "not sending
+    /// audio".
+    Pipe(String),
 }
 
 /// The thread copying a stream into FFmpeg's stdin.
@@ -258,6 +267,30 @@ pub(crate) fn ffmpeg_args(input: &Input, rate: u32, start_ms: u64) -> Vec<OsStri
     args
 }
 
+/// Probing a live stream through stdin is capped, so opening stays within the stall budget:
+/// FFmpeg's defaults (5 MB, 5 s) would wait minutes for a slow station.
+const PIPE_PROBE_BYTES: &str = "131072";
+const PIPE_ANALYZE_US: &str = "2000000";
+
+/// FFmpeg's arguments for a live stream through stdin.
+pub(crate) fn pipe_args(rate: u32) -> Vec<OsString> {
+    let mut args = base_args();
+    args.extend(
+        [
+            "-probesize",
+            PIPE_PROBE_BYTES,
+            "-analyzeduration",
+            PIPE_ANALYZE_US,
+            "-i",
+            "pipe:0",
+        ]
+        .into_iter()
+        .map(OsString::from),
+    );
+    push_output_args(&mut args, rate);
+    args
+}
+
 /// FFmpeg's arguments for a URL it fetches itself (an HLS station): Prism's User-Agent, web
 /// protocols only, FFmpeg's own reconnect, and a 10 s network read timeout.
 pub(crate) fn url_args(url: &str, rate: u32) -> Vec<OsString> {
@@ -325,7 +358,16 @@ pub(crate) fn scrub_urls(text: &str) -> String {
 /// away, otherwise "not sending audio". Never names the URL.
 pub(crate) fn url_failure(label: &str, stderr: &str) -> anyhow::Error {
     let lower = stderr.to_ascii_lowercase();
-    let offline = OFFLINE_SIGNS.iter().any(|sign| lower.contains(sign));
+    station_failure(
+        label,
+        stderr,
+        OFFLINE_SIGNS.iter().any(|sign| lower.contains(sign)),
+    )
+}
+
+/// A station FFmpeg could not play: offline, or "not sending audio", with FFmpeg's message
+/// (URLs scrubbed) for the logs.
+fn station_failure(label: &str, stderr: &str, offline: bool) -> anyhow::Error {
     let detail: String = scrub_urls(stderr).chars().take(300).collect();
     let error = if offline {
         anyhow::Error::new(Offline(OFFLINE_TEXT.into()))
@@ -404,7 +446,7 @@ impl Process {
     /// Starts FFmpeg on `origin`, from `start_ms` on.
     fn spawn(origin: &mut Origin, rate: u32, start_ms: u64) -> anyhow::Result<Self> {
         let program = tools::ffmpeg_path().context("ffmpeg was not found")?;
-        let (args, feed, stall, url_label): (Vec<OsString>, Option<StdinFeed>, Duration, _) =
+        let (args, feed, stall, station): (Vec<OsString>, Option<StdinFeed>, Duration, _) =
             match origin {
                 Origin::Input { input, feed } => {
                     let args = ffmpeg_args(input, rate, start_ms);
@@ -421,23 +463,20 @@ impl Process {
                         Input::Live(_) => bail!(LIVE_NEEDS_THE_RADIO_OPENER),
                     }
                 }
-                Origin::Live { feed, .. } => {
+                Origin::Live { feed, label } => {
                     let live = feed.take().context("a live stream is read only once")?;
-                    let mut args = base_args();
-                    args.extend(["-i", "pipe:0"].into_iter().map(OsString::from));
-                    push_output_args(&mut args, rate);
                     (
-                        args,
+                        pipe_args(rate),
                         Some((live.reader, live.cancel)),
                         STALL_TIMEOUT + live.wait,
-                        None,
+                        Some(Station::Pipe(label.clone())),
                     )
                 }
                 Origin::Url { url, label } => (
                     url_args(url, rate),
                     None,
                     STALL_TIMEOUT + URL_RW_TIMEOUT,
-                    Some(label.clone()),
+                    Some(Station::Url(label.clone())),
                 ),
             };
         let mut command = tools::command(&program);
@@ -479,7 +518,7 @@ impl Process {
             stderr: Some(stderr),
             feeder,
             stall,
-            url_label,
+            station,
             finished: false,
             stopped: false,
         })
@@ -509,12 +548,13 @@ impl Process {
                 if let Some(err) = self.feed_error() {
                     return Err(err);
                 }
-                if let Some(label) = &self.url_label {
+                match &self.station {
                     // FFmpeg's own reconnect gave up quietly: the station is away.
-                    return Err(anyhow::Error::new(Offline(OFFLINE_TEXT.into()))
-                        .context(format!("streaming {label}")));
+                    Some(Station::Url(label)) => Err(station_failure(label, "", true)),
+                    // The stream kept coming, FFmpeg made nothing of it.
+                    Some(Station::Pipe(label)) => Err(station_failure(label, "", false)),
+                    None => bail!("ffmpeg produced no audio for {} s", self.stall.as_secs()),
                 }
-                bail!("ffmpeg produced no audio for {} s", self.stall.as_secs())
             }
             Err(RecvTimeoutError::Disconnected) => {
                 self.finished = true;
@@ -533,10 +573,11 @@ impl Process {
                     .take()
                     .and_then(|reader| reader.join().ok())
                     .unwrap_or_default();
-                if let Some(label) = &self.url_label {
-                    return Err(url_failure(label, stderr.trim()));
+                match &self.station {
+                    Some(Station::Url(label)) => Err(url_failure(label, stderr.trim())),
+                    Some(Station::Pipe(label)) => Err(station_failure(label, stderr.trim(), false)),
+                    None => bail!("ffmpeg failed ({status}): {}", stderr.trim()),
                 }
-                bail!("ffmpeg failed ({status}): {}", stderr.trim())
             }
         }
     }
@@ -764,6 +805,30 @@ mod tests {
             assert!(!text.contains("://"), "{text}");
             assert!(!text.contains("live.m3u8"), "{text}");
         }
+    }
+
+    #[test]
+    fn a_live_pipe_caps_its_probe_and_fails_as_not_audio() {
+        let joined = pipe_args(48_000)
+            .into_iter()
+            .map(|arg| arg.into_string().unwrap())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            joined.contains("-probesize 131072 -analyzeduration 2000000 -i pipe:0"),
+            "{joined}"
+        );
+        let err = station_failure(
+            "Demo Radio 1",
+            "Invalid data found when processing input",
+            false,
+        );
+        assert!(!is_offline(&err), "{err:#}");
+        assert!(format!("{err:#}").contains(NOT_AUDIO), "{err:#}");
+        assert!(
+            format!("{err:#}").contains("streaming Demo Radio 1"),
+            "{err:#}"
+        );
     }
 
     #[test]
