@@ -11,7 +11,9 @@ use anyhow::{anyhow, bail, Context};
 use crossbeam_channel::{Receiver, RecvTimeoutError};
 
 use super::http::{Canceller, HttpStream};
-use super::source::{describe, AudioSource, HttpInput, Input, StreamSpec};
+use super::source::{
+    describe, AudioSource, HttpInput, Input, StreamSpec, LIVE_NEEDS_THE_RADIO_OPENER,
+};
 use crate::tools;
 
 /// How long FFmpeg may stay silent before it counts as hung.
@@ -70,6 +72,7 @@ impl FfmpegSource {
         match input {
             Input::File(_) => Self::start(input.clone(), None, target),
             Input::Http(http) => Self::open_stream(HttpStream::open(http)?, http, target),
+            Input::Live(_) => bail!(LIVE_NEEDS_THE_RADIO_OPENER),
         }
     }
 
@@ -136,7 +139,7 @@ pub(crate) fn ffmpeg_args(input: &Input, rate: u32, start_ms: u64) -> Vec<OsStri
             args.push("-i".into());
             args.push(tools::file_input(path));
         }
-        Input::Http(_) => {
+        Input::Http(_) | Input::Live(_) => {
             args.push("-i".into());
             args.push("pipe:0".into());
             args.extend(seek.into_iter().flatten());
@@ -219,6 +222,7 @@ impl Process {
         let feed = match (input, feed) {
             (Input::File(_), _) => None,
             (Input::Http(http), feed) => Some((feed.context("a stream needs its buffer")?, http)),
+            (Input::Live(_), _) => bail!(LIVE_NEEDS_THE_RADIO_OPENER),
         };
         let mut command = tools::command(&program);
         command

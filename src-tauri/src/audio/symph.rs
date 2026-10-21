@@ -17,7 +17,9 @@ use symphonia::core::units::{Time, TimeBase, Timestamp};
 use symphonia::core::io::MediaSource;
 
 use super::http::{is_stream_failure, HttpStream};
-use super::source::{describe, guarded, AudioSource, DecoderPanic, Input, StreamSpec};
+use super::source::{
+    describe, guarded, AudioSource, DecoderPanic, Input, StreamSpec, LIVE_NEEDS_THE_RADIO_OPENER,
+};
 
 /// symphonia's error, with an IO error passed on as itself: symphonia's `Error` names its IO
 /// error only through the deprecated `cause`, so `is_offline` would not find an `Offline` in it.
@@ -89,6 +91,7 @@ impl SymphoniaSource {
                     &describe(input),
                 )
             }
+            Input::Live(_) => bail!(LIVE_NEEDS_THE_RADIO_OPENER),
         }
     }
 
