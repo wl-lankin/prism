@@ -65,6 +65,8 @@ pub struct AppState {
     pub radio: Arc<RadioService>,
     /// What YouTube Music's page reports, and the commands into it.
     pub ytm: Arc<YtmService>,
+    /// The YouTube Music view in the main window and the Google sign-in window.
+    pub ytm_view: Arc<ytm::view::YtmView>,
     /// Which player the transport targets; keeps only one of them playing.
     pub transport: Arc<Transport>,
 }
@@ -390,8 +392,13 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
             }
         })
     });
+    let ytm_view = Arc::new(ytm::view::YtmView::new(
+        Arc::new(ytm::view::TauriHost::new(handle.clone(), data_dir.clone())),
+        Arc::clone(&ytm),
+    ));
     app.manage(AppState {
         ytm,
+        ytm_view,
         transport,
         navidrome,
         radio,
@@ -569,6 +576,9 @@ pub fn run() {
             tauri::RunEvent::ExitRequested { .. } => {
                 if let Some(state) = app.try_state::<shell::ShellState>() {
                     state.set_quitting();
+                }
+                if let Some(state) = app.try_state::<AppState>() {
+                    state.ytm_view.destroy();
                 }
             }
             tauri::RunEvent::Exit => {

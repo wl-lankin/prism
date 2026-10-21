@@ -835,20 +835,12 @@ pub fn tray_set_labels(app: AppHandle, labels: TrayLabels) {
     shell::tray::set_labels(&app, &labels);
 }
 
-// YouTube Music. The view commands are placeholders until the view (Task 5) exists; they
-// are here so the handler list and the command manifest are complete.
+// YouTube Music.
 
-const YTM_NOT_YET: &str = "not yet";
 const YTM_REFUSED: &str = "refused";
 
 /// Where the YouTube Music view goes in the main window, in logical pixels.
-#[derive(Debug, Clone, Copy, Deserialize)]
-pub struct YtmRect {
-    pub x: f64,
-    pub y: f64,
-    pub width: f64,
-    pub height: f64,
-}
+pub use crate::ytm::view::Rect as YtmRect;
 
 /// The one command the remote YouTube Music page may call. Only the `ytm` view on
 /// music.youtube.com is heard; the answer never says more than "refused".
@@ -863,16 +855,17 @@ pub fn ytm_report(webview: tauri::Webview, report: serde_json::Value) -> Result<
     Ok(())
 }
 
+/// Shows the view over the page's placeholder (created on the first call). Sync, so a show
+/// and a hide run in the order the page sent them.
 #[tauri::command]
-pub fn ytm_show(app: AppHandle, rect: YtmRect) -> Result<(), String> {
-    let _ = (app, rect);
-    Err(YTM_NOT_YET.to_string())
+pub fn ytm_show(state: State<'_, AppState>, rect: YtmRect) -> Result<(), String> {
+    state.ytm_view.show(rect)
 }
 
+/// Hides the view; YouTube Music keeps playing.
 #[tauri::command]
-pub fn ytm_hide(app: AppHandle) -> Result<(), String> {
-    let _ = app;
-    Err(YTM_NOT_YET.to_string())
+pub fn ytm_hide(state: State<'_, AppState>) -> Result<(), String> {
+    state.ytm_view.hide()
 }
 
 /// A command for the YouTube Music page itself, whichever player is active:
@@ -895,16 +888,20 @@ pub fn ytm_state(state: State<'_, AppState>) -> Result<YtmState, String> {
     Ok(state.ytm.state())
 }
 
+/// Opens Google's sign-in in its own window, or brings it to the front.
 #[tauri::command]
-pub fn ytm_sign_in(app: AppHandle) -> Result<(), String> {
-    let _ = app;
-    Err(YTM_NOT_YET.to_string())
+pub fn ytm_sign_in(state: State<'_, AppState>) -> Result<(), String> {
+    state.ytm_view.sign_in();
+    Ok(())
 }
 
+/// Forgets the Google session and the view.
 #[tauri::command]
-pub fn ytm_sign_out(app: AppHandle) -> Result<(), String> {
-    let _ = app;
-    Err(YTM_NOT_YET.to_string())
+pub async fn ytm_sign_out(app: AppHandle) -> Result<(), String> {
+    let view = Arc::clone(&app_state(&app)?.ytm_view);
+    tauri::async_runtime::spawn_blocking(move || view.sign_out())
+        .await
+        .map_err(|err| err.to_string())
 }
 
 #[cfg(test)]

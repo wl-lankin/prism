@@ -99,6 +99,10 @@ pub fn close_main(window: &tauri::Window) {
         }
         None => CloseAction::Hide,
     };
+    // YouTube Music goes with the window and keeps playing.
+    if let Some(state) = app.try_state::<AppState>() {
+        state.ytm_view.on_main_close();
+    }
     if let Err(err) = window.hide() {
         eprintln!("closing the main window failed: {err}");
     }
@@ -165,6 +169,9 @@ pub fn main_show(app: &AppHandle) -> Result<(), String> {
         .ok_or("the main window is gone")?;
     let fail = |err: tauri::Error| err.to_string();
     window.show().map_err(fail)?;
+    if let Some(state) = app.try_state::<AppState>() {
+        state.ytm_view.on_main_show();
+    }
     if window.is_minimized().unwrap_or(false) {
         window.unminimize().map_err(fail)?;
     }
