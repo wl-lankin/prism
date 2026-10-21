@@ -747,9 +747,9 @@ mod tests {
         assert!(station.hls && station.last_check_ok);
         assert_eq!(station.distance_km, Some(2.5));
 
-        let sparse = raw(&format!(
-            r#"{{"stationuuid":"00000000-0000-4000-8000-000000000001","name":null,"url":"http://a.example.org/x","bitrate":null}}"#
-        ));
+        let sparse = raw(
+            r#"{"stationuuid":"00000000-0000-4000-8000-000000000001","name":null,"url":"http://a.example.org/x","bitrate":null}"#,
+        );
         assert!(sparse.into_station().is_none());
         assert!(raw(GOOD).into_station().is_some());
     }
