@@ -9,9 +9,30 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+/// Panics unless `url` points at this machine: a test that would leave it fails loudly.
+#[track_caller]
+pub(crate) fn assert_loopback(url: &str) {
+    let host = reqwest::Url::parse(url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned));
+    let ip = host
+        .as_deref()
+        .map(|host| host.trim_start_matches('[').trim_end_matches(']'))
+        .and_then(|host| host.parse::<std::net::IpAddr>().ok());
+    let local = host.as_deref() == Some("localhost")
+        || ip.is_some_and(|ip| match ip {
+            std::net::IpAddr::V4(v4) => v4.is_loopback(),
+            std::net::IpAddr::V6(v6) => {
+                v6.is_loopback() || v6.to_ipv4_mapped().is_some_and(|v4| v4.is_loopback())
+            }
+        });
+    assert!(local, "a test request would leave the machine: {url}");
+}
+
 fn reason(status: u16) -> &'static str {
     match status {
         200 => "OK",
+        302 => "Found",
         404 => "Not Found",
         500 => "Internal Server Error",
         503 => "Service Unavailable",
@@ -774,4 +795,152 @@ fn serve_for_ui() {
     println!("station streams point at {stream_base}/stream/<n>");
     println!("serving for {minutes} minutes");
     std::thread::sleep(Duration::from_secs(minutes * 60));
+}
+
+/// One answer of [`FakeWeb`].
+#[derive(Debug, Clone)]
+pub(crate) struct Page {
+    status: u16,
+    content_type: String,
+    body: Vec<u8>,
+    sized: bool,
+    location: Option<String>,
+}
+
+impl Page {
+    pub fn ok(content_type: &str, body: impl Into<Vec<u8>>) -> Page {
+        Page {
+            status: 200,
+            content_type: content_type.to_owned(),
+            body: body.into(),
+            sized: true,
+            location: None,
+        }
+    }
+
+    pub fn status(status: u16) -> Page {
+        Page {
+            status,
+            ..Page::ok("text/plain", "")
+        }
+    }
+
+    /// A 302 to `location` (a path or a full URL).
+    pub fn redirect(location: &str) -> Page {
+        Page {
+            location: Some(location.to_owned()),
+            ..Page::status(302)
+        }
+    }
+
+    /// Sent without a `Content-Length`: the body ends when the connection closes.
+    pub fn without_length(mut self) -> Page {
+        self.sized = false;
+        self
+    }
+}
+
+struct WebState {
+    pages: HashMap<String, Page>,
+    hits: HashMap<String, usize>,
+}
+
+fn write_page(stream: &mut TcpStream, page: &Page) {
+    let mut head = format!(
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nConnection: close\r\n",
+        page.status,
+        reason(page.status),
+        page.content_type
+    );
+    if page.sized {
+        head.push_str(&format!("Content-Length: {}\r\n", page.body.len()));
+    }
+    if let Some(location) = &page.location {
+        head.push_str(&format!("Location: {location}\r\n"));
+    }
+    head.push_str("\r\n");
+    let _ = stream.write_all(head.as_bytes());
+    for chunk in page.body.chunks(64 * 1024) {
+        if stream.write_all(chunk).is_err() {
+            break;
+        }
+    }
+}
+
+/// A fake web host for favicons and station homepages: fixed pages by path (404 otherwise),
+/// with a hit count per path. Stops when dropped.
+pub(crate) struct FakeWeb {
+    port: u16,
+    state: Arc<Mutex<WebState>>,
+    stop: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl FakeWeb {
+    pub fn start() -> FakeWeb {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("binding the fake web host");
+        let port = listener.local_addr().expect("fake web address").port();
+        listener
+            .set_nonblocking(true)
+            .expect("non-blocking fake web host");
+        let state = Arc::new(Mutex::new(WebState {
+            pages: HashMap::new(),
+            hits: HashMap::new(),
+        }));
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread = {
+            let state = Arc::clone(&state);
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::SeqCst) {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            let state = Arc::clone(&state);
+                            std::thread::spawn(move || {
+                                let Some(path) = read_path(&mut stream) else {
+                                    return;
+                                };
+                                let page = {
+                                    let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
+                                    *state.hits.entry(path.clone()).or_default() += 1;
+                                    state.pages.get(&path).cloned()
+                                };
+                                write_page(&mut stream, &page.unwrap_or_else(|| Page::status(404)));
+                            });
+                        }
+                        Err(_) => std::thread::sleep(Duration::from_millis(5)),
+                    }
+                }
+            })
+        };
+        FakeWeb {
+            port,
+            state,
+            stop,
+            thread: Some(thread),
+        }
+    }
+
+    pub fn url(&self, path: &str) -> String {
+        format!("http://127.0.0.1:{}{path}", self.port)
+    }
+
+    pub fn set(&self, path: &str, page: Page) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.pages.insert(path.to_owned(), page);
+    }
+
+    pub fn hits(&self, path: &str) -> usize {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.hits.get(path).copied().unwrap_or(0)
+    }
+}
+
+impl Drop for FakeWeb {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
 }

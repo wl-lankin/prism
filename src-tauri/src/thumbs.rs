@@ -1,9 +1,10 @@
 //! Cover thumbnails: resizing, the on-disk cache, and the gate that keeps a burst of cover
 //! requests from running dozens of decodes (or server fetches) at once.
 //!
-//! Local covers come from the cover store. Navidrome covers (`nd-<coverArt>`) come from the
-//! server through [`RemoteCovers`], fetched at the size asked for, and are then flattened,
-//! bounded and encoded like a local cover into the same cache.
+//! Local covers come from the cover store. Remote covers come through one [`RemoteCovers`]
+//! per id prefix: Navidrome covers (`nd-<coverArt>`) from the server, station logos
+//! (`rb-<hash>`) from the station's favicon or homepage. They are fetched at the size asked
+//! for, then flattened, bounded and encoded like a local cover into the same cache.
 
 use std::collections::HashMap;
 use std::io::Cursor;
@@ -18,12 +19,13 @@ use sha1::{Digest, Sha1};
 
 use crate::library::covers::CoverStore;
 use crate::library::model::{navidrome_cover_raw, NAVIDROME_COVER_PREFIX};
+use crate::radio::model::{radio_cover_raw, RADIO_COVER_PREFIX};
 
 /// The sizes covers are served at.
 pub const SIZES: [u32; 3] = [96, 300, 600];
 const JPEG_QUALITY: u8 = 85;
 
-/// At most this many server cover fetches run at once.
+/// At most this many fetches of one remote run at once, unless it sets its own limit.
 pub const REMOTE_FETCH_LIMIT: usize = 6;
 
 /// Background for transparent covers: the `--surface` token.
@@ -44,11 +46,21 @@ pub enum ResizeError {
     Unreachable,
 }
 
-/// Where server covers come from.
+/// Where the covers of one id prefix come from.
 pub trait RemoteCovers: Send + Sync {
-    /// The image bytes of the server cover `cover_art` (the id without `nd-`), asked for at
-    /// `size` px.
-    fn fetch(&self, cover_art: &str, size: u32) -> Result<Vec<u8>, ResizeError>;
+    /// The image bytes of the cover `raw` (the id without its prefix), asked for at `size` px.
+    fn fetch(&self, raw: &str, size: u32) -> Result<Vec<u8>, ResizeError>;
+
+    /// How many fetches of this remote may run at once.
+    fn fetch_limit(&self) -> usize {
+        REMOTE_FETCH_LIMIT
+    }
+}
+
+/// A remote and the permits its fetches share.
+struct RemoteSlot {
+    remote: Arc<dyn RemoteCovers>,
+    fetches: Arc<Semaphore>,
 }
 
 /// One resize in flight; later requests for the same cover and size wait on it.
@@ -108,12 +120,11 @@ impl Semaphore {
 pub struct ResizeGate {
     inflight: Mutex<HashMap<(String, u32), Arc<InFlight>>>,
     resizes: Semaphore,
-    fetches: Semaphore,
-    remote: Mutex<Option<Arc<dyn RemoteCovers>>>,
-    /// Bumped by [`ResizeGate::purge_remote`]. A server cover is written only while the
-    /// generation it was fetched in is still current; the check and the write happen under
-    /// this lock, so nothing of an old server lands after a purge.
-    remote_generation: Mutex<u64>,
+    remotes: Mutex<HashMap<&'static str, RemoteSlot>>,
+    /// Bumped per prefix by [`ResizeGate::purge_remote`]. A remote cover is written only while
+    /// the generation of its prefix it was fetched in is still current; the check and the
+    /// write happen under this lock, so nothing of an old server lands after a purge.
+    remote_generation: Mutex<HashMap<&'static str, u64>>,
 }
 
 /// Locks, ignoring poisoning: the guarded data stays consistent across a panic.
@@ -151,7 +162,8 @@ impl Drop for Flight<'_> {
 /// Where the original of a cover comes from.
 enum Origin<'a> {
     Local(PathBuf),
-    Remote(&'a str),
+    /// The prefix and the id without it.
+    Remote(&'static str, &'a str),
 }
 
 impl ResizeGate {
@@ -159,9 +171,8 @@ impl ResizeGate {
         Self {
             inflight: Mutex::new(HashMap::new()),
             resizes: Semaphore::new(limit),
-            fetches: Semaphore::new(REMOTE_FETCH_LIMIT),
-            remote: Mutex::new(None),
-            remote_generation: Mutex::new(0),
+            remotes: Mutex::new(HashMap::new()),
+            remote_generation: Mutex::new(HashMap::new()),
         }
     }
 
@@ -173,26 +184,25 @@ impl ResizeGate {
             .min(4)
     }
 
-    /// Where `nd-` covers are fetched from. Until this is set they are `Unreachable`.
-    pub fn set_remote(&self, remote: Arc<dyn RemoteCovers>) {
-        *lock(&self.remote) = Some(remote);
+    /// Where the covers of `prefix` (`nd-` or `rb-`) are fetched from. Until this is set they
+    /// are `Unreachable`.
+    pub fn set_remote_for(&self, prefix: &'static str, remote: Arc<dyn RemoteCovers>) {
+        let fetches = Arc::new(Semaphore::new(remote.fetch_limit()));
+        lock(&self.remotes).insert(prefix, RemoteSlot { remote, fetches });
     }
 
-    /// Forgets every cached server cover: deletes the `nd-` files under every size folder of
-    /// `cache`, and a fetch still running writes nothing. Called after a server switch or a
-    /// disconnect, so covers of the old server never show for the new one.
-    pub fn purge_remote(&self, cache: &Path) {
-        *lock(&self.remote_generation) += 1;
+    /// Forgets every cached cover of `prefix`: deletes its files under every size folder of
+    /// `cache`, and a fetch of that prefix still running writes nothing. Called after a server
+    /// switch or a disconnect, so covers of the old server never show for the new one; the
+    /// covers of other prefixes stay.
+    pub fn purge_remote(&self, cache: &Path, prefix: &'static str) {
+        *lock(&self.remote_generation).entry(prefix).or_insert(0) += 1;
         for size in SIZES {
             let Ok(entries) = std::fs::read_dir(cache.join(size.to_string())) else {
                 continue;
             };
             for entry in entries.flatten() {
-                if !entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with(NAVIDROME_COVER_PREFIX)
-                {
+                if !entry.file_name().to_string_lossy().starts_with(prefix) {
                     continue;
                 }
                 if let Err(err) = std::fs::remove_file(entry.path()) {
@@ -225,11 +235,17 @@ impl ResizeGate {
         if !SIZES.contains(&size) {
             return Err(ResizeError::Unknown);
         }
-        // Server cover ids are checked against `[A-Za-z0-9_.-]`; everything else must be a
-        // hex id of the store.
-        let origin = match navidrome_cover_raw(id) {
-            Some(raw) => Origin::Remote(raw),
-            None => Origin::Local(store.path(id).ok_or(ResizeError::Unknown)?),
+        // Server cover ids are checked against `[A-Za-z0-9_.-]`, logo ids are 20 hex digits;
+        // everything else must be a hex id of the store.
+        let origin = if let Some(raw) = navidrome_cover_raw(id) {
+            Origin::Remote(NAVIDROME_COVER_PREFIX, raw)
+        } else if id.starts_with(RADIO_COVER_PREFIX) {
+            Origin::Remote(
+                RADIO_COVER_PREFIX,
+                radio_cover_raw(id).ok_or(ResizeError::Unknown)?,
+            )
+        } else {
+            Origin::Local(store.path(id).ok_or(ResizeError::Unknown)?)
         };
         let cached = cache.join(size.to_string()).join(format!("{id}.jpg"));
         if cached.is_file() {
@@ -268,7 +284,7 @@ impl ResizeGate {
         };
         let outcome = match origin {
             Origin::Local(original) => self.run(&original, &cached, size, &resize),
-            Origin::Remote(raw) => self.run_remote(raw, &cached, size),
+            Origin::Remote(prefix, raw) => self.run_remote(prefix, raw, &cached, size),
         };
         guard.outcome = Some(outcome.clone());
         drop(guard);
@@ -294,15 +310,25 @@ impl ResizeGate {
         Ok(cached.to_path_buf())
     }
 
-    /// Fetches a server cover (holding a fetch permit, not a resize permit, while it waits on
-    /// the network), then encodes it like a local cover. Failures write nothing.
-    fn run_remote(&self, raw: &str, cached: &Path, size: u32) -> Result<PathBuf, ResizeError> {
-        let Some(remote) = lock(&self.remote).clone() else {
+    /// Fetches a remote cover (holding a fetch permit of its remote, not a resize permit, while
+    /// it waits on the network), then encodes it like a local cover. Failures write nothing.
+    fn run_remote(
+        &self,
+        prefix: &'static str,
+        raw: &str,
+        cached: &Path,
+        size: u32,
+    ) -> Result<PathBuf, ResizeError> {
+        let Some((remote, fetches)) = lock(&self.remotes)
+            .get(prefix)
+            .map(|slot| (Arc::clone(&slot.remote), Arc::clone(&slot.fetches)))
+        else {
             return Err(ResizeError::Unreachable);
         };
-        let generation = *lock(&self.remote_generation);
+        let generation_of = |map: &HashMap<&'static str, u64>| map.get(prefix).copied();
+        let generation = generation_of(&lock(&self.remote_generation));
         let bytes = {
-            let _fetch = self.fetches.acquire();
+            let _fetch = fetches.acquire();
             if cached.is_file() {
                 return Ok(cached.to_path_buf());
             }
@@ -315,7 +341,7 @@ impl ResizeGate {
                 .unwrap_or_else(|_| Err(ResizeError::Internal("resize panicked".into())))?
         };
         let current = lock(&self.remote_generation);
-        if *current != generation {
+        if generation_of(&current) != generation {
             // The server was switched while this fetch ran.
             return Err(ResizeError::Unreachable);
         }
@@ -328,7 +354,7 @@ impl ResizeGate {
 /// Neutral cover for tracks without one: the app icon on the surface color.
 /// Cached at `<cache>/600/_placeholder-<8 hex>.jpg`, where the hex is a short hash of the
 /// icon bytes so a new icon is not hidden by an old cache file; the leading underscore
-/// cannot collide with a cover id (those are hex, or start with `nd-`).
+/// cannot collide with a cover id (those are hex, or start with `nd-` or `rb-`).
 pub fn placeholder_cover(cache: &Path) -> Option<PathBuf> {
     let hash: String = Sha1::digest(ICON)
         .iter()
@@ -478,8 +504,123 @@ mod tests {
 
     fn remote_gate(limit: usize, remote: &Arc<FakeRemote>) -> ResizeGate {
         let gate = ResizeGate::new(limit);
-        gate.set_remote(Arc::clone(remote) as Arc<dyn RemoteCovers>);
+        gate.set_remote_for(
+            NAVIDROME_COVER_PREFIX,
+            Arc::clone(remote) as Arc<dyn RemoteCovers>,
+        );
         gate
+    }
+
+    const FAVICON: &str = "rb-0123456789abcdef0123";
+
+    #[test]
+    fn navidrome_purge_keeps_favicons() {
+        let (root, store) = setup();
+        let server = FakeRemote::new(Duration::ZERO);
+        let favicons = FakeRemote::new(Duration::ZERO);
+        let gate = remote_gate(2, &server);
+        gate.set_remote_for(
+            RADIO_COVER_PREFIX,
+            Arc::clone(&favicons) as Arc<dyn RemoteCovers>,
+        );
+        let server_file = gate.get(&store, root.path(), "nd-al-1", 300).unwrap();
+        let favicon_file = gate.get(&store, root.path(), FAVICON, 300).unwrap();
+        assert_eq!(
+            favicon_file,
+            root.path().join("300").join(format!("{FAVICON}.jpg"))
+        );
+        // Each remote got its own request, by the id without the prefix.
+        assert_eq!(server.calls(), vec![("al-1".to_string(), 300)]);
+        assert_eq!(
+            favicons.calls(),
+            vec![("0123456789abcdef0123".to_string(), 300)]
+        );
+
+        gate.purge_remote(root.path(), NAVIDROME_COVER_PREFIX);
+        assert!(!server_file.exists());
+        assert!(favicon_file.is_file(), "favicons stay");
+        gate.purge_remote(root.path(), RADIO_COVER_PREFIX);
+        assert!(!favicon_file.exists());
+    }
+
+    #[test]
+    fn a_purge_of_one_prefix_lets_the_other_write() {
+        let (root, store) = setup();
+        let server = FakeRemote::new(Duration::ZERO);
+        let favicons = FakeRemote::new(Duration::ZERO);
+        favicons.hold.store(true, Ordering::SeqCst);
+        let gate = remote_gate(2, &server);
+        gate.set_remote_for(
+            RADIO_COVER_PREFIX,
+            Arc::clone(&favicons) as Arc<dyn RemoteCovers>,
+        );
+        let result = std::thread::scope(|scope| {
+            let request = scope.spawn(|| gate.get(&store, root.path(), FAVICON, 96));
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while favicons.calls().is_empty() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            gate.purge_remote(root.path(), NAVIDROME_COVER_PREFIX);
+            favicons.hold.store(false, Ordering::SeqCst);
+            request.join().unwrap()
+        });
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[test]
+    fn bad_favicon_ids_never_reach_a_remote() {
+        let (root, store) = setup();
+        let favicons = FakeRemote::new(Duration::ZERO);
+        let gate = ResizeGate::new(2);
+        gate.set_remote_for(
+            RADIO_COVER_PREFIX,
+            Arc::clone(&favicons) as Arc<dyn RemoteCovers>,
+        );
+        for id in ["rb-../x", "rb-0123", "rb-0123456789ABCDEF0123", "rb-"] {
+            assert_eq!(
+                gate.get(&store, root.path(), id, 96),
+                Err(ResizeError::Unknown),
+                "{id}"
+            );
+        }
+        assert!(favicons.calls().is_empty());
+        // Without a favicon remote, a good id is unreachable, not unknown.
+        let bare = ResizeGate::new(2);
+        assert_eq!(
+            bare.get(&store, root.path(), FAVICON, 96),
+            Err(ResizeError::Unreachable)
+        );
+    }
+
+    #[test]
+    fn a_remote_sets_its_own_fetch_limit() {
+        struct Limited(Arc<FakeRemote>);
+        impl RemoteCovers for Limited {
+            fn fetch(&self, raw: &str, size: u32) -> Result<Vec<u8>, ResizeError> {
+                self.0.fetch(raw, size)
+            }
+            fn fetch_limit(&self) -> usize {
+                2
+            }
+        }
+        let (root, store) = setup();
+        let remote = FakeRemote::new(Duration::from_millis(40));
+        let gate = ResizeGate::new(4);
+        gate.set_remote_for(RADIO_COVER_PREFIX, Arc::new(Limited(Arc::clone(&remote))));
+        std::thread::scope(|scope| {
+            for n in 0..8 {
+                let gate = &gate;
+                let store = &store;
+                let root = root.path();
+                scope.spawn(move || {
+                    let id = format!("rb-{n:020x}");
+                    gate.get(store, root, &id, 96).unwrap();
+                });
+            }
+        });
+        let peak = remote.peak.load(Ordering::SeqCst);
+        assert!(peak <= 2, "peak {peak}");
+        assert_eq!(remote.calls().len(), 8);
     }
 
     #[test]
@@ -739,12 +880,12 @@ mod tests {
         let local_file = gate.get(&store, root.path(), &local, 300).unwrap();
         let placeholder = placeholder_cover(root.path()).unwrap();
 
-        gate.purge_remote(root.path());
+        gate.purge_remote(root.path(), NAVIDROME_COVER_PREFIX);
         assert!(server_files.iter().all(|file| !file.exists()));
         assert!(local_file.is_file());
         assert!(placeholder.is_file());
         // A purge of an empty cache is fine.
-        gate.purge_remote(&root.path().join("missing"));
+        gate.purge_remote(&root.path().join("missing"), NAVIDROME_COVER_PREFIX);
     }
 
     #[test]
@@ -759,7 +900,7 @@ mod tests {
             while remote.calls().is_empty() && Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(5));
             }
-            gate.purge_remote(root.path());
+            gate.purge_remote(root.path(), NAVIDROME_COVER_PREFIX);
             remote.hold.store(false, Ordering::SeqCst);
             request.join().unwrap()
         });

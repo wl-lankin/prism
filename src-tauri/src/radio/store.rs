@@ -150,6 +150,56 @@ pub fn mark_played(conn: &Connection, id: &str, now_ms: i64) -> anyhow::Result<(
     Ok(())
 }
 
+/// Claims the click report of a stored station: true (and `last_click_at` set to `now_ms`)
+/// when the last one is at least `interval_ms` old or there was none. One statement, so two
+/// plays at once claim it once.
+pub fn claim_click(
+    conn: &Connection,
+    id: &str,
+    now_ms: i64,
+    interval_ms: i64,
+) -> anyhow::Result<bool> {
+    let changed = conn.execute(
+        "UPDATE radio_stations SET last_click_at = ?2
+         WHERE id = ?1 AND (last_click_at IS NULL OR last_click_at <= ?2 - ?3
+                            OR last_click_at > ?2)",
+        params![id, now_ms, interval_ms],
+    )?;
+    Ok(changed > 0)
+}
+
+/// Keeps the newest `keep` state rows whose key starts with `prefix`, by their JSON `at`
+/// (unreadable rows go first); returns how many went.
+pub fn prune_near_state(conn: &Connection, prefix: &str, keep: usize) -> anyhow::Result<usize> {
+    Ok(conn.execute(
+        "DELETE FROM radio_state WHERE substr(key, 1, length(?1)) = ?1 AND key NOT IN (
+            SELECT key FROM radio_state WHERE substr(key, 1, length(?1)) = ?1
+            ORDER BY CASE WHEN json_valid(value) THEN json_extract(value, '$.at') END DESC
+            LIMIT ?2)",
+        params![prefix, keep as i64],
+    )?)
+}
+
+/// Every stored station, oldest first.
+pub fn all(conn: &Connection) -> anyhow::Result<Vec<Station>> {
+    let sql = format!("SELECT {STATION_COLUMNS} FROM radio_stations s ORDER BY s.rowid");
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], station_from_row)?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// Until when a logo is known not to load (ms since the epoch), if it was marked.
+pub fn favicon_missing_until(conn: &Connection, cover_id: &str) -> anyhow::Result<Option<i64>> {
+    Ok(conn
+        .query_row(
+            "SELECT missing_until FROM radio_favicons WHERE cover_id = ?1",
+            [cover_id],
+            |row| row.get::<_, Option<i64>>(0),
+        )
+        .optional()?
+        .flatten())
+}
+
 /// The most recently played stations that are not favorites (those are listed on their own),
 /// newest first.
 pub fn recent(conn: &Connection, limit: usize) -> anyhow::Result<Vec<Station>> {
@@ -274,6 +324,40 @@ mod tests {
         assert_eq!((saved, refreshed, played), (100, 200, 150));
         assert_eq!(count(&conn, "radio_stations"), 1);
         assert_eq!(super::station(&conn, "radio:nobody").unwrap(), None);
+    }
+
+    #[test]
+    fn a_click_is_claimed_once_per_interval() {
+        let db = Db::open_in_memory().unwrap();
+        let conn = db.0.lock().unwrap();
+        let one = station(1);
+        upsert_station(&conn, &one, 1).unwrap();
+        assert!(claim_click(&conn, &one.id, 1_000, 500).unwrap());
+        assert!(!claim_click(&conn, &one.id, 1_400, 500).unwrap());
+        assert!(claim_click(&conn, &one.id, 1_500, 500).unwrap());
+        // A clock that went back does not block reports for good.
+        assert!(claim_click(&conn, &one.id, 10, 500).unwrap());
+        assert!(!claim_click(&conn, "radio:nobody", 5_000, 500).unwrap());
+        assert_eq!(all(&conn).unwrap(), vec![one.clone()]);
+        let cover = favicon_cover_id("https://example.test/logo.png").unwrap();
+        assert_eq!(favicon_missing_until(&conn, &cover).unwrap(), None);
+    }
+
+    #[test]
+    fn only_the_newest_near_lists_stay() {
+        let db = Db::open_in_memory().unwrap();
+        let conn = db.0.lock().unwrap();
+        for (key, at) in [("a", 5), ("b", 1), ("c", 9), ("d", 3)] {
+            state_set(&conn, &format!("near:{key}"), &format!(r#"{{"at":{at}}}"#)).unwrap();
+        }
+        state_set(&conn, "near:broken", "not json").unwrap();
+        state_set(&conn, "place", r#"{"at":0}"#).unwrap();
+        assert_eq!(prune_near_state(&conn, "near:", 3).unwrap(), 2);
+        for key in ["near:a", "near:c", "near:d", "place"] {
+            assert!(state_get(&conn, key).unwrap().is_some(), "{key}");
+        }
+        assert_eq!(state_get(&conn, "near:b").unwrap(), None);
+        assert_eq!(state_get(&conn, "near:broken").unwrap(), None);
     }
 
     fn station_of(conn: &Connection, id: &str) -> Station {
