@@ -16,6 +16,7 @@
 pub mod client;
 pub mod covers;
 pub mod keychain;
+pub mod scrobble;
 pub mod stars;
 pub mod stream;
 pub mod sync;
@@ -549,6 +550,7 @@ impl Core {
             }
             result => result?,
         }
+        self.flush_scrobbles(client, epoch)?;
         Ok(report)
     }
 
