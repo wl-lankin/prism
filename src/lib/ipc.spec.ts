@@ -29,7 +29,28 @@ it('maps every command onto its fixed name and argument keys', async () => {
     [ipc.libraryArtists, 'library_artists', undefined],
     [() => ipc.libraryArtistAlbums('Air'), 'library_artist_albums', { name: 'Air' }],
     [ipc.libraryTrackCount, 'library_track_count', undefined],
+    [() => ipc.libraryTrackCount('navidrome'), 'library_track_count', { source: 'navidrome' }],
     [() => ipc.libraryTracksRange(100, 50), 'library_tracks_range', { offset: 100, limit: 50 }],
+    [
+      () => ipc.libraryTracksRange(0, 50, 'navidrome'),
+      'library_tracks_range',
+      { offset: 0, limit: 50, source: 'navidrome' },
+    ],
+    [ipc.navidromeStatus, 'navidrome_status', undefined],
+    [
+      () => ipc.navidromeTest('https://music.example.com', 'demo', 'demo-pass'),
+      'navidrome_test',
+      { url: 'https://music.example.com', user: 'demo', password: 'demo-pass' },
+    ],
+    [
+      () => ipc.navidromeConnect('https://music.example.com', 'demo', 'demo-pass'),
+      'navidrome_connect',
+      { url: 'https://music.example.com', user: 'demo', password: 'demo-pass' },
+    ],
+    [ipc.navidromeDisconnect, 'navidrome_disconnect', undefined],
+    [ipc.navidromeSync, 'navidrome_sync', undefined],
+    [ipc.navidromePlaylists, 'navidrome_playlists', undefined],
+    [() => ipc.navidromePlaylistEntries('navidrome:p1'), 'navidrome_playlist_entries', { id: 'navidrome:p1' }],
     [() => ipc.librarySearch('tear', 20), 'library_search', { q: 'tear', limit: 20 }],
     [ipc.settingsGet, 'settings_get', undefined],
     [() => ipc.settingsSet({ gapless: false }), 'settings_set', { patch: { gapless: false } }],
@@ -55,6 +76,25 @@ it('listens on the fixed event names and unwraps payloads', async () => {
     (call[1] as (event: { payload: unknown }) => void)({ payload: call[0] });
   }
   expect(seen).toEqual(['player://state', 'player://error', 'changed', 'library://scan-progress']);
+});
+
+it('leaves the source argument out when none is given', async () => {
+  invoke.mockClear();
+  await ipc.libraryTracksRange(0, 50);
+  await ipc.libraryTrackCount();
+  for (const call of invoke.mock.calls) {
+    const args = call[1] as Record<string, unknown> | undefined;
+    expect(args === undefined || !('source' in args)).toBe(true);
+  }
+});
+
+it('follows navidrome://status', async () => {
+  listen.mockClear();
+  const seen: unknown[] = [];
+  await ipc.onNavidromeStatus((status) => seen.push(status));
+  expect(listen.mock.calls[0][0]).toBe('navidrome://status');
+  (listen.mock.calls[0][1] as (event: { payload: unknown }) => void)({ payload: { state: 'offline' } });
+  expect(seen).toEqual([{ state: 'offline' }]);
 });
 
 afterEach(() => vi.unstubAllGlobals());

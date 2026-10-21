@@ -24,7 +24,7 @@
   const PAGE = 200;
   const KEY = 'songs';
 
-  const total = $derived(library.trackCount ?? 0);
+  const total = $derived(library.trackCounts?.all ?? 0);
 
   /** At most this many pages stay cached; the ones farthest from the view are dropped. */
   const MAX_PAGES = 20;

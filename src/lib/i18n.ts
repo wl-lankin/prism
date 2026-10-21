@@ -272,6 +272,29 @@ const en = {
   'settings.startWithSystemHintMac': 'Prism starts quietly when you log in: only its Dock and menu bar icons appear, no window opens.',
   'settings.startWithSystemFailed': 'The start with the system could not be changed: {message}',
 
+  'navidrome.error.invalidUrl': 'This is not a valid server address. Use something like https://music.example.com.',
+  'navidrome.error.wrongCredentials': 'Wrong user name or password.',
+  'navidrome.error.tokenAuthUnsupported':
+    'The server does not support token sign in. Prism needs a Navidrome or Subsonic server that does.',
+  'navidrome.error.notAuthorized': 'This user is not allowed to do that on the server.',
+  'navidrome.error.notFound': 'The server could not find this item.',
+  'navidrome.error.unreachable': 'The server cannot be reached. Check the address and your network.',
+  'navidrome.error.tls':
+    'The server certificate is not trusted. Give the server a trusted certificate, or use plain http:// on your home network.',
+  'navidrome.error.notSubsonic': 'This address does not answer like a Navidrome server.',
+  'navidrome.error.server': 'The server reported an error.',
+  'navidrome.error.syncRefused':
+    'The server sent an incomplete library, so Prism kept the songs it already had. It tries again at the next sync.',
+  'navidrome.error.keychain': 'The password could not be saved in or read from the system keychain.',
+  'navidrome.error.keychainTooLong':
+    'The user name and server address are too long for the system keychain. Use a shorter user name or server address.',
+  'navidrome.error.database': 'The Navidrome library could not be written to the database.',
+  'navidrome.error.settings': 'The Navidrome account could not be saved in the settings.',
+  'navidrome.error.internal': 'Something went wrong with the Navidrome connection. Please try again.',
+  'navidrome.error.withDetail': '{text} The server said: {detail}',
+  'navidrome.notConnected': 'Navidrome is not connected. Sign in again in the settings.',
+  'navidrome.offlineNotice': 'Navidrome is not reachable. Press Play to go on once it is back.',
+
   'about.version': 'Version {version}',
   'about.tagline': 'One player, every color of sound.',
   'about.madeBy': 'Made by',
@@ -552,6 +575,29 @@ const de: Record<Key, string> = {
   'settings.startWithSystemHint': 'Prism startet still bei der Anmeldung: Nur das Symbol im Infobereich erscheint, kein Fenster öffnet sich.',
   'settings.startWithSystemHintMac': 'Prism startet still bei der Anmeldung: Nur die Symbole im Dock und in der Menüleiste erscheinen, kein Fenster öffnet sich.',
   'settings.startWithSystemFailed': 'Der Start mit dem System ließ sich nicht ändern: {message}',
+
+  'navidrome.error.invalidUrl': 'Das ist keine gültige Serveradresse. Gib etwa https://music.example.com ein.',
+  'navidrome.error.wrongCredentials': 'Falscher Benutzername oder falsches Passwort.',
+  'navidrome.error.tokenAuthUnsupported':
+    'Der Server unterstützt keine Anmeldung per Token. Prism braucht einen Navidrome- oder Subsonic-Server, der das kann.',
+  'navidrome.error.notAuthorized': 'Dieser Benutzer darf das auf dem Server nicht.',
+  'navidrome.error.notFound': 'Der Server hat diesen Eintrag nicht gefunden.',
+  'navidrome.error.unreachable': 'Der Server ist nicht erreichbar. Prüfe die Adresse und dein Netzwerk.',
+  'navidrome.error.tls':
+    'Dem Zertifikat des Servers wird nicht vertraut. Gib dem Server ein vertrauenswürdiges Zertifikat oder nutze im Heimnetz einfach http://.',
+  'navidrome.error.notSubsonic': 'Unter dieser Adresse antwortet kein Navidrome-Server.',
+  'navidrome.error.server': 'Der Server hat einen Fehler gemeldet.',
+  'navidrome.error.syncRefused':
+    'Der Server hat eine unvollständige Mediathek geschickt, daher hat Prism die bisherigen Titel behalten. Beim nächsten Abgleich versucht Prism es erneut.',
+  'navidrome.error.keychain': 'Das Passwort ließ sich nicht im Schlüsselbund des Systems speichern oder daraus lesen.',
+  'navidrome.error.keychainTooLong':
+    'Benutzername und Serveradresse sind zu lang für den Schlüsselbund des Systems. Nutze einen kürzeren Benutzernamen oder eine kürzere Serveradresse.',
+  'navidrome.error.database': 'Die Navidrome-Mediathek ließ sich nicht in die Datenbank schreiben.',
+  'navidrome.error.settings': 'Das Navidrome-Konto ließ sich nicht in den Einstellungen speichern.',
+  'navidrome.error.internal': 'Bei der Verbindung zu Navidrome ist etwas schiefgegangen. Bitte versuche es erneut.',
+  'navidrome.error.withDetail': '{text} Der Server meldet: {detail}',
+  'navidrome.notConnected': 'Navidrome ist nicht verbunden. Melde dich in den Einstellungen wieder an.',
+  'navidrome.offlineNotice': 'Navidrome ist nicht erreichbar. Drücke Wiedergabe, sobald der Server wieder da ist.',
 
   'about.version': 'Version {version}',
   'about.tagline': 'Ein Player, jede Farbe des Klangs.',

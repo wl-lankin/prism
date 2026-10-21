@@ -1,12 +1,22 @@
 import { t } from '../i18n';
-import { onPlaylistsChanged, playlistAdd, playlistCreate, playlistRename, playlistsList } from '../ipc';
-import type { Playlist } from '../types';
+import {
+  navidromePlaylists,
+  onPlaylistsChanged,
+  playlistAdd,
+  playlistCreate,
+  playlistRename,
+  playlistsList,
+} from '../ipc';
+import type { Playlist, RemotePlaylist } from '../types';
 import { notify } from './notice.svelte';
 
 /** Every playlist, newest change first, as `playlists_list` returns them. */
 class PlaylistsStore {
   /** null until the first load. Replaced, never mutated. */
   list = $state.raw<Playlist[] | null>(null);
+  /** The Navidrome server's playlists (read-only), most recently changed first. null until
+   *  the first load, empty without an account. Replaced, never mutated. */
+  remote = $state.raw<RemotePlaylist[] | null>(null);
   /** Bumped on every reload, so an open playlist refetches its entries. */
   version = $state(0);
   /** A playlist just created from the Playlists view: its view opens with the title in edit. */
@@ -18,7 +28,19 @@ export const playlists = new PlaylistsStore();
 let loading: Promise<void> | null = null;
 let again = false;
 
-/** Reloads the list. Calls during a reload queue one more. */
+/** The server's playlists; a failure keeps the last list (or none) so the Prism playlists
+ *  still load. */
+async function loadRemote(): Promise<RemotePlaylist[]> {
+  try {
+    return (await navidromePlaylists()) ?? [];
+  } catch (err) {
+    console.error('loading the Navidrome playlists failed', err);
+    return playlists.remote ?? [];
+  }
+}
+
+/** Reloads the Prism and the Navidrome playlists. `playlists://changed` covers both (a sync
+ *  that changed the server's playlists sends it too). Calls during a reload queue one more. */
 export function reloadPlaylists(): Promise<void> {
   if (loading) {
     again = true;
@@ -28,7 +50,9 @@ export function reloadPlaylists(): Promise<void> {
     try {
       do {
         again = false;
-        playlists.list = (await playlistsList()) ?? [];
+        const [list, remote] = await Promise.all([playlistsList(), loadRemote()]);
+        playlists.list = list ?? [];
+        playlists.remote = remote;
         playlists.version++;
       } while (again);
     } catch (err) {

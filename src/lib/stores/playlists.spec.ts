@@ -79,15 +79,51 @@ it('plays nothing and says so when no entry has a track', async () => {
 it('loads the playlists on init and reloads them on playlists://changed', async () => {
   const first = [{ id: 1, name: 'Road trip', trackCount: 0, durationMs: 0, coverIds: [], updatedAt: 1 }];
   const second = [...first, { id: 2, name: 'Late', trackCount: 0, durationMs: 0, coverIds: [], updatedAt: 2 }];
-  invoke.mockResolvedValueOnce(first).mockResolvedValueOnce(second);
+  const remote = [
+    {
+      id: 'navidrome:p1',
+      name: 'Server mix',
+      owner: 'demo',
+      trackCount: 3,
+      durationMs: 600_000,
+      coverIds: [],
+      updatedAt: 5,
+    },
+  ];
+  let local = first;
+  let server: typeof remote = [];
+  invoke.mockImplementation(async (cmd: string) =>
+    cmd === 'playlists_list' ? local : cmd === 'navidrome_playlists' ? server : undefined,
+  );
   const stop = await initPlaylists();
   expect(invoke).toHaveBeenCalledWith('playlists_list', undefined);
+  expect(invoke).toHaveBeenCalledWith('navidrome_playlists', undefined);
   expect(playlists.list?.map((p) => p.name)).toEqual(['Road trip']);
+  expect(playlists.remote).toEqual([]);
   const version = playlists.version;
+  // A Navidrome sync that changed the server playlists sends the same event.
+  local = second;
+  server = remote;
   listeners.get('playlists://changed')?.({ event: 'playlists://changed', id: 0, payload: null });
   await vi.waitFor(() => expect(playlists.list?.length).toBe(2));
+  expect(playlists.remote?.map((p) => p.name)).toEqual(['Server mix']);
   expect(playlists.version).toBeGreaterThan(version);
   stop();
+});
+
+it('keeps the Prism playlists when the server playlists fail to load', async () => {
+  const first = [{ id: 1, name: 'Road trip', trackCount: 0, durationMs: 0, coverIds: [], updatedAt: 1 }];
+  invoke.mockImplementation(async (cmd: string) => {
+    if (cmd === 'playlists_list') return first;
+    if (cmd === 'navidrome_playlists') throw new Error('database is locked');
+    return undefined;
+  });
+  playlists.remote = null;
+  const { reloadPlaylists } = await import('./playlists.svelte');
+  await reloadPlaylists();
+  expect(playlists.list?.map((p) => p.name)).toEqual(['Road trip']);
+  expect(playlists.remote).toEqual([]);
+  expect(notice.text).toBeNull();
 });
 
 it('suggests a name that is not taken yet', () => {
