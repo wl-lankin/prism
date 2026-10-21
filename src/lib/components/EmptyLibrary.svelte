@@ -45,7 +45,7 @@
       <h2>{t('library.emptyTitle')}</h2>
     {:else}
       <div class="mark">
-        <PrismIllustration width={200} />
+        <PrismIllustration width={150} />
       </div>
       <h1>{t('library.emptyTitle')}</h1>
     {/if}
@@ -92,7 +92,7 @@
 
   /* The logo sits on a soft pool of the spectrum, the one bit of color on this screen. */
   .mark {
-    margin-bottom: 30px;
+    margin-bottom: 24px;
   }
 
   h1 {
