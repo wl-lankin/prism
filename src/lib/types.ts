@@ -159,7 +159,11 @@ export interface Settings {
   /** The connected Navidrome user; only connect / disconnect change it. */
   navidromeUser: string | null;
   navidromeQuality: StreamQuality;
+  radioLocation: RadioLocation;
 }
+
+/** Where "Radio near you" looks: an IP lookup, or a country (and region) the user chose. */
+export type RadioLocation = { mode: 'auto' } | { mode: 'manual'; countryCode: string; region: string | null };
 
 /** Navidrome stream quality: the original file or an MP3 transcode at a bitrate cap. */
 export type StreamQuality = 'original' | '320' | '192' | '128';
