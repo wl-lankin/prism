@@ -170,6 +170,8 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
             replay_gain: initial.replay_gain,
             crossfade: initial.crossfade,
             crossfade_ms: initial.crossfade_ms,
+            repeat: initial.repeat,
+            shuffle: initial.shuffle,
         },
     );
     let lookup = library::lookup::LookupWorker::spawn(
@@ -307,6 +309,8 @@ pub fn run() {
             commands::player_play_files,
             commands::player_append,
             commands::player_jump,
+            commands::player_move,
+            commands::player_remove,
             commands::player_queue_range,
             commands::library_add_folder,
             commands::library_remove_folder,
