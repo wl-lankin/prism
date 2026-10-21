@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { sentences } from '../format';
   import { lang, t, type Key } from '../i18n';
   import { navidromeSync } from '../ipc';
   import { go } from '../stores/nav.svelte';
@@ -83,7 +84,7 @@
       <h1>{t(titles[stage])}</h1>
       <!-- Screen readers hear the state when it changes, not every progress number. -->
       <span class="sr-only" role="status" aria-live="polite">{t(titles[stage])}</span>
-      <p class="lead">{lead}</p>
+      <p class="lead">{#each sentences(lead) as sentence, i (i)}<span>{sentence} </span>{/each}</p>
 
       {#if stage === 'connect' || stage === 'error'}
         <button type="button" class="btn primary" onclick={() => go('settings')}>{t('sourceEmpty.openSettings')}</button>
@@ -184,6 +185,11 @@
     line-height: 1.6;
     color: var(--text-dim);
     text-wrap: pretty;
+  }
+
+  /* One sentence per line (owner, 2026-10-21). */
+  .lead span {
+    display: block;
   }
 
   .progress {

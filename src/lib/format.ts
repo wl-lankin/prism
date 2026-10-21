@@ -1,6 +1,11 @@
 import type { Source, StreamQuality, Track } from './types';
 
 /** "3:07", or "1:02:03" from one hour on. Invalid and negative values show "0:00". */
+/** A text cut into its sentences (after ".", "!" or "?" and a space), for one line each. */
+export function sentences(text: string): string[] {
+  return text.split(/(?<=[.!?])\s+/).filter((part) => part.length > 0);
+}
+
 export function formatDuration(ms: number): string {
   const total = Number.isFinite(ms) && ms > 0 ? Math.floor(ms / 1000) : 0;
   const h = Math.floor(total / 3600);

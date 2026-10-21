@@ -1,5 +1,6 @@
 <script lang="ts">
   import { open } from '@tauri-apps/plugin-dialog';
+  import { sentences } from '../format';
   import { lang, t } from '../i18n';
   import { libraryAddFolder } from '../ipc';
   import { library, reloadLibrary } from '../stores/library.svelte';
@@ -49,7 +50,7 @@
       </div>
       <h1>{t('library.emptyTitle')}</h1>
     {/if}
-    <p class="lead">{t('library.emptyLead')}</p>
+    <p class="lead">{#each sentences(t('library.emptyLead')) as sentence, i (i)}<span>{sentence} </span>{/each}</p>
 
     <button type="button" class="btn primary" disabled={busy} onclick={add}>
       <Icon name="folderAdd" size={18} />
@@ -109,6 +110,11 @@
     line-height: 1.6;
     color: var(--text-dim);
     text-wrap: pretty;
+  }
+
+  /* One sentence per line (owner, 2026-10-21). */
+  .lead span {
+    display: block;
   }
 
   .progress {
