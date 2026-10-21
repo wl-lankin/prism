@@ -11,6 +11,7 @@
   import Icon from './Icon.svelte';
   import Select, { type SelectOption } from './Select.svelte';
   import ShortcutInput, { IS_MAC, describeShortcut } from './ShortcutInput.svelte';
+  import Segmented from './Segmented.svelte';
   import Slider from './Slider.svelte';
   import ViewHead from './ViewHead.svelte';
 
@@ -138,17 +139,6 @@
 
   const gainModes: ReplayGainMode[] = ['off', 'track', 'album'];
   const crossfadeModes: CrossfadeMode[] = ['off', 'flow', 'always'];
-
-  /** Arrow keys in a segmented radio group: pick the neighbour (wrapping) and focus it. */
-  function onsegmentkey<T extends string>(event: KeyboardEvent, modes: T[], index: number, attribute: string, pick: (mode: T) => void) {
-    const step = event.key === 'ArrowRight' || event.key === 'ArrowDown' ? 1 : event.key === 'ArrowLeft' || event.key === 'ArrowUp' ? -1 : 0;
-    if (!step) return;
-    event.preventDefault();
-    const next = modes[(index + step + modes.length) % modes.length];
-    pick(next);
-    const group = (event.currentTarget as HTMLElement).parentElement;
-    queueMicrotask(() => group?.querySelector<HTMLElement>(`[${attribute}="${next}"]`)?.focus());
-  }
 
   // Crossfade length: 1 to 8 whole seconds on a 0..1 slider.
   const FADE_MIN_S = 1;
@@ -314,23 +304,13 @@
             <span class="hint">{t('settings.replayGainHint')}</span>
           </div>
           <div class="control">
-            <div class="segments" role="radiogroup" aria-labelledby="label-gain">
-              {#each gainModes as mode, index (mode)}
-                {@const on = settings.replayGain === mode}
-                <button
-                  type="button"
-                  role="radio"
-                  data-mode={mode}
-                  aria-checked={on}
-                  tabindex={on ? 0 : -1}
-                  class:on
-                  onclick={() => change({ replayGain: mode })}
-                  onkeydown={(event) => onsegmentkey(event, gainModes, index, 'data-mode', (next) => change({ replayGain: next }))}
-                >
-                  {t(`settings.replayGain.${mode}`)}
-                </button>
-              {/each}
-            </div>
+            <Segmented
+              labelledby="label-gain"
+              attr="data-mode"
+              value={settings.replayGain}
+              options={gainModes.map((mode) => ({ value: mode, label: t(`settings.replayGain.${mode}`) }))}
+              onpick={(next) => change({ replayGain: next })}
+            />
           </div>
         </div>
 
@@ -340,23 +320,13 @@
             <span class="hint">{t('settings.crossfadeHint')}</span>
           </div>
           <div class="control">
-            <div class="segments" role="radiogroup" aria-labelledby="label-crossfade">
-              {#each crossfadeModes as mode, index (mode)}
-                {@const on = settings.crossfade === mode}
-                <button
-                  type="button"
-                  role="radio"
-                  data-crossfade={mode}
-                  aria-checked={on}
-                  tabindex={on ? 0 : -1}
-                  class:on
-                  onclick={() => change({ crossfade: mode })}
-                  onkeydown={(event) => onsegmentkey(event, crossfadeModes, index, 'data-crossfade', (next) => change({ crossfade: next }))}
-                >
-                  {t(`settings.crossfade.${mode}`)}
-                </button>
-              {/each}
-            </div>
+            <Segmented
+              labelledby="label-crossfade"
+              attr="data-crossfade"
+              value={settings.crossfade}
+              options={crossfadeModes.map((mode) => ({ value: mode, label: t(`settings.crossfade.${mode}`) }))}
+              onpick={(next) => change({ crossfade: next })}
+            />
           </div>
         </div>
 
@@ -838,48 +808,6 @@
   .switch:focus-visible {
     outline: 2px solid var(--spec-4);
     outline-offset: 2px;
-  }
-
-  .segments {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 2px;
-    padding: 3px;
-    border-radius: 10px;
-    background: rgba(255, 255, 255, 0.055);
-    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
-  }
-
-  .segments button {
-    height: 30px;
-    border: 0;
-    border-radius: 7px;
-    background: transparent;
-    color: var(--text-dim);
-    font: inherit;
-    font-size: 13px;
-    font-weight: 500;
-    cursor: pointer;
-    transition:
-      background-color var(--dur) ease-out,
-      color var(--dur) ease-out;
-  }
-
-  .segments button:hover:not(.on) {
-    color: var(--text);
-  }
-
-  .segments button.on {
-    background: var(--raised);
-    color: var(--text);
-    box-shadow:
-      0 0 0 1px rgba(255, 255, 255, 0.1),
-      0 2px 6px rgba(0, 0, 0, 0.35);
-  }
-
-  .segments button:focus-visible {
-    outline: 2px solid var(--spec-4);
-    outline-offset: 1px;
   }
 
   .error {
