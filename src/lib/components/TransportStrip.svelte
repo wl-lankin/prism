@@ -169,17 +169,15 @@
 <style>
   .strip {
     position: relative;
-    /* 84 px with the padding below. */
     height: 76px;
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
     align-items: center;
     gap: 24px;
-    /* All three groups share one centre line: the middle of the strip below the seek bar,
-       whose 16 px control reaches 8 px into the strip. With the ring hanging out of the card's
-       edge, that line also sits closer to the ring's centre. Maximized, the ring is centred in
+    /* All three groups share one centre line, the middle of the strip, so the space above the
+       cover equals the space below it (owner, 2026-10-21). Maximized, the ring is centred in
        the whole strip, so the groups are too. */
-    padding: 8px 20px 0;
+    padding: 0 20px;
     border-top: 1px solid var(--line);
     background: linear-gradient(180deg, rgba(255, 255, 255, 0.015), rgba(255, 255, 255, 0));
   }

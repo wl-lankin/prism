@@ -214,22 +214,25 @@
 </script>
 
 {#snippet actions()}
-  <button type="button" class="btn primary" disabled={!counts[tab]} onclick={() => playTab(false)}>
-    <Icon name="play" size={16} filled />
-    {t('album.play')}
-  </button>
-  <button type="button" class="btn ghost" disabled={!counts[tab]} onclick={() => playTab(true)}>
-    <Icon name="shuffle" size={16} />
-    {t('album.shuffle')}
-  </button>
+  <!-- Stations cannot be queued: their tab keeps the buttons' room but hides them, so the
+       header does not change height between tabs. -->
+  <div class="plays" class:away={tab === 'station'} aria-hidden={tab === 'station' ? 'true' : undefined}>
+    <button type="button" class="btn primary" disabled={!counts[tab] || tab === 'station'} onclick={() => playTab(false)}>
+      <Icon name="play" size={16} filled />
+      {t('album.play')}
+    </button>
+    <button type="button" class="btn ghost" disabled={!counts[tab] || tab === 'station'} onclick={() => playTab(true)}>
+      <Icon name="shuffle" size={16} />
+      {t('album.shuffle')}
+    </button>
+  </div>
 {/snippet}
 
 {#snippet header()}
-  <!-- Stations cannot be queued, so their tab has no Play and Shuffle. -->
   <ViewHead
     title={t('nav.favorites')}
     meta={loaded ? tc(current.count, counts[tab]) : undefined}
-    actions={tab === 'station' ? undefined : actions}
+    {actions}
   />
 
   <div class="bar">
@@ -401,6 +404,17 @@
 {/if}
 
 <style>
+  .plays {
+    display: flex;
+    gap: 10px;
+    transition: opacity var(--dur) ease-out;
+  }
+
+  .plays.away {
+    visibility: hidden;
+    opacity: 0;
+  }
+
   .panel {
     height: 100%;
   }

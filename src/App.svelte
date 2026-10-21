@@ -489,14 +489,20 @@
             {:else if libraryView(nav.view) && library.trackCounts === null}
               <!-- The first load takes a moment; nothing flashes meanwhile. -->
             {:else if libraryView(nav.view) && shownTracks === 0}
-              {#if nav.view === 'home' && !nav.source}
-                <div class="home-stations"><HomeStations /></div>
-              {/if}
-              {#if emptyAsNavidrome}
-                <SourceEmpty source="navidrome" offerLocal={!nav.source} />
-              {:else}
-                <EmptyLibrary />
-              {/if}
+              <!-- With the stations row above, the empty state takes the room that is left and
+                   scrolls if that is too little, so nothing is cut off at the strip. -->
+              <div class="empty-home">
+                {#if nav.view === 'home' && !nav.source}
+                  <div class="home-stations"><HomeStations /></div>
+                {/if}
+                <div class="empty-rest">
+                  {#if emptyAsNavidrome}
+                    <SourceEmpty source="navidrome" offerLocal={!nav.source} />
+                  {:else}
+                    <EmptyLibrary />
+                  {/if}
+                </div>
+              </div>
             {:else if nav.view === 'home' || nav.view === 'albums'}
               <AlbumGrid albums={shownAlbums} scrollKey="albums:{nav.source ?? 'all'}" header={albumsHead} showSource={mixed} />
             {:else if nav.view === 'album' && nav.param}
@@ -674,8 +680,21 @@
     animation: fade var(--dur) ease-out;
   }
 
+  .empty-home {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+  }
+
   .home-stations {
+    flex: none;
     padding: 10px 32px 0;
+  }
+
+  .empty-rest {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
   }
 
   .placeholder {
