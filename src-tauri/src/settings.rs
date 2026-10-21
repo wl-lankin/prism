@@ -59,6 +59,48 @@ pub enum RepeatMode {
     One,
 }
 
+/// Where "Radio near you" looks.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "camelCase")]
+pub enum RadioLocation {
+    /// Asked of an IP lookup, the first time the radio view needs it.
+    #[default]
+    Auto,
+    /// Chosen by the user; no location service is ever called.
+    #[serde(rename_all = "camelCase")]
+    Manual {
+        /// Two uppercase ASCII letters.
+        country_code: String,
+        region: Option<String>,
+    },
+}
+
+impl RadioLocation {
+    /// A manual place needs a two-letter country code (uppercased here); a blank region is
+    /// none. Anything else is `Auto`.
+    fn normalized(self) -> RadioLocation {
+        match self {
+            RadioLocation::Manual {
+                country_code,
+                region,
+            } => {
+                let code = country_code.trim();
+                if code.len() != 2 || !code.bytes().all(|b| b.is_ascii_alphabetic()) {
+                    return RadioLocation::Auto;
+                }
+                let region = region
+                    .map(|region| region.trim().to_owned())
+                    .filter(|region| !region.is_empty());
+                RadioLocation::Manual {
+                    country_code: code.to_ascii_uppercase(),
+                    region,
+                }
+            }
+            auto => auto,
+        }
+    }
+}
+
 /// The crossfade length range in milliseconds.
 pub const CROSSFADE_MS_RANGE: std::ops::RangeInclusive<u32> = 1000..=8000;
 
@@ -97,6 +139,9 @@ pub struct Settings {
     /// Read by the stream opener at every open, so it needs no [`Change`].
     #[serde(deserialize_with = "lenient_quality")]
     pub navidrome_quality: StreamQuality,
+    /// Read by the radio service per request, so it needs no [`Change`].
+    #[serde(deserialize_with = "lenient_radio_location")]
+    pub radio_location: RadioLocation,
 }
 
 /// The patch keys only connect and disconnect may write.
@@ -107,6 +152,17 @@ const ACCOUNT_KEYS: [&str; 2] = ["navidromeUrl", "navidromeUser"];
 fn lenient_quality<'de, D: Deserializer<'de>>(deserializer: D) -> Result<StreamQuality, D::Error> {
     let value = Value::deserialize(deserializer)?;
     Ok(StreamQuality::deserialize(value).unwrap_or_default())
+}
+
+/// Reads the radio location; a broken value is `Auto` instead of an error, so the rest of the
+/// file is kept.
+fn lenient_radio_location<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<RadioLocation, D::Error> {
+    let value = Value::deserialize(deserializer)?;
+    Ok(RadioLocation::deserialize(value)
+        .map(RadioLocation::normalized)
+        .unwrap_or_default())
 }
 
 /// Removes the Navidrome account from a settings patch: the UI connects and disconnects
@@ -138,6 +194,7 @@ impl Default for Settings {
             navidrome_url: None,
             navidrome_user: None,
             navidrome_quality: StreamQuality::Original,
+            radio_location: RadioLocation::Auto,
         }
     }
 }
@@ -323,6 +380,14 @@ impl SettingsStore {
         // The file reads an unknown quality leniently; a patch with one is refused.
         if let Some(quality) = patch.get("navidromeQuality") {
             StreamQuality::deserialize(quality).context("invalid setting")?;
+        }
+        // Same for the radio location: the file falls back to Auto, a patch is refused.
+        if let Some(location) = patch.get("radioLocation") {
+            let valid = RadioLocation::deserialize(location).map(RadioLocation::normalized);
+            anyhow::ensure!(
+                valid.is_ok_and(|valid| valid != RadioLocation::Auto || location["mode"] == "auto"),
+                "invalid setting"
+            );
         }
         let mut current = lock(&self.current);
         let mut merged = serde_json::to_value(&*current)?;
@@ -780,6 +845,62 @@ mod tests {
             "the file was not moved aside"
         );
         assert!(path.exists());
+    }
+
+    #[test]
+    fn settings_radio_location_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let store = SettingsStore::load(&path);
+        assert_eq!(store.get().radio_location, RadioLocation::Auto);
+        let saved = store
+            .update(
+                json!({ "radioLocation": { "mode": "manual", "countryCode": "de", "region": " Testland " } }),
+                |changes| assert!(changes.is_empty(), "the service reads it per request"),
+            )
+            .unwrap();
+        let manual = RadioLocation::Manual {
+            country_code: "DE".into(),
+            region: Some("Testland".into()),
+        };
+        assert_eq!(saved.radio_location, manual);
+        let raw: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            raw["radioLocation"],
+            json!({ "mode": "manual", "countryCode": "DE", "region": "Testland" })
+        );
+        assert_eq!(SettingsStore::load(&path).get().radio_location, manual);
+        let saved = store
+            .set(json!({ "radioLocation": { "mode": "auto" } }))
+            .unwrap();
+        assert_eq!(saved.radio_location, RadioLocation::Auto);
+        assert!(store
+            .set(json!({ "radioLocation": { "mode": "manual", "countryCode": "Deutschland" } }))
+            .is_err());
+        assert!(store.set(json!({ "radioLocation": 7 })).is_err());
+    }
+
+    #[test]
+    fn broken_radio_location_falls_back_to_auto() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        for broken in [
+            r#"{"mode":"manual","countryCode":"Deutschland"}"#,
+            r#"{"mode":"manual"}"#,
+            r#"{"mode":"satellite"}"#,
+            r#""manual""#,
+            "42",
+        ] {
+            std::fs::write(
+                &path,
+                format!(r#"{{ "radioLocation": {broken}, "gapless": false }}"#),
+            )
+            .unwrap();
+            let settings = SettingsStore::load(&path).get();
+            assert_eq!(settings.radio_location, RadioLocation::Auto, "{broken}");
+            assert!(!settings.gapless, "the rest of the file is kept: {broken}");
+            assert!(!sibling(&path, ".bad").exists());
+        }
     }
 
     #[test]

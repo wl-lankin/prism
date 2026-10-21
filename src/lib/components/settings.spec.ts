@@ -763,5 +763,6 @@ it('has the same defaults as the backend', () => {
     navidromeUrl: null,
     navidromeUser: null,
     navidromeQuality: 'original',
+    radioLocation: { mode: 'auto' },
   });
 });

@@ -7,6 +7,7 @@ pub mod media_controls;
 pub mod navidrome;
 pub mod player;
 pub mod protocol;
+pub mod radio;
 pub mod secret;
 pub mod settings;
 pub mod shell;

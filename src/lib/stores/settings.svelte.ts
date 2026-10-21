@@ -19,6 +19,7 @@ export const DEFAULT_SETTINGS: Settings = {
   navidromeUrl: null,
   navidromeUser: null,
   navidromeQuality: 'original',
+  radioLocation: { mode: 'auto' },
 };
 
 /** The saved settings as the UI shows them. Changes go through `updateSettings`. */
