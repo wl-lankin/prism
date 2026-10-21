@@ -37,6 +37,8 @@ const idle: YtmState = {
   coverId: null,
   positionMs: 0,
   durationMs: 0,
+  canNext: false,
+  canPrev: false,
 };
 const rect = { x: 220, y: 40, width: 800, height: 500 };
 

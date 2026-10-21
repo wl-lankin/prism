@@ -176,7 +176,7 @@ pub fn clean_name(raw: &str) -> Option<String> {
 
 /// Invisible Unicode format characters (zero-width, bidi controls, BOM) that would spoof or
 /// hide parts of a name.
-fn is_format_char(ch: char) -> bool {
+pub(crate) fn is_format_char(ch: char) -> bool {
     matches!(
         ch,
         '\u{200B}'..='\u{200F}'

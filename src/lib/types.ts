@@ -361,6 +361,9 @@ export interface YtmState {
   coverId: string | null;
   positionMs: number;
   durationMs: number;
+  /** The page's next and previous buttons can be pressed. */
+  canNext: boolean;
+  canPrev: boolean;
 }
 
 /** Where the YouTube Music view goes, in logical pixels of the main window. */

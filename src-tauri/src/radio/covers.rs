@@ -61,7 +61,7 @@ enum Attempt<T> {
 /// A logo URL that points into a private network (the user's router, the machine itself):
 /// directory data must never make Prism ask there.
 #[derive(Debug)]
-struct PrivateAddress;
+pub(crate) struct PrivateAddress;
 
 impl std::fmt::Display for PrivateAddress {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -111,7 +111,7 @@ fn url_allowed(url: &Url, allow_private: bool) -> bool {
     allow_private || literal.is_none_or(is_public)
 }
 
-fn refused_as_private(err: &reqwest::Error) -> bool {
+pub(crate) fn refused_as_private(err: &reqwest::Error) -> bool {
     let mut source: Option<&(dyn std::error::Error + 'static)> = Some(err);
     while let Some(cause) = source {
         if cause.is::<PrivateAddress>() {
@@ -126,7 +126,7 @@ type Lookup = Result<Addrs, Box<dyn std::error::Error + Send + Sync>>;
 
 /// Resolves with the system resolver and keeps only public addresses; none left is an error.
 /// The system lookup blocks, so it runs on a thread of its own.
-struct PublicResolver;
+pub(crate) struct PublicResolver;
 
 impl Resolve for PublicResolver {
     fn resolve(&self, name: Name) -> Resolving {
@@ -339,7 +339,7 @@ fn http_url(raw: &str) -> Option<Url> {
 }
 
 /// True when the bytes are an image the gate can decode, within bounds (svg and html are not).
-fn decodes(bytes: &[u8]) -> bool {
+pub(crate) fn decodes(bytes: &[u8]) -> bool {
     let Ok(mut reader) = image::ImageReader::new(Cursor::new(bytes)).with_guessed_format() else {
         return false;
     };

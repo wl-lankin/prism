@@ -9,6 +9,8 @@ const IDLE: YtmState = {
   coverId: null,
   positionMs: 0,
   durationMs: 0,
+  canNext: false,
+  canPrev: false,
 };
 
 /** YouTube Music as the window knows it. `shown`: the view asked for the child view (it

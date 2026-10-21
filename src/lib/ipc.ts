@@ -124,8 +124,12 @@ export const favoritesArtists = () => call<Artist[]>('favorites_artists');
 /** Puts the YouTube Music view at `rect` (created on first use) and shows it. */
 export const ytmShow = (rect: YtmRect) => call<void>('ytm_show', { rect });
 export const ytmHide = () => call<void>('ytm_hide');
-/** `action` is a fixed word the backend knows (`toggle`, `next`, ...). */
-export const ytmControl = (action: string) => call<void>('ytm_control', { action });
+/** `action` is a fixed word the backend knows (`toggle`, `play`, `pause`, `next`, `prev`,
+ *  `seek` with `positionMs`, `volume` with `volume` 0..1). */
+export const ytmControl = (
+  action: string,
+  args: { positionMs?: number; volume?: number } = {},
+) => call<void>('ytm_control', { action, ...args });
 export const ytmState = () => call<YtmState>('ytm_state');
 export const ytmSignIn = () => call<void>('ytm_sign_in');
 export const ytmSignOut = () => call<void>('ytm_sign_out');
