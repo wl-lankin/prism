@@ -505,15 +505,15 @@ it('connect_clears_the_password_field', async () => {
   });
   expect(field('password').value).toBe('');
   expect(field('url').value).toBe(DEMO_URL);
+  // A failed connect asks for the password again, with the focus already there.
+  await vi.waitFor(() => expect(document.activeElement).toBe(field('password')));
 
   type(field('password'), 'demo-pass');
-  invoke.mockImplementationOnce(async () => ({
-    ...OFF,
-    configured: true,
-    url: DEMO_URL,
-    user: 'demo',
-    state: 'syncing',
-  }));
+  // The backend publishes the status (as `navidrome://status`) before the command returns.
+  invoke.mockImplementationOnce(async () => {
+    connected({ state: 'syncing' });
+    return { ...OFF, configured: true, url: DEMO_URL, user: 'demo', state: 'syncing' };
+  });
   button('Connect').click();
   await vi.waitFor(() => {
     flushSync();
@@ -523,6 +523,57 @@ it('connect_clears_the_password_field', async () => {
   expect(section().textContent).toContain(DEMO_URL);
   expect(section().textContent).toContain('demo');
   expect(section().querySelector('.status')?.textContent).toContain('Syncing');
+  // The focus lands on Sync now, which stays focusable (busy, not disabled) while syncing.
+  await vi.waitFor(() => expect(document.activeElement).toBe(button('Sync now')));
+  expect(button('Sync now').disabled).toBe(false);
+  expect(button('Sync now').getAttribute('aria-disabled')).toBe('true');
+});
+
+it('a_status_event_before_connect_resolves_wins', async () => {
+  setStatus({});
+  mountSettings();
+  fillForm();
+  // The first cycle is quick: `online` arrives before the command's own (older) answer.
+  invoke.mockImplementationOnce(async () => {
+    connected({ state: 'syncing' });
+    connected({ state: 'online', lastSync: Date.now(), trackCount: 600, albumCount: 60 });
+    return { ...OFF, configured: true, url: DEMO_URL, user: 'demo', state: 'syncing' };
+  });
+  button('Connect').click();
+  await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('navidrome_connect', expect.anything()));
+  await vi.waitFor(() => expect(document.activeElement).toBe(button('Sync now')));
+  flushSync();
+  expect(navidrome.state).toBe('online');
+  expect(section().querySelector('.status')?.textContent).toContain('Synced just now');
+  expect(button('Sync now').getAttribute('aria-disabled')).toBe('false');
+});
+
+it('focus_stays_in_the_form_while_pending', async () => {
+  setStatus({});
+  mountSettings();
+  fillForm();
+  let fail: (reason: unknown) => void = () => {};
+  invoke.mockImplementationOnce(() => new Promise((_, reject) => (fail = reject)));
+  const connect = button('Connect');
+  connect.focus();
+  connect.click();
+  flushSync();
+  // Busy, but nothing is `disabled`: the focus stays where it was.
+  expect(section().querySelector('.nd-feedback')?.textContent).toContain('Connecting...');
+  expect(connect.disabled).toBe(false);
+  expect(connect.getAttribute('aria-disabled')).toBe('true');
+  for (const name of ['url', 'user', 'password'] as const) {
+    expect(field(name).disabled).toBe(false);
+    expect(field(name).readOnly).toBe(true);
+    expect(field(name).getAttribute('aria-disabled')).toBe('true');
+  }
+  expect(document.activeElement).toBe(connect);
+  // A second press while busy sends nothing.
+  connect.click();
+  expect(invoke.mock.calls.filter(([cmd]) => cmd === 'navidrome_connect')).toHaveLength(1);
+  fail({ code: 'wrongCredentials', detail: null });
+  await vi.waitFor(() => expect(document.activeElement).toBe(field('password')));
+  expect(field('password').readOnly).toBe(false);
 });
 
 it('connected_shows_status_and_sync_now', async () => {
@@ -539,18 +590,41 @@ it('connected_shows_status_and_sync_now', async () => {
   button('Sync now').click();
   await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('navidrome_sync', undefined));
 
-  connected({ state: 'syncing', progress: { done: 12000, total: 31204 }, trackCount: 12000 });
-  expect(status()).toContain('Syncing 12,000 of 31,204 songs');
-  expect(button('Sync now').disabled).toBe(true);
-  expect(section().querySelector('.bar i')?.getAttribute('style')).toContain('scaleX(');
+  // One persistent live region says the state; the running counts stay out of it.
+  const live = () => section().querySelector('.nd-live')!;
+  expect(live().getAttribute('role')).toBe('status');
+  expect(live().textContent).toBe('Online');
+
+  connected({ state: 'syncing', progress: { done: 12000, total: 31204 }, trackCount: 12000, albumCount: 900 });
+  expect(status()).toContain('Syncing 12,000 of 31,204 tracks...');
+  // The count is in the line once, not repeated after it.
+  expect(status()).not.toContain('12,000 tracks');
+  expect(status()).not.toContain('900 albums');
+  expect(button('Sync now').getAttribute('aria-disabled')).toBe('true');
+  invoke.mockClear();
+  button('Sync now').click();
+  expect(invoke).not.toHaveBeenCalledWith('navidrome_sync', undefined);
+  const bar = section().querySelector('[role="progressbar"]')!;
+  expect(bar.getAttribute('aria-valuenow')).toBe('12000');
+  expect(bar.getAttribute('aria-valuemax')).toBe('31204');
+  expect(bar.querySelector('i')?.getAttribute('style')).toContain('scaleX(');
+  expect(live().textContent).toBe('Syncing...');
+  connected({ state: 'syncing', progress: { done: 13000, total: 31204 }, trackCount: 13000 });
+  expect(live().textContent).toBe('Syncing...');
+  // Without a total the bar is indeterminate.
+  connected({ state: 'syncing', progress: null, trackCount: 600, albumCount: 60 });
+  expect(section().querySelector('[role="progressbar"]')?.hasAttribute('aria-valuenow')).toBe(false);
+  expect(status()).toContain('600 tracks, 60 albums');
 
   connected({ state: 'offline', trackCount: 31204 });
   expect(status()).toContain('Server not reachable, showing the saved library');
+  expect(live().textContent).toBe('Server not reachable, showing the saved library');
 
   connected({ state: 'error', error: { code: 'syncRefused', detail: 'short page' }, trackCount: 31204 });
-  expect(section().querySelector('.status [role="alert"]')?.textContent).toBe(
-    'The server sent an incomplete library, so Prism kept the songs it already had. It tries again at the next sync.',
-  );
+  const refused =
+    'The server sent an incomplete library, so Prism kept the songs it already had. It tries again at the next sync.';
+  expect(section().querySelector('.status .status-error')?.textContent).toBe(refused);
+  expect(live().textContent).toBe(refused);
   expect(section().querySelector('.dot')?.classList.contains('error')).toBe(true);
 });
 
@@ -558,18 +632,56 @@ it('disconnect_needs_the_confirm_row', async () => {
   connected();
   mountSettings();
   invoke.mockClear();
+  const question = 'Sign out and remove the Navidrome library from Prism?';
+  const disconnects = () =>
+    [...section().querySelectorAll<HTMLButtonElement>('button')].filter((b) => b.textContent?.trim() === 'Disconnect');
   button('Disconnect').click();
   flushSync();
   expect(invoke).not.toHaveBeenCalledWith('navidrome_disconnect', undefined);
-  expect(section().textContent).toContain('Sign out and remove the Navidrome library from Prism?');
+  expect(section().textContent).toContain(question);
+  // The trigger hides while the row is open; the focus waits on Keep.
+  expect(disconnects()).toHaveLength(1);
+  expect(disconnects()[0].classList.contains('danger')).toBe(true);
+  await vi.waitFor(() => expect(document.activeElement).toBe(button('Keep')));
   button('Keep').click();
   flushSync();
-  expect(section().textContent).not.toContain('Sign out and remove the Navidrome library from Prism?');
+  expect(section().textContent).not.toContain(question);
+  await vi.waitFor(() => expect(document.activeElement).toBe(button('Disconnect')));
+
+  // Esc cancels too, and does not reach the window.
+  button('Disconnect').click();
+  await vi.waitFor(() => expect(document.activeElement).toBe(button('Keep')));
+  const outer = vi.fn();
+  window.addEventListener('keydown', outer);
+  key(button('Keep'), 'Escape');
+  window.removeEventListener('keydown', outer);
+  expect(outer).not.toHaveBeenCalled();
+  expect(section().textContent).not.toContain(question);
+  await vi.waitFor(() => expect(document.activeElement).toBe(button('Disconnect')));
 
   button('Disconnect').click();
   flushSync();
   section().querySelector<HTMLButtonElement>('.link.danger')!.click();
   await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('navidrome_disconnect', undefined));
+});
+
+it('folder_remove_confirm_moves_the_focus_and_esc_keeps', async () => {
+  mountSettings();
+  await vi.waitFor(() => {
+    flushSync();
+    expect(target.querySelectorAll('.folder')).toHaveLength(2);
+  });
+  const row = () => target.querySelectorAll('.folder')[0];
+  row().querySelector<HTMLButtonElement>('.remove-trigger')!.click();
+  await vi.waitFor(() => expect(document.activeElement).toBe(row().querySelector('.keep')));
+  key(row().querySelector('.keep')!, 'Escape');
+  expect(row().querySelector('.link.danger')).toBeNull();
+  await vi.waitFor(() => expect(document.activeElement).toBe(row().querySelector('.remove-trigger')));
+  row().querySelector<HTMLButtonElement>('.remove-trigger')!.click();
+  await vi.waitFor(() => expect(document.activeElement).toBe(row().querySelector('.keep')));
+  row().querySelector<HTMLButtonElement>('.keep')!.click();
+  await vi.waitFor(() => expect(document.activeElement).toBe(row().querySelector('.remove-trigger')));
+  expect(invoke).not.toHaveBeenCalledWith('library_remove_folder', expect.anything());
 });
 
 it('quality_segmented_saves_navidromeQuality', async () => {
@@ -586,23 +698,51 @@ it('quality_segmented_saves_navidromeQuality', async () => {
 });
 
 it('password_is_never_prefilled', async () => {
-  // A saved account whose password the server no longer takes: signing in again prefills
-  // the address and the user, never the password.
+  // A saved account whose password the server no longer takes: signing in again asks for
+  // the password only, and it starts empty.
   connected({ state: 'error', error: { code: 'wrongCredentials', detail: null } });
   mountSettings();
   expect(section().querySelector('input[type="password"]')).toBeNull();
   button('Sign in again').click();
   flushSync();
-  expect(field('url').value).toBe(DEMO_URL);
-  expect(field('user').value).toBe('demo');
   expect(field('password').value).toBe('');
-  expect(field('password').getAttribute('autocomplete')).toBe('off');
+  expect(field('password').getAttribute('autocomplete')).toBe('new-password');
+  await vi.waitFor(() => expect(document.activeElement).toBe(field('password')));
   button('Cancel').click();
   flushSync();
   expect(section().querySelector('input[type="password"]')).toBeNull();
+  await vi.waitFor(() => expect(document.activeElement).toBe(button('Sign in again')));
 
   setStatus({});
   expect(field('password').value).toBe('');
+  expect(field('password').getAttribute('autocomplete')).toBe('new-password');
+});
+
+it('relogin_keeps_the_saved_account', async () => {
+  // The tls text suggests http://, but a different address is a different server (and a
+  // wipe): signing in again cannot change it. That goes through Disconnect.
+  connected({ state: 'error', error: { code: 'tls', detail: null } });
+  mountSettings();
+  button('Sign in again').click();
+  flushSync();
+  expect(section().querySelector('input[name="navidrome-url"]')).toBeNull();
+  expect(section().querySelector('input[name="navidrome-user"]')).toBeNull();
+  expect(section().querySelector('.relogin')?.textContent).toContain(DEMO_URL);
+  expect(section().querySelector('.relogin')?.textContent).toContain('Signed in as demo');
+
+  type(field('password'), 'demo-pass');
+  invoke.mockImplementationOnce(async () => {
+    connected({ state: 'syncing' });
+    return { ...OFF, configured: true, url: DEMO_URL, user: 'demo', state: 'syncing' };
+  });
+  button('Connect').click();
+  await vi.waitFor(() =>
+    expect(invoke).toHaveBeenCalledWith('navidrome_connect', { url: DEMO_URL, user: 'demo', password: 'demo-pass' }),
+  );
+  await vi.waitFor(() => {
+    flushSync();
+    expect(section().querySelector('input[type="password"]')).toBeNull();
+  });
 });
 
 it('has the same defaults as the backend', () => {

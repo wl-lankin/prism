@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from 'svelte';
   import { getVersion } from '@tauri-apps/api/app';
   import { open } from '@tauri-apps/plugin-dialog';
   import logoUrl from '../../../assets/logo.svg';
@@ -98,6 +99,29 @@
     }
   }
 
+  /** Opens a folder's remove confirm with the focus on "Keep". */
+  async function askRemove(path: string, event: MouseEvent) {
+    const row = (event.currentTarget as HTMLElement).closest('li');
+    confirming = path;
+    await tick();
+    row?.querySelector<HTMLElement>('.keep')?.focus();
+  }
+
+  /** Closes the confirm and hands the focus back to the folder's Remove. */
+  async function keepFolder(event: Event) {
+    const row = (event.currentTarget as HTMLElement).closest('li');
+    confirming = null;
+    await tick();
+    row?.querySelector<HTMLElement>('.remove-trigger')?.focus();
+  }
+
+  function folderConfirmKeys(event: KeyboardEvent) {
+    if (event.key !== 'Escape' || confirming === null) return;
+    event.preventDefault();
+    event.stopPropagation();
+    void keepFolder(event);
+  }
+
   async function remove(path: string) {
     confirming = null;
     folderError = null;
@@ -187,14 +211,17 @@
     }
   }
 
-  // Navidrome: the sign-in form while no account is saved (or to sign in again), else the
-  // account with its sync status. The password lives only in this field until a connect
-  // attempt, which clears it; the backend hands it to the OS keychain.
+  // Navidrome: the sign-in form while no account is saved (or the password again for the
+  // saved account), else the account with its sync status. The status store follows
+  // `navidrome://status` only: a connect's own answer can be older than the events. The
+  // password lives only in this field until a connect attempt, which clears it; the backend
+  // hands it to the OS keychain.
 
   let ndUrl = $state('');
   let ndUser = $state('');
   let ndPassword = $state('');
-  /** The account is saved but needs the password again (wrong credentials, keychain). */
+  /** The saved account needs its password again (wrong credentials, keychain). Address and
+   *  user stay fixed: another server or user (which wipes the library) goes through Disconnect. */
   let relogin = $state(false);
   let ndPending = $state<'test' | 'connect' | null>(null);
   let ndResult = $state<{ ok: boolean; text: string } | null>(null);
@@ -203,9 +230,17 @@
   let ndActionError = $state<string | null>(null);
   /** The clock "Synced 4 minutes ago" is measured against, moved on twice a minute. */
   let now = $state(Date.now());
+  let urlInput = $state<HTMLInputElement>();
+  let passwordInput = $state<HTMLInputElement>();
+  let accountActions = $state<HTMLElement>();
+  let disconnectTrigger = $state<HTMLButtonElement>();
+  let keepButton = $state<HTMLButtonElement>();
 
   const showForm = $derived(!navidrome.configured || relogin);
-  const ndFilled = $derived(ndUrl.trim() !== '' && ndUser.trim() !== '' && ndPassword !== '');
+  /** The account a test or connect is for: the saved one when signing in again. */
+  const formUrl = $derived(relogin ? (navidrome.url ?? '') : ndUrl.trim());
+  const formUser = $derived(relogin ? (navidrome.user ?? '') : ndUser.trim());
+  const ndFilled = $derived(formUrl !== '' && formUser !== '' && ndPassword !== '');
   const ndSyncing = $derived(navidrome.state === 'syncing');
   const syncProgress = $derived(navidrome.progress);
   const syncShare = $derived(
@@ -239,12 +274,21 @@
       : t('settings.navidrome.testOkNoVersion', { server, api: info.apiVersion });
   }
 
+  /** The first button of the account row ("Sync now" or "Sign in again"), once it is there. */
+  async function focusAccount() {
+    await tick();
+    accountActions?.querySelector<HTMLElement>('button')?.focus();
+  }
+
+  // While a request runs the controls are read-only and `aria-disabled`, never `disabled`:
+  // a disabled control drops the focus to the page.
+
   async function testConnection() {
     if (!ndFilled || ndPending) return;
     ndPending = 'test';
     ndResult = null;
     try {
-      const info = await navidromeTest(ndUrl.trim(), ndUser.trim(), ndPassword);
+      const info = await navidromeTest(formUrl, formUser, ndPassword);
       ndResult = { ok: true, text: serverText(info) };
     } catch (err) {
       ndResult = { ok: false, text: navidromeErrorText(err) };
@@ -256,40 +300,67 @@
   async function connect(event?: SubmitEvent) {
     event?.preventDefault();
     if (!ndFilled || ndPending) return;
-    const password = ndPassword;
-    // Cleared whatever the outcome: a failed attempt asks for it once more.
-    ndPassword = '';
     ndPending = 'connect';
     ndResult = null;
+    let ok = false;
     try {
-      const status = await navidromeConnect(ndUrl.trim(), ndUser.trim(), password);
-      // The same status also arrives as `navidrome://status`; this one is just sooner.
-      if (status) Object.assign(navidrome, status);
+      await navidromeConnect(formUrl, formUser, ndPassword);
+      ok = true;
       relogin = false;
       ndActionError = null;
     } catch (err) {
       ndResult = { ok: false, text: navidromeErrorText(err) };
     } finally {
+      // Cleared whatever the outcome: a failed attempt asks for it once more.
+      ndPassword = '';
       ndPending = null;
+    }
+    if (ok) {
+      await focusAccount();
+    } else {
+      await tick();
+      passwordInput?.focus();
     }
   }
 
-  function signInAgain() {
-    ndUrl = navidrome.url ?? settings.navidromeUrl ?? '';
-    ndUser = navidrome.user ?? settings.navidromeUser ?? '';
+  async function signInAgain() {
     ndPassword = '';
     ndResult = null;
     confirmDisconnect = false;
     relogin = true;
+    await tick();
+    passwordInput?.focus();
   }
 
-  function cancelSignIn() {
+  async function cancelSignIn() {
+    if (ndPending) return;
     ndPassword = '';
     ndResult = null;
     relogin = false;
+    await focusAccount();
+  }
+
+  async function askDisconnect() {
+    confirmDisconnect = true;
+    await tick();
+    keepButton?.focus();
+  }
+
+  async function keepAccount() {
+    confirmDisconnect = false;
+    await tick();
+    disconnectTrigger?.focus();
+  }
+
+  function confirmKeys(event: KeyboardEvent) {
+    if (event.key !== 'Escape') return;
+    event.preventDefault();
+    event.stopPropagation();
+    void keepAccount();
   }
 
   async function syncNow() {
+    if (ndSyncing) return;
     ndActionError = null;
     try {
       await navidromeSync();
@@ -308,10 +379,17 @@
       ndUser = '';
       ndPassword = '';
       ndResult = null;
+      // The account row is gone with its buttons: the focus goes to the empty form.
+      await tick();
+      urlInput?.focus();
     } catch (err) {
       ndActionError = t('settings.navidrome.disconnectFailed', { message: navidromeErrorText(err) });
     } finally {
       disconnecting = false;
+    }
+    if (navidrome.configured) {
+      await tick();
+      disconnectTrigger?.focus();
     }
   }
 
@@ -326,6 +404,24 @@
     if (hours < 24) return format.format(-hours, 'hour');
     return format.format(-Math.round(hours / 24), 'day');
   }
+
+  /** What the live region says: one line per state (and failure), never the running counts,
+   *  so a long sync is announced once, not on every page of songs. */
+  const announcement = $derived.by(() => {
+    if (!navidrome.configured) return '';
+    switch (navidrome.state) {
+      case 'syncing':
+        return t('settings.navidrome.state.syncing');
+      case 'online':
+        return t('settings.navidrome.state.online');
+      case 'offline':
+        return t('settings.navidrome.state.offline');
+      case 'error':
+        return navidrome.error ? navidromeErrorText(navidrome.error) : '';
+      default:
+        return '';
+    }
+  });
 
   /** The status line's text; the failure of `error` is shown on its own. */
   const statusText = $derived.by(() => {
@@ -352,8 +448,9 @@
     }
   });
 
+  // While the song pass runs the status line carries the count itself.
   const ndCounts = $derived(
-    navidrome.trackCount > 0 || navidrome.albumCount > 0
+    !(ndSyncing && syncProgress) && (navidrome.trackCount > 0 || navidrome.albumCount > 0)
       ? `${tc('view.count.tracks', navidrome.trackCount)}, ${tc('view.count.albums', navidrome.albumCount)}`
       : null,
   );
@@ -406,19 +503,20 @@
                   <i aria-hidden="true"></i>{folder.online ? t('settings.folders.online') : t('settings.folders.offline')}
                 </span>
                 <span class="count">{tc('view.count.tracks', folder.trackCount)}</span>
-                <div class="folder-actions">
+                <!-- svelte-ignore a11y_no_static_element_interactions -->
+                <div class="folder-actions" onkeydown={folderConfirmKeys}>
                   {#if confirming === folder.path}
                     <button type="button" class="link danger" onclick={() => remove(folder.path)}>
                       {t('settings.folders.confirmRemove')}
                     </button>
-                    <button type="button" class="link" onclick={() => (confirming = null)}>{t('settings.folders.cancel')}</button>
+                    <button type="button" class="link keep" onclick={keepFolder}>{t('settings.folders.cancel')}</button>
                   {:else}
                     <button
                       type="button"
-                      class="link"
+                      class="link remove-trigger"
                       aria-label={t('settings.folders.removeLabel', { path: folder.path })}
                       disabled={busy}
-                      onclick={() => (confirming = folder.path)}
+                      onclick={(event) => askRemove(folder.path, event)}
                     >
                       {t('settings.folders.remove')}
                     </button>
@@ -462,59 +560,83 @@
     <section aria-labelledby="settings-navidrome">
       <h2 id="settings-navidrome">{t('settings.navidrome')}</h2>
       <p class="lead">{t('settings.navidrome.lead')}</p>
+      <span class="sr-only nd-live" role="status" aria-live="polite">{announcement}</span>
 
       <div class="panel">
         {#if showForm}
           <form class="nd-form" onsubmit={connect} aria-busy={ndPending !== null}>
-            <label class="field wide">
-              <span class="field-label">{t('settings.navidrome.url')}</span>
-              <input
-                name="navidrome-url"
-                type="text"
-                inputmode="url"
-                placeholder="https://music.example.com"
-                autocomplete="off"
-                autocapitalize="off"
-                spellcheck="false"
-                bind:value={ndUrl}
-                oninput={edited}
-                disabled={ndPending !== null}
-              />
-            </label>
-            <label class="field">
-              <span class="field-label">{t('settings.navidrome.user')}</span>
-              <input
-                name="navidrome-user"
-                type="text"
-                autocomplete="off"
-                autocapitalize="off"
-                spellcheck="false"
-                bind:value={ndUser}
-                oninput={edited}
-                disabled={ndPending !== null}
-              />
-            </label>
+            {#if relogin}
+              <div class="relogin wide">
+                <strong class="server">{navidrome.url}</strong>
+                <span class="hint">{t('settings.navidrome.signedInAs', { user: navidrome.user ?? '' })}</span>
+              </div>
+            {:else}
+              <label class="field wide">
+                <span class="field-label">{t('settings.navidrome.url')}</span>
+                <input
+                  bind:this={urlInput}
+                  name="navidrome-url"
+                  type="text"
+                  inputmode="url"
+                  placeholder="https://music.example.com"
+                  autocomplete="off"
+                  autocapitalize="off"
+                  spellcheck="false"
+                  bind:value={ndUrl}
+                  oninput={edited}
+                  readonly={ndPending !== null}
+                  aria-disabled={ndPending !== null}
+                />
+              </label>
+              <label class="field">
+                <span class="field-label">{t('settings.navidrome.user')}</span>
+                <input
+                  name="navidrome-user"
+                  type="text"
+                  autocomplete="off"
+                  autocapitalize="off"
+                  spellcheck="false"
+                  bind:value={ndUser}
+                  oninput={edited}
+                  readonly={ndPending !== null}
+                  aria-disabled={ndPending !== null}
+                />
+              </label>
+            {/if}
             <label class="field">
               <span class="field-label">{t('settings.navidrome.password')}</span>
               <input
+                bind:this={passwordInput}
                 name="navidrome-password"
                 type="password"
-                autocomplete="off"
+                autocomplete="new-password"
                 bind:value={ndPassword}
                 oninput={edited}
-                disabled={ndPending !== null}
+                readonly={ndPending !== null}
+                aria-disabled={ndPending !== null}
               />
             </label>
 
             <div class="nd-actions">
-              <button type="submit" class="btn primary small" disabled={!ndFilled || ndPending !== null}>
+              <button
+                type="submit"
+                class="btn primary small"
+                disabled={!ndFilled && ndPending === null}
+                aria-disabled={ndPending !== null}
+              >
                 {t('settings.navidrome.connect')}
               </button>
-              <button type="button" class="btn ghost small" disabled={!ndFilled || ndPending !== null} onclick={testConnection}>
+              <button
+                type="button"
+                class="btn ghost small"
+                disabled={!ndFilled && ndPending === null}
+                aria-disabled={ndPending !== null}
+                onclick={testConnection}
+              >
                 {t('settings.navidrome.test')}
               </button>
               {#if relogin}
-                <button type="button" class="link" disabled={ndPending !== null} onclick={cancelSignIn}>
+                <button type="button" class="link" aria-disabled={ndPending !== null} onclick={cancelSignIn}>
                   {t('settings.navidrome.cancel')}
                 </button>
               {/if}
@@ -540,55 +662,71 @@
               <strong class="server">{navidrome.url}</strong>
               <span class="hint">{t('settings.navidrome.signedInAs', { user: navidrome.user ?? '' })}</span>
             </div>
-            <div class="account-actions">
+            <div class="account-actions" bind:this={accountActions}>
               {#if navidrome.state === 'error' && navidrome.error?.code !== 'syncRefused'}
                 <button type="button" class="btn ghost small" disabled={confirmDisconnect || disconnecting} onclick={signInAgain}>
                   {t('settings.navidrome.signInAgain')}
                 </button>
               {:else}
+                <!-- Busy while syncing, but still focusable: a connect hands the focus here. -->
                 <button
                   type="button"
                   class="btn ghost small"
-                  disabled={ndSyncing || confirmDisconnect || disconnecting}
+                  disabled={confirmDisconnect || disconnecting}
+                  aria-disabled={ndSyncing}
                   onclick={syncNow}
                 >
                   <Icon name="refresh" size={17} />
                   {t('settings.navidrome.syncNow')}
                 </button>
               {/if}
-              <button
-                type="button"
-                class="link"
-                disabled={confirmDisconnect || disconnecting}
-                onclick={() => (confirmDisconnect = true)}
-              >
-                {t('settings.navidrome.disconnect')}
-              </button>
+              {#if !confirmDisconnect}
+                <button
+                  bind:this={disconnectTrigger}
+                  type="button"
+                  class="link"
+                  aria-disabled={disconnecting}
+                  onclick={() => !disconnecting && askDisconnect()}
+                >
+                  {t('settings.navidrome.disconnect')}
+                </button>
+              {/if}
             </div>
           </div>
 
           {#if confirmDisconnect}
-            <div class="confirm-row">
+            <!-- svelte-ignore a11y_no_static_element_interactions -->
+            <div class="confirm-row" onkeydown={confirmKeys}>
               <span>{t('settings.navidrome.confirmDisconnect')}</span>
               <div class="confirm-actions">
                 <button type="button" class="link danger" onclick={disconnect}>{t('settings.navidrome.disconnect')}</button>
-                <button type="button" class="link" onclick={() => (confirmDisconnect = false)}>{t('settings.navidrome.keep')}</button>
+                <button bind:this={keepButton} type="button" class="link keep" onclick={keepAccount}>
+                  {t('settings.navidrome.keep')}
+                </button>
               </div>
             </div>
           {/if}
 
           <div class="status">
             {#if navidrome.state === 'error' && navidrome.error}
-              <p class="status-error" role="alert">{navidromeErrorText(navidrome.error)}</p>
+              <p class="status-error">{navidromeErrorText(navidrome.error)}</p>
             {/if}
             {#if statusText || ndCounts}
               <div class="status-line">
-                {#if statusText}<span class="status-text" role="status">{statusText}</span>{/if}
+                {#if statusText}<span class="status-text">{statusText}</span>{/if}
                 {#if ndCounts}<span class="status-counts">{ndCounts}</span>{/if}
               </div>
             {/if}
             {#if ndSyncing}
-              <div class="bar wide" class:indeterminate={!syncProgress?.total}>
+              <div
+                class="bar wide"
+                class:indeterminate={!syncProgress?.total}
+                role="progressbar"
+                aria-label={t('settings.navidrome.state.syncing')}
+                aria-valuemin={0}
+                aria-valuemax={syncProgress?.total ?? undefined}
+                aria-valuenow={syncProgress?.total ? syncProgress.done : undefined}
+              >
                 <i style={syncProgress?.total ? `transform:scaleX(${syncShare})` : undefined}></i>
               </div>
             {/if}
@@ -1122,7 +1260,7 @@
     color: rgba(243, 243, 245, 0.32);
   }
 
-  .field input:hover:not(:disabled) {
+  .field input:hover:not([aria-disabled='true']) {
     background: rgba(255, 255, 255, 0.075);
     box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12);
   }
@@ -1132,10 +1270,6 @@
     box-shadow:
       inset 0 0 0 1px color-mix(in srgb, var(--src-navidrome) 55%, transparent),
       0 0 0 3px color-mix(in srgb, var(--src-navidrome) 12%, transparent);
-  }
-
-  .field input:disabled {
-    opacity: 0.55;
   }
 
   .nd-actions {
@@ -1209,7 +1343,7 @@
   /* Offline: the source color as a hollow ring, the library still there but quiet. */
   .dot.offline {
     background: transparent;
-    box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--src-navidrome) 70%, transparent);
+    box-shadow: inset 0 0 0 1.5px var(--src-navidrome);
   }
 
   .dot.error {
@@ -1295,7 +1429,38 @@
   .keychain {
     font-size: 12px;
     line-height: 1.5;
-    color: rgba(243, 243, 245, 0.45);
+    color: var(--text-dim);
+  }
+
+  /* Signing in again: the saved account as text above the password. */
+  .relogin {
+    grid-column: 1 / -1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  /* Busy controls stay focusable: dimmed like disabled ones, but not `disabled`. */
+  .panel :global(.btn[aria-disabled='true']),
+  .link[aria-disabled='true'] {
+    opacity: 0.5;
+    cursor: default;
+  }
+
+  .field input[aria-disabled='true'] {
+    opacity: 0.55;
   }
 
   .nd-form + .row,
@@ -1469,6 +1634,12 @@
     /* A fade, not motion: it keeps running, only slower. */
     .dot.syncing {
       animation-duration: 2.4s;
+    }
+
+    /* No turning: the ring stays put and only fades. */
+    .spinner {
+      border-color: color-mix(in srgb, var(--src-navidrome) 70%, transparent);
+      animation: breathe 1.6s ease-in-out infinite;
     }
   }
 
