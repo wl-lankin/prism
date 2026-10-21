@@ -168,7 +168,8 @@ fn artwork(raw: &str) -> Option<String> {
         return None;
     }
     let url = Url::parse(raw).ok()?;
-    artwork_allowed(&url).then(|| url.to_string())
+    // Parsing percent-encodes, so the URL can grow past the cap.
+    (artwork_allowed(&url) && url.as_str().len() <= MAX_ARTWORK_BYTES).then(|| url.to_string())
 }
 
 #[cfg(test)]
@@ -299,6 +300,13 @@ pub(crate) mod tests {
         }
         let long = format!("https://i.ytimg.com/{}", "a".repeat(MAX_ARTWORK_BYTES));
         assert_eq!(state_of(with("artwork", json!(long))).artwork, None);
+        // Under the cap as sent, over it once parsing percent-encodes the path.
+        let grows = format!("https://i.ytimg.com/{}", "\u{e4}".repeat(1_000));
+        assert!(grows.len() <= MAX_ARTWORK_BYTES);
+        assert_eq!(state_of(with("artwork", json!(grows))).artwork, None);
+        let fits = format!("https://i.ytimg.com/{}", "\u{e4}".repeat(300));
+        let parsed = state_of(with("artwork", json!(fits))).artwork.unwrap();
+        assert!(parsed.contains("%C3%A4") && parsed.len() <= MAX_ARTWORK_BYTES);
         for good in [
             "https://i.ytimg.com/vi/x/hq.jpg",
             "https://yt3.ggpht.com/abc",

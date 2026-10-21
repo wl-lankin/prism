@@ -10,6 +10,7 @@ pub mod report;
 pub mod state;
 
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Instant;
 
 use covers::Artwork;
 use report::{PageState, Report};
@@ -180,11 +181,56 @@ pub type StateEmit = Arc<dyn Fn(&YtmState) + Send + Sync>;
 /// Called with every state a report gives, unchanged ones included (for the transport).
 pub type StateFollower = Arc<dyn Fn(&YtmState) + Send + Sync>;
 
+/// Reports the page may send per second on average; the excess is dropped.
+pub const REPORTS_PER_SEC: f64 = 20.0;
+/// Reports the page may send at once.
+pub const REPORT_BURST: f64 = 10.0;
+
+/// A token bucket for the page's reports.
+struct Bucket {
+    tokens: f64,
+    at: Option<Instant>,
+}
+
+impl Bucket {
+    fn full() -> Bucket {
+        Bucket {
+            tokens: REPORT_BURST,
+            at: None,
+        }
+    }
+
+    fn take(&mut self, now: Instant) -> bool {
+        if let Some(at) = self.at {
+            let elapsed = now.saturating_duration_since(at).as_secs_f64();
+            self.tokens = (self.tokens + elapsed * REPORTS_PER_SEC).min(REPORT_BURST);
+        }
+        if self.at.is_none_or(|at| now > at) {
+            self.at = Some(now);
+        }
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+struct Inner {
+    state: YtmState,
+    /// `playing` of the last report let through.
+    playing: bool,
+    bucket: Bucket,
+}
+
 pub struct YtmService {
     page: Arc<dyn PageEval>,
     emit: StateEmit,
     artwork: Arc<Artwork>,
-    state: Mutex<YtmState>,
+    inner: Mutex<Inner>,
+    /// Held from a state's change to its emit and follow, so they never go out of order.
+    order: Mutex<()>,
     follower: Mutex<Option<StateFollower>>,
 }
 
@@ -200,7 +246,12 @@ impl YtmService {
             page,
             emit,
             artwork: Arc::default(),
-            state: Mutex::new(YtmState::default()),
+            inner: Mutex::new(Inner {
+                state: YtmState::default(),
+                playing: false,
+                bucket: Bucket::full(),
+            }),
+            order: Mutex::new(()),
             follower: Mutex::new(None),
         }
     }
@@ -210,38 +261,61 @@ impl YtmService {
         Arc::clone(&self.artwork)
     }
 
-    /// Replaces the follower. It is called outside the service's lock and must not call back
-    /// into the service's `handle`.
+    /// Replaces the follower. It is called in order, outside the state's lock, and must not
+    /// call back into the service's `handle` or `reset`.
     pub fn follow(&self, follower: StateFollower) {
         *lock(&self.follower) = Some(follower);
     }
 
     pub fn state(&self) -> YtmState {
-        lock(&self.state).clone()
+        lock(&self.inner).state.clone()
     }
 
-    /// Applies one validated report.
+    /// Applies one validated report, unless the page sends more than [`REPORTS_PER_SEC`]
+    /// (bursts of [`REPORT_BURST`]); the first report after a change of `playing` always
+    /// counts, so a start or a pause is never lost.
     pub fn handle(&self, report: Report) {
-        match report {
-            Report::State(page) => {
-                let next = self.derive(&page);
-                self.apply(next);
+        self.handle_at(report, Instant::now());
+    }
+
+    fn handle_at(&self, report: Report, now: Instant) {
+        let _order = lock(&self.order);
+        let page = match report {
+            Report::State(page) => Some(page),
+            Report::Ended => None,
+        };
+        {
+            let mut inner = lock(&self.inner);
+            let edge = page
+                .as_ref()
+                .is_some_and(|page| page.playing != inner.playing);
+            if !inner.bucket.take(now) && !edge {
+                return;
             }
-            // The state report that follows carries what changed.
-            Report::Ended => {}
+            if let Some(page) = &page {
+                inner.playing = page.playing;
+            }
+        }
+        // `ended` changes nothing by itself: the state report that follows carries it.
+        if let Some(page) = page {
+            let next = self.derive(&page);
+            self.apply(next);
         }
     }
 
     /// Back to idle: the view is gone (sign-out, destroy), so control falls back to Prism.
     pub fn reset(&self) {
+        let _order = lock(&self.order);
+        lock(&self.inner).playing = false;
         self.apply(YtmState::default());
     }
 
+    /// Called with `order` held.
     fn apply(&self, next: YtmState) {
         let changed = {
-            let mut state = lock(&self.state);
-            let changed = *state != next;
-            *state = next.clone();
+            let mut inner = lock(&self.inner);
+            let changed = inner.state != next;
+            inner.state = next.clone();
             changed
         };
         if changed {
@@ -394,6 +468,114 @@ mod tests {
 
         // Handling reports never sends anything into the page.
         assert!(lock(&f.page.0).is_empty());
+    }
+
+    #[test]
+    fn reports_are_rate_limited_but_play_changes_always_count() {
+        use std::time::Duration;
+        let f = fixture();
+        let start = Instant::now();
+        let at = |ms: u64| start + Duration::from_millis(ms);
+        let followed = || lock(&f.followed).len();
+
+        // A burst of 10 at once counts; the 11th is dropped silently.
+        for n in 0..10 {
+            f.service
+                .handle_at(report_with(json!({ "positionMs": n * 10 })), at(0));
+        }
+        assert_eq!(followed(), 10);
+        f.service
+            .handle_at(report_with(json!({ "positionMs": 500 })), at(0));
+        assert_eq!(followed(), 10);
+        assert_eq!(f.service.state().position_ms, 90);
+        f.service.handle_at(Report::Ended, at(0));
+
+        // Out of tokens, a pause still counts, once; the next one with the same play state
+        // does not.
+        f.service
+            .handle_at(report_with(json!({ "playing": false })), at(0));
+        assert_eq!(followed(), 11);
+        assert_eq!(f.service.state().status, YtmStatus::Paused);
+        f.service.handle_at(
+            report_with(json!({ "playing": false, "title": "x" })),
+            at(0),
+        );
+        assert_eq!(followed(), 11);
+        assert_eq!(f.service.state().title, "Testlied");
+        // So does the start after it.
+        f.service.handle_at(report_with(json!({})), at(0));
+        assert_eq!(followed(), 12);
+        assert_eq!(f.service.state().status, YtmStatus::Playing);
+
+        // 20 per second: one more after 60 ms, and never more than the burst after a pause.
+        f.service.handle_at(report_with(json!({})), at(10));
+        assert_eq!(followed(), 12);
+        f.service.handle_at(report_with(json!({})), at(60));
+        assert_eq!(followed(), 13);
+        for _ in 0..15 {
+            f.service.handle_at(report_with(json!({})), at(60_000));
+        }
+        assert_eq!(followed(), 23);
+
+        // A flapping page gets every edge through, but nothing in between.
+        for n in 0..6 {
+            let playing = n % 2 == 1;
+            f.service
+                .handle_at(report_with(json!({ "playing": playing })), at(60_000));
+            f.service
+                .handle_at(report_with(json!({ "playing": playing })), at(60_000));
+        }
+        assert_eq!(followed(), 29);
+
+        // Reset is never limited, and the next start after it counts.
+        f.service.reset();
+        assert_eq!(followed(), 30);
+        f.service.handle_at(report_with(json!({})), at(60_000));
+        assert_eq!(followed(), 31);
+    }
+
+    #[test]
+    fn state_emits_never_go_out_of_order() {
+        use std::sync::OnceLock;
+        use std::time::Duration;
+        let service_slot: Arc<OnceLock<Arc<YtmService>>> = Arc::default();
+        let mismatches: Arc<Mutex<usize>> = Arc::default();
+        let emitted: Arc<Mutex<Vec<YtmState>>> = Arc::default();
+        let service = Arc::new(YtmService::new(Arc::new(Recorder::default()), {
+            let (slot, mismatches, emitted) = (
+                Arc::clone(&service_slot),
+                Arc::clone(&mismatches),
+                Arc::clone(&emitted),
+            );
+            Arc::new(move |state| {
+                // Give a racing apply time to overtake this emit.
+                std::thread::yield_now();
+                if let Some(service) = slot.get() {
+                    if service.state() != *state {
+                        *lock(&mismatches) += 1;
+                    }
+                }
+                lock(&emitted).push(state.clone());
+            })
+        }));
+        let _ = service_slot.set(Arc::clone(&service));
+        let start = Instant::now();
+        std::thread::scope(|scope| {
+            for thread in 0..4u64 {
+                let service = &service;
+                scope.spawn(move || {
+                    for n in 0..200u64 {
+                        let ms = thread * 1_000 + n;
+                        service.handle_at(
+                            report_with(json!({ "positionMs": ms })),
+                            start + Duration::from_secs(ms),
+                        );
+                    }
+                });
+            }
+        });
+        assert_eq!(*lock(&mismatches), 0);
+        assert_eq!(lock(&emitted).last(), Some(&service.state()));
     }
 
     #[test]
