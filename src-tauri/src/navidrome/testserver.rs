@@ -61,6 +61,8 @@ pub(crate) enum Fault {
     NoRanges,
     /// `search3` returns no songs.
     Search3Empty,
+    /// `search3` ignores `songOffset` and answers the first page every time.
+    IgnoreOffset,
     /// Every request fails with this Subsonic error code.
     Code(u32),
     /// Every request answers this HTTP status with a Subsonic error body of this code.
@@ -822,7 +824,11 @@ fn answer(
         }
         "search3" => {
             let count = number(params, "songCount", 20);
-            let offset = number(params, "songOffset", 0);
+            let offset = if matches!(fault, Fault::IgnoreOffset) {
+                0
+            } else {
+                number(params, "songOffset", 0)
+            };
             let songs: Vec<Value> = if matches!(fault, Fault::Search3Empty) {
                 Vec::new()
             } else {

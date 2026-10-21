@@ -27,7 +27,8 @@
           "albumId": "al-1",
           "artistId": "ar-1",
           "displayAlbumArtist": "Demo Artist 1",
-          "albumArtists": [{ "id": "ar-1", "name": "Demo Artist 1" }]
+          "albumArtists": [{ "id": "ar-1", "name": "Demo Artist 1" }],
+          "replayGain": { "trackGain": -6.5, "albumGain": -7.25, "trackPeak": 0.98, "albumPeak": 1.0 }
         },
         {
           "id": "tr-3",
