@@ -6,9 +6,11 @@
 //! 0..n; every change that could leave a gap renumbers.
 
 use std::collections::HashMap;
+use std::hash::Hash;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::bail;
+use rusqlite::types::{FromSql, Value, ValueRef};
 use rusqlite::{params, Connection, OptionalExtension, ToSql, Transaction};
 use serde::Serialize;
 
@@ -22,7 +24,7 @@ pub const EVENT_CHANGED: &str = "playlists://changed";
 pub const MAX_NAME_CHARS: usize = 200;
 
 /// How many distinct covers a playlist offers for its mosaic.
-pub(crate) const COVER_MOSAIC: usize = 4;
+const COVER_MOSAIC: usize = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -147,75 +149,99 @@ fn summarize(conn: &Connection, id: i64) -> anyhow::Result<Playlist> {
     })
 }
 
-/// A CTE `covers(playlist_id, cover_id, rank)` over the entry table `entries`: each playlist's
-/// distinct cover ids, ranked 1.. by the first position they appear at. Entries whose track is
-/// not in the index have no cover and drop out. Join it with `rank <= COVER_MOSAIC`.
-pub(crate) fn covers_cte(entries: &str) -> String {
+/// What one ordered scan of an entry table says about a playlist.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct EntryTotals {
+    /// Entries, including those whose track is not in the index.
+    pub track_count: u32,
+    /// Summed over the entries whose track is in the index.
+    pub duration_ms: u64,
+    /// Up to four distinct cover ids, in playlist order.
+    pub cover_ids: Vec<String>,
+}
+
+/// The scan behind [`entry_totals`]: every entry of `entries` with its track's duration and
+/// cover, in primary key order (`playlist_id`, `position`), so it needs no sort.
+pub(crate) fn entry_scan_sql(entries: &str) -> String {
     format!(
-        "covers AS (
-            SELECT p.playlist_id, t.cover_id,
-                   ROW_NUMBER() OVER (PARTITION BY p.playlist_id ORDER BY MIN(p.position)) AS rank
-            FROM {entries} p JOIN tracks t ON t.id = p.track_id
-            WHERE t.cover_id IS NOT NULL
-            GROUP BY p.playlist_id, t.cover_id
-        )"
+        "SELECT p.playlist_id, t.duration_ms, t.cover_id
+         FROM {entries} p LEFT JOIN tracks t ON t.id = p.track_id
+         ORDER BY p.playlist_id, p.position"
     )
 }
 
-/// Folds the rows of a summary query, one row per `(playlist, cover)` ordered by playlist and
-/// then cover rank (a playlist without covers has one row with `None`), into one summary per
-/// playlist in row order.
-pub(crate) fn fold_covers<K: PartialEq, T>(
-    rows: impl IntoIterator<Item = (K, T, Option<String>)>,
-    covers: impl Fn(&mut T) -> &mut Vec<String>,
-) -> Vec<T> {
-    let mut out: Vec<(K, T)> = Vec::new();
-    for (key, summary, cover) in rows {
-        if out.last().is_none_or(|(last, _)| *last != key) {
-            out.push((key, summary));
+/// Count, duration and the first four distinct covers of every playlist of the entry table
+/// `entries` (columns `playlist_id`, `position`, `track_id`), folded from one ordered scan.
+/// Entries whose track is not in the index count, but add no duration and no cover. A playlist
+/// without entries is absent.
+pub(crate) fn entry_totals<K: FromSql + Eq + Hash>(
+    conn: &Connection,
+    entries: &str,
+) -> anyhow::Result<HashMap<K, EntryTotals>> {
+    let mut stmt = conn.prepare(&entry_scan_sql(entries))?;
+    let mut rows = stmt.query([])?;
+    let mut out: HashMap<K, EntryTotals> = HashMap::new();
+    // The rows come grouped by playlist: the key is decoded once per playlist, not per row.
+    let mut current: Option<(Value, EntryTotals)> = None;
+    while let Some(row) = rows.next()? {
+        let key = row.get_ref(0)?;
+        if current
+            .as_ref()
+            .is_none_or(|(known, _)| ValueRef::from(known) != key)
+        {
+            if let Some((known, totals)) = current.take() {
+                out.insert(K::column_result(ValueRef::from(&known))?, totals);
+            }
+            current = Some((Value::column_result(key)?, EntryTotals::default()));
         }
-        if let (Some(cover), Some((_, summary))) = (cover, out.last_mut()) {
-            covers(summary).push(cover);
+        let Some((_, totals)) = current.as_mut() else {
+            continue;
+        };
+        totals.track_count = totals.track_count.saturating_add(1);
+        if let Some(duration) = row.get_ref(1)?.as_i64_or_null()? {
+            totals.duration_ms = totals.duration_ms.saturating_add(duration.max(0) as u64);
+        }
+        if totals.cover_ids.len() < COVER_MOSAIC {
+            if let Some(cover) = row.get_ref(2)?.as_str_or_null()? {
+                if !totals.cover_ids.iter().any(|known| known == cover) {
+                    totals.cover_ids.push(cover.to_owned());
+                }
+            }
         }
     }
-    out.into_iter().map(|(_, summary)| summary).collect()
+    if let Some((known, totals)) = current {
+        out.insert(K::column_result(ValueRef::from(&known))?, totals);
+    }
+    Ok(out)
 }
 
-/// Every playlist, most recently changed first, in one query.
+/// Every playlist, most recently changed first: one query for the playlists and one ordered
+/// scan of every entry (no query per playlist).
 pub fn playlists_list(conn: &Connection) -> anyhow::Result<Vec<Playlist>> {
-    let sql = format!(
-        "WITH totals AS (
-            SELECT p.playlist_id, COUNT(*) AS track_count,
-                   COALESCE(SUM(t.duration_ms), 0) AS duration_ms
-            FROM playlist_tracks p LEFT JOIN tracks t ON t.id = p.track_id
-            GROUP BY p.playlist_id
-        ),
-        {covers}
-        SELECT pl.id, pl.name, pl.updated_at, COALESCE(n.track_count, 0),
-               COALESCE(n.duration_ms, 0), c.cover_id
-        FROM playlists pl
-        LEFT JOIN totals n ON n.playlist_id = pl.id
-        LEFT JOIN covers c ON c.playlist_id = pl.id AND c.rank <= {COVER_MOSAIC}
-        ORDER BY pl.updated_at DESC, pl.id DESC, c.rank",
-        covers = covers_cte("playlist_tracks"),
-    );
-    let mut stmt = conn.prepare(&sql)?;
+    let mut totals: HashMap<i64, EntryTotals> = entry_totals(conn, "playlist_tracks")?;
+    let mut stmt = conn
+        .prepare("SELECT id, name, updated_at FROM playlists ORDER BY updated_at DESC, id DESC")?;
     let rows = stmt.query_map([], |row| {
-        let id: i64 = row.get(0)?;
-        let track_count: i64 = row.get(3)?;
-        let duration_ms: i64 = row.get(4)?;
-        let playlist = Playlist {
-            id,
-            name: row.get(1)?,
-            track_count: track_count.max(0) as u32,
-            duration_ms: duration_ms.max(0) as u64,
-            cover_ids: Vec::new(),
-            updated_at: row.get(2)?,
-        };
-        Ok((id, playlist, row.get::<_, Option<String>>(5)?))
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+        ))
     })?;
-    let rows = rows.collect::<Result<Vec<_>, _>>()?;
-    Ok(fold_covers(rows, |playlist| &mut playlist.cover_ids))
+    let mut out = Vec::new();
+    for row in rows {
+        let (id, name, updated_at) = row?;
+        let totals = totals.remove(&id).unwrap_or_default();
+        out.push(Playlist {
+            id,
+            name,
+            track_count: totals.track_count,
+            duration_ms: totals.duration_ms,
+            cover_ids: totals.cover_ids,
+            updated_at,
+        });
+    }
+    Ok(out)
 }
 
 pub fn playlist_create(conn: &Connection, name: &str) -> anyhow::Result<Playlist> {
@@ -354,6 +380,31 @@ pub fn playlist_move(conn: &Connection, id: i64, from: u32, to: u32) -> anyhow::
     }
     tx.commit()?;
     Ok(changed)
+}
+
+/// Asserts the plan of the summary scan: entries in primary key order (no sort, no temp
+/// b-tree) and each track looked up by its id (no scan of `tracks`).
+#[cfg(test)]
+pub(crate) fn assert_scan_needs_no_sort(conn: &Connection, entries: &str) {
+    let mut stmt = conn
+        .prepare(&format!("EXPLAIN QUERY PLAN {}", entry_scan_sql(entries)))
+        .unwrap();
+    let plan: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(3))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let text = plan.join(" | ");
+    assert!(!text.contains("TEMP B-TREE"), "{text}");
+    assert!(
+        plan.iter()
+            .any(|step| step.starts_with("SEARCH t ") && step.contains("id=?")),
+        "{text}"
+    );
+    assert!(
+        !plan.iter().any(|step| step.starts_with("SCAN t")),
+        "{text}"
+    );
 }
 
 #[cfg(test)]
@@ -704,6 +755,13 @@ mod tests {
         assert_eq!(by_id(mixed).cover_ids, strings(&["c2", "c1"]));
         assert_eq!(by_id(many).cover_ids, strings(&["c5", "c4", "c1", "c3"]));
         assert_eq!(by_id(one).cover_ids, strings(&["c3"]));
+    }
+
+    #[test]
+    fn summary_scan_follows_the_primary_key() {
+        let db = db();
+        let conn = db.0.lock().unwrap();
+        assert_scan_needs_no_sort(&conn, "playlist_tracks");
     }
 
     #[test]

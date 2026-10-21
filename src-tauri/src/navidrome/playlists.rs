@@ -18,9 +18,7 @@ use super::client::{NavidromeError, PlaylistSummary, PlaylistWithSongs, Subsonic
 use super::sync::SyncError;
 use crate::db::Db;
 use crate::library::model::navidrome_id;
-use crate::library::playlists::{
-    covers_cte, fold_covers, resolve_entries, PlaylistEntry, COVER_MOSAIC,
-};
+use crate::library::playlists::{entry_totals, resolve_entries, EntryTotals, PlaylistEntry};
 use crate::library::scan::lock;
 
 /// A playlist of the server as the UI lists it.
@@ -88,6 +86,7 @@ pub fn sync_playlists_cancellable(
 
     let mut fetched: Vec<Fetched> = Vec::new();
     let mut vanished: Vec<String> = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
     for summary in &listed {
         if !needs_fetch(summary, stored.get(&navidrome_id(&summary.id))) {
             continue;
@@ -113,6 +112,12 @@ pub fn sync_playlists_cancellable(
             }),
             // Deleted between the two calls.
             Err(NavidromeError::NotFound) => vanished.push(summary.id.clone()),
+            // This one playlist failed: the rest syncs, it keeps its rows and is fetched
+            // again next cycle.
+            Err(err) if skips_playlist(&err) => {
+                eprintln!("Navidrome playlist skipped: {}", err.code());
+                skipped.push(summary.id.clone());
+            }
             Err(err) => return Err(err.into()),
         }
     }
@@ -122,9 +127,26 @@ pub fn sync_playlists_cancellable(
         return Err(SyncError::Cancelled);
     }
     let tx = conn.transaction()?;
-    let rows = write(&tx, &listed, &fetched, &vanished, now_ms)?;
+    let rows = write(&tx, &listed, &fetched, &vanished, &skipped, now_ms)?;
     tx.commit()?;
     Ok(rows > 0)
+}
+
+/// Whether a `getPlaylist` failure concerns that playlist only (a server error, a refused or
+/// unreadable answer), so the cycle goes on without it. Offline and account-level failures
+/// (credentials, TLS, token auth, the address) end the cycle as before.
+fn skips_playlist(err: &NavidromeError) -> bool {
+    match err {
+        NavidromeError::Server { .. }
+        | NavidromeError::NotSubsonic(_)
+        | NavidromeError::NotAuthorized => true,
+        NavidromeError::InvalidUrl(_)
+        | NavidromeError::WrongCredentials
+        | NavidromeError::TokenAuthUnsupported
+        | NavidromeError::NotFound
+        | NavidromeError::Unreachable(_)
+        | NavidromeError::Tls(_) => false,
+    }
 }
 
 fn now_ms() -> i64 {
@@ -188,19 +210,22 @@ fn upsert_summary(
     ])
 }
 
-/// Writes one sync's result; returns the rows changed.
+/// Writes one sync's result; returns the rows changed. A `skipped` playlist (its fetch failed)
+/// is left exactly as stored: its listing summary is not written either, or its new `changed`
+/// value would hide the change from the next cycle.
 fn write(
     tx: &Transaction,
     listed: &[PlaylistSummary],
     fetched: &[Fetched],
     vanished: &[String],
+    skipped: &[String],
     now_ms: i64,
 ) -> rusqlite::Result<usize> {
     let mut rows = 0;
     let fetched_ids: HashMap<&str, &Fetched> =
         fetched.iter().map(|f| (f.summary.id.as_str(), f)).collect();
     for summary in listed {
-        if vanished.contains(&summary.id) {
+        if vanished.contains(&summary.id) || skipped.contains(&summary.id) {
             continue;
         }
         match fetched_ids.get(summary.id.as_str()) {
@@ -259,36 +284,37 @@ fn write_entries(tx: &Transaction, id: &str, track_ids: &[String]) -> rusqlite::
     Ok(rows)
 }
 
-/// Every server playlist, most recently changed first (like the Prism playlists), in one
-/// query.
+/// Every server playlist, most recently changed first (like the Prism playlists): one query
+/// for the playlists and one ordered scan of every entry for the covers. Count and duration
+/// are the server's.
 pub fn list(conn: &Connection) -> anyhow::Result<Vec<RemotePlaylist>> {
-    let sql = format!(
-        "WITH {covers}
-         SELECT pl.id, pl.name, pl.owner, pl.track_count, pl.duration_ms, pl.updated_at,
-                c.cover_id
-         FROM remote_playlists pl
-         LEFT JOIN covers c ON c.playlist_id = pl.id AND c.rank <= {COVER_MOSAIC}
-         ORDER BY pl.updated_at DESC, pl.name COLLATE NOCASE, pl.id, c.rank",
-        covers = covers_cte("remote_playlist_tracks"),
-    );
-    let mut stmt = conn.prepare(&sql)?;
+    let mut totals: HashMap<String, EntryTotals> = entry_totals(conn, "remote_playlist_tracks")?;
+    let mut stmt = conn.prepare(
+        "SELECT id, name, owner, track_count, duration_ms, updated_at FROM remote_playlists
+         ORDER BY updated_at DESC, name COLLATE NOCASE, id",
+    )?;
     let rows = stmt.query_map([], |row| {
-        let id: String = row.get(0)?;
         let track_count: i64 = row.get(3)?;
         let duration_ms: i64 = row.get(4)?;
-        let playlist = RemotePlaylist {
-            id: id.clone(),
+        Ok(RemotePlaylist {
+            id: row.get(0)?,
             name: row.get(1)?,
             owner: row.get(2)?,
             track_count: track_count.clamp(0, i64::from(u32::MAX)) as u32,
             duration_ms: duration_ms.max(0) as u64,
             cover_ids: Vec::new(),
             updated_at: row.get(5)?,
-        };
-        Ok((id, playlist, row.get::<_, Option<String>>(6)?))
+        })
     })?;
-    let rows = rows.collect::<Result<Vec<_>, _>>()?;
-    Ok(fold_covers(rows, |playlist| &mut playlist.cover_ids))
+    let mut out = Vec::new();
+    for playlist in rows {
+        let mut playlist = playlist?;
+        if let Some(totals) = totals.remove(&playlist.id) {
+            playlist.cover_ids = totals.cover_ids;
+        }
+        out.push(playlist);
+    }
+    Ok(out)
 }
 
 /// The entries of a server playlist in order; a track that is not in the index comes back with
@@ -310,11 +336,12 @@ pub fn entries(conn: &Connection, id: &str) -> anyhow::Result<Vec<PlaylistEntry>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::library::playlists::assert_scan_needs_no_sort;
     use crate::library::playlists::{
         playlist_add, playlist_create, playlist_entries, playlists_list,
     };
     use crate::navidrome::sync::{ensure_server, sync_library};
-    use crate::navidrome::testserver::{FakeLibrary, FakeServer, FAKE_USER};
+    use crate::navidrome::testserver::{FakeLibrary, FakeServer, Fault, FAKE_USER};
 
     struct Env {
         server: FakeServer,
@@ -537,6 +564,125 @@ mod tests {
         // The next sync fetches every playlist again.
         assert!(env.sync());
         assert_eq!(env.requests("getPlaylist"), 4);
+    }
+
+    fn change_both(env: &Env, changed: &str) {
+        let changed = changed.to_owned();
+        env.server.edit(move |lib| {
+            for playlist in &mut lib.playlists {
+                playlist.summary.changed = Some(changed.clone());
+                playlist.song_ids.push("tr-9".into());
+            }
+        });
+    }
+
+    fn changed_of(env: &Env, id: &str) -> Option<String> {
+        env.db
+            .0
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT changed FROM remote_playlists WHERE id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn failing_playlist_is_skipped_and_refetched() {
+        let env = env();
+        env.sync();
+        change_both(&env, "2026-03-01T00:00:00Z");
+        env.server.set_fault(Fault::CodeFor {
+            method: "getPlaylist",
+            id: "pl-1",
+            code: 0,
+        });
+        // The other playlist syncs; the failing one keeps its rows and its old `changed`.
+        assert!(env.sync());
+        assert_eq!(env.entries("navidrome:pl-0").len(), 6);
+        assert_eq!(
+            ids(&env.entries("navidrome:pl-1")),
+            vec!["navidrome:tr-0", "navidrome:tr-7"]
+        );
+        assert_eq!(
+            changed_of(&env, "navidrome:pl-1").as_deref(),
+            Some("2026-01-01T00:00:00Z")
+        );
+        assert_eq!(env.list().len(), 2);
+        // Still failing: still kept, still asked for.
+        let before = env.requests("getPlaylist");
+        assert!(!env.sync());
+        assert_eq!(env.requests("getPlaylist"), before + 1);
+        assert_eq!(env.entries("navidrome:pl-1").len(), 2);
+        // It answers again: fetched next cycle.
+        env.server.set_fault(Fault::None);
+        assert!(env.sync());
+        assert_eq!(
+            ids(&env.entries("navidrome:pl-1")),
+            vec!["navidrome:tr-0", "navidrome:tr-7", "navidrome:tr-9"]
+        );
+        assert_eq!(
+            changed_of(&env, "navidrome:pl-1").as_deref(),
+            Some("2026-03-01T00:00:00Z")
+        );
+    }
+
+    #[test]
+    fn failing_new_playlist_is_left_out_until_it_answers() {
+        let env = env();
+        env.server.set_fault(Fault::CodeFor {
+            method: "getPlaylist",
+            id: "pl-0",
+            code: 0,
+        });
+        assert!(env.sync());
+        let listed = env.list();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, "navidrome:pl-1");
+        env.server.set_fault(Fault::None);
+        assert!(env.sync());
+        assert_eq!(env.list().len(), 2);
+        assert_eq!(env.entries("navidrome:pl-0").len(), 5);
+    }
+
+    #[test]
+    fn account_and_offline_failures_of_a_playlist_still_end_the_sync() {
+        let env = env();
+        env.sync();
+        change_both(&env, "2026-03-01T00:00:00Z");
+        env.server.set_fault(Fault::CodeFor {
+            method: "getPlaylist",
+            id: "pl-1",
+            code: 40,
+        });
+        let result = sync_playlists(&env.db, &env.client);
+        assert!(
+            matches!(
+                result,
+                Err(SyncError::Api(NavidromeError::WrongCredentials))
+            ),
+            "{result:?}"
+        );
+        env.server.set_fault(Fault::CutOnce {
+            method: "getPlaylist",
+            after_bytes: 0,
+        });
+        let result = sync_playlists(&env.db, &env.client);
+        assert!(
+            matches!(&result, Err(SyncError::Api(err)) if err.is_offline()),
+            "{result:?}"
+        );
+        // Neither wrote anything: both playlists are as before.
+        assert_eq!(env.entries("navidrome:pl-0").len(), 5);
+        assert_eq!(env.entries("navidrome:pl-1").len(), 2);
+    }
+
+    #[test]
+    fn summary_scan_follows_the_primary_key() {
+        let env = env();
+        assert_scan_needs_no_sort(&env.db.0.lock().unwrap(), "remote_playlist_tracks");
     }
 
     #[test]

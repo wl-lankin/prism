@@ -10,7 +10,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use crate::audio::list_devices;
 use crate::flow::{FlowOutcome, FlowVariant};
 use crate::library::favorites::{self, FavKind, FavoriteIds};
-use crate::library::model::{Album, Artist, Folder, Source, Track};
+use crate::library::model::{navidrome_raw, Album, Artist, Folder, Source, Track};
 use crate::library::playlists::{self, Playlist, PlaylistEntry};
 use crate::library::query::{self, SearchResult};
 use crate::library::scan::{lock, ScanReport};
@@ -604,6 +604,9 @@ pub async fn navidrome_playlist_entries(
     app: AppHandle,
     id: String,
 ) -> Result<Vec<PlaylistEntry>, String> {
+    if navidrome_raw(&id).is_none() {
+        return Err("This playlist no longer exists".to_string());
+    }
     read(&app, move |conn| remote_playlists::entries(conn, &id)).await
 }
 

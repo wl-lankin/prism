@@ -308,6 +308,15 @@ impl Core {
         self.inner().epoch == epoch
     }
 
+    /// [`Core::is_current`] checked while holding the database lock, the way a wipe orders
+    /// itself: a wipe that already holds the lock has bumped the epoch.
+    fn is_current_under_db_lock(&self, epoch: u64) -> bool {
+        match lock_db(&self.db) {
+            Ok(_conn) => self.is_current(epoch),
+            Err(_) => false,
+        }
+    }
+
     /// The scheduler thread: waits for a kick or the due time, then runs one cycle on a
     /// worker and waits for it before the next one.
     fn schedule(self: Arc<Core>) {
@@ -407,7 +416,7 @@ impl Core {
         let report =
             sync_library_cancellable(&self.db, client, now_ms(), &progress, &changed, &cancelled)?;
         if sync_playlists_cancellable(&self.db, client, now_ms(), &cancelled)?
-            && self.is_current(epoch)
+            && self.is_current_under_db_lock(epoch)
         {
             (self.emit)(NavidromeEvent::PlaylistsChanged);
         }
