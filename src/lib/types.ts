@@ -154,7 +154,15 @@ export interface Settings {
   startWithSystem: boolean;
   repeat: RepeatMode;
   shuffle: boolean;
+  /** The connected Navidrome server; only connect / disconnect change it. */
+  navidromeUrl: string | null;
+  /** The connected Navidrome user; only connect / disconnect change it. */
+  navidromeUser: string | null;
+  navidromeQuality: StreamQuality;
 }
+
+/** Navidrome stream quality: the original file or an MP3 transcode at a bitrate cap. */
+export type StreamQuality = 'original' | '320' | '192' | '128';
 
 /** One entry of `player_queue_range`; `track` is null when the id no longer resolves. */
 export interface QueueItem {

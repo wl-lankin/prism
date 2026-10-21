@@ -8,8 +8,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
+
+use crate::navidrome::client::StreamQuality;
 
 /// Sent to every window with the full settings after each save.
 pub const EVENT_CHANGED: &str = "settings://changed";
@@ -87,6 +89,34 @@ pub struct Settings {
     pub repeat: RepeatMode,
     /// The upcoming part of the queue plays in random order.
     pub shuffle: bool,
+    /// The connected Navidrome server (normalized). Only connect and disconnect write it
+    /// ([`SettingsStore::set_navidrome_account`]); the password lives in the OS keychain.
+    pub navidrome_url: Option<String>,
+    /// The connected Navidrome user, written together with `navidrome_url`.
+    pub navidrome_user: Option<String>,
+    /// Read by the stream opener at every open, so it needs no [`Change`].
+    #[serde(deserialize_with = "lenient_quality")]
+    pub navidrome_quality: StreamQuality,
+}
+
+/// The patch keys only connect and disconnect may write.
+const ACCOUNT_KEYS: [&str; 2] = ["navidromeUrl", "navidromeUser"];
+
+/// Reads a stream quality; an unknown value (a later version's, a hand edit) is the default
+/// instead of an error, so the rest of the file is kept.
+fn lenient_quality<'de, D: Deserializer<'de>>(deserializer: D) -> Result<StreamQuality, D::Error> {
+    let value = Value::deserialize(deserializer)?;
+    Ok(StreamQuality::deserialize(value).unwrap_or_default())
+}
+
+/// Removes the Navidrome account from a settings patch: the UI connects and disconnects
+/// through their own commands, which check the server and keep the keychain in step.
+pub fn strip_account_keys(patch: &mut Value) {
+    if let Value::Object(fields) = patch {
+        for key in ACCOUNT_KEYS {
+            fields.remove(key);
+        }
+    }
 }
 
 impl Default for Settings {
@@ -105,6 +135,9 @@ impl Default for Settings {
             start_with_system: false,
             repeat: RepeatMode::Off,
             shuffle: false,
+            navidrome_url: None,
+            navidrome_user: None,
+            navidrome_quality: StreamQuality::Original,
         }
     }
 }
@@ -129,6 +162,12 @@ impl Settings {
             .is_some_and(|name| name.trim().is_empty())
         {
             self.output_device = None;
+        }
+        // An account is a url and a user; half of one (a hand edit) is none.
+        let blank = |value: &Option<String>| value.as_deref().is_none_or(|v| v.trim().is_empty());
+        if blank(&self.navidrome_url) || blank(&self.navidrome_user) {
+            self.navidrome_url = None;
+            self.navidrome_user = None;
         }
         self
     }
@@ -263,8 +302,8 @@ impl SettingsStore {
     }
 
     /// Merges `patch` (an object with some of the settings' camelCase keys) into the
-    /// settings, saves them and returns the result. Unknown keys are ignored; a value of the
-    /// wrong type is refused and nothing changes.
+    /// settings, saves them and returns the result. Unknown keys and the Navidrome account
+    /// are ignored; a value of the wrong type is refused and nothing changes.
     pub fn set(&self, patch: Value) -> anyhow::Result<Settings> {
         self.update(patch, |_| {})
     }
@@ -276,13 +315,16 @@ impl SettingsStore {
         if let Some(reason) = &self.blocked {
             anyhow::bail!("{reason}");
         }
+        let mut patch = patch;
+        strip_account_keys(&mut patch);
         let Value::Object(patch) = patch else {
             anyhow::bail!("settings must be changed with an object");
         };
-        let mut current = match self.current.lock() {
-            Ok(current) => current,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        // The file reads an unknown quality leniently; a patch with one is refused.
+        if let Some(quality) = patch.get("navidromeQuality") {
+            StreamQuality::deserialize(quality).context("invalid setting")?;
+        }
+        let mut current = lock(&self.current);
         let mut merged = serde_json::to_value(&*current)?;
         if let Value::Object(fields) = &mut merged {
             for (key, value) in patch {
@@ -300,6 +342,30 @@ impl SettingsStore {
         let changed = changes(&current, &next);
         *current = next.clone();
         apply(&changed);
+        Ok(next)
+    }
+
+    /// Saves the connected Navidrome account (`(url, user)`, the url normalized) or, with
+    /// `None`, forgets it. Only connect and disconnect call this; the password goes to the
+    /// keychain, never here. Nothing the player follows changes, so there is no [`Change`].
+    pub fn set_navidrome_account(
+        &self,
+        account: Option<(String, String)>,
+    ) -> anyhow::Result<Settings> {
+        if let Some(reason) = &self.blocked {
+            anyhow::bail!("{reason}");
+        }
+        let mut current = lock(&self.current);
+        let mut next = current.clone();
+        (next.navidrome_url, next.navidrome_user) = match account {
+            Some((url, user)) => (Some(url), Some(user)),
+            None => (None, None),
+        };
+        let next = next.sanitized();
+        save(&self.path, &next)?;
+        // The file now holds everything, a remembered volume included.
+        lock(&self.volume_write).due = None;
+        *current = next.clone();
         Ok(next)
     }
 
@@ -682,6 +748,116 @@ mod tests {
             RepeatMode::One
         );
         assert!(store.set(json!({ "repeat": "twice" })).is_err());
+    }
+
+    #[test]
+    fn settings_navidrome_defaults() {
+        let defaults = Settings::default();
+        assert_eq!(defaults.navidrome_url, None);
+        assert_eq!(defaults.navidrome_user, None);
+        assert_eq!(defaults.navidrome_quality, StreamQuality::Original);
+        let raw = serde_json::to_value(&defaults).unwrap();
+        assert_eq!(raw["navidromeUrl"], Value::Null);
+        assert_eq!(raw["navidromeUser"], Value::Null);
+        assert_eq!(raw["navidromeQuality"], "original");
+    }
+
+    #[test]
+    fn unknown_quality_keeps_other_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(
+            &path,
+            br#"{ "navidromeQuality": "999", "gapless": false, "navidromeUrl": "http://127.0.0.1:4533", "navidromeUser": "demo" }"#,
+        )
+        .unwrap();
+        let settings = SettingsStore::load(&path).get();
+        assert!(!settings.gapless, "the rest of the file is kept");
+        assert_eq!(settings.navidrome_user.as_deref(), Some("demo"));
+        assert_eq!(settings.navidrome_quality, StreamQuality::Original);
+        assert!(
+            !sibling(&path, ".bad").exists(),
+            "the file was not moved aside"
+        );
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn known_quality_values_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, br#"{ "navidromeQuality": "192" }"#).unwrap();
+        assert_eq!(
+            SettingsStore::load(&path).get().navidrome_quality,
+            StreamQuality::Kbps192
+        );
+    }
+
+    #[test]
+    fn quality_is_set_by_patch_and_an_invalid_one_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SettingsStore::load(&dir.path().join("settings.json"));
+        let mut applied = Vec::new();
+        let saved = store
+            .update(json!({ "navidromeQuality": "128" }), |changes| {
+                applied.extend_from_slice(changes)
+            })
+            .unwrap();
+        assert_eq!(saved.navidrome_quality, StreamQuality::Kbps128);
+        assert!(
+            applied.is_empty(),
+            "the opener reads the quality at each open"
+        );
+        assert!(store.set(json!({ "navidromeQuality": "999" })).is_err());
+        assert_eq!(store.get().navidrome_quality, StreamQuality::Kbps128);
+    }
+
+    #[test]
+    fn patch_cannot_set_the_account() {
+        let mut patch = json!({
+            "navidromeUrl": "http://127.0.0.1:1",
+            "navidromeUser": "demo",
+            "gapless": false,
+        });
+        strip_account_keys(&mut patch);
+        assert_eq!(patch, json!({ "gapless": false }));
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = SettingsStore::load(&dir.path().join("settings.json"));
+        let saved = store
+            .set(json!({ "navidromeUrl": "http://127.0.0.1:1", "navidromeUser": "demo" }))
+            .unwrap();
+        assert_eq!(saved.navidrome_url, None);
+        assert_eq!(saved.navidrome_user, None);
+    }
+
+    #[test]
+    fn set_navidrome_account_saves_url_and_user_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let store = SettingsStore::load(&path);
+        let saved = store
+            .set_navidrome_account(Some(("http://127.0.0.1:4533".into(), "demo".into())))
+            .unwrap();
+        assert_eq!(
+            saved.navidrome_url.as_deref(),
+            Some("http://127.0.0.1:4533")
+        );
+        assert_eq!(saved.navidrome_user.as_deref(), Some("demo"));
+        assert_eq!(store.get(), saved);
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.to_lowercase().contains("password"));
+        assert!(!text.contains("demo-pass"));
+        let raw: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(raw["navidromeUrl"], "http://127.0.0.1:4533");
+        assert_eq!(raw["navidromeUser"], "demo");
+        assert_eq!(SettingsStore::load(&path).get(), saved);
+
+        let cleared = store.set_navidrome_account(None).unwrap();
+        assert_eq!(cleared.navidrome_url, None);
+        assert_eq!(cleared.navidrome_user, None);
+        assert_eq!(SettingsStore::load(&path).get().navidrome_url, None);
     }
 
     #[test]

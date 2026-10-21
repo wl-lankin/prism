@@ -16,6 +16,9 @@ export const DEFAULT_SETTINGS: Settings = {
   startWithSystem: false,
   repeat: 'off',
   shuffle: false,
+  navidromeUrl: null,
+  navidromeUser: null,
+  navidromeQuality: 'original',
 };
 
 /** The saved settings as the UI shows them. Changes go through `updateSettings`. */
