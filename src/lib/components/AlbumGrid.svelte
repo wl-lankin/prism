@@ -228,11 +228,12 @@
     filter: brightness(1.08);
   }
 
-  /* Bottom left, clear of the play button that rises on the right. */
+  /* Top right: clear of the play button that rises at the bottom, and of the lettering many
+     covers carry in their lower half. */
   .art :global(.source-badge) {
     position: absolute;
-    left: 10px;
-    bottom: 10px;
+    top: 10px;
+    right: 10px;
   }
 
   .title {

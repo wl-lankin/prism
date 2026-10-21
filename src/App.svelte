@@ -649,6 +649,7 @@
      while the server is away) and one line of dim text. */
   .source-hint {
     display: inline-flex;
+    align-self: center;
     align-items: center;
     gap: 8px;
     height: 28px;
