@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use super::ffmpeg::FfmpegSource;
 use super::http::{HttpStream, StreamConfig};
+use super::live::LiveInput;
 use super::symph::SymphoniaSource;
 use crate::secret::SecretUrl;
 
@@ -17,12 +18,16 @@ pub struct StreamSpec {
     pub channels: u16,
 }
 
-/// Where audio comes from: a local file, or an HTTP stream (Navidrome).
+/// Where audio comes from: a local file, an HTTP stream (Navidrome), or a live radio stream.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Input {
     File(PathBuf),
     Http(HttpInput),
+    Live(LiveInput),
 }
+
+/// The error for a live input handed to a file or HTTP opener.
+pub(crate) const LIVE_NEEDS_THE_RADIO_OPENER: &str = "live inputs open through the radio opener";
 
 /// An HTTP stream to play. The URL carries credentials (a Subsonic token and salt), so `Debug`
 /// prints the label only, and errors name the label, never the URL.
@@ -55,6 +60,7 @@ pub(crate) fn describe(input: &Input) -> String {
     match input {
         Input::File(path) => path.display().to_string(),
         Input::Http(http) => http.label.clone(),
+        Input::Live(live) => live.label.clone(),
     }
 }
 
@@ -89,8 +95,10 @@ pub fn open_source_with(
     input: &Input,
     device: Option<StreamSpec>,
 ) -> anyhow::Result<Box<dyn AudioSource>> {
-    if let Input::Http(http) = input {
-        return Ok(open_http(http, device)?.source);
+    match input {
+        Input::Http(http) => return Ok(open_http(http, device)?.source),
+        Input::Live(_) => anyhow::bail!(LIVE_NEEDS_THE_RADIO_OPENER),
+        Input::File(_) => {}
     }
     if let Some(source) = SymphoniaSource::open_if_supported(input)? {
         return Ok(Box::new(source));
