@@ -96,7 +96,7 @@ impl Env {
                 Arc::clone(&locator) as Arc<dyn Locator>,
                 Arc::new(|| "de-DE".to_owned()),
                 Arc::new(move |event| events.lock().unwrap().push(event)),
-                Arc::new(move |title| titles.lock().unwrap().push(title)),
+                Arc::new(move |_: &str, title| titles.lock().unwrap().push(title)),
                 options,
             )
         };
@@ -689,7 +689,7 @@ fn a_pruned_station_is_not_brought_back_by_a_refresh() {
         }),
         Arc::new(|| "de-DE".to_owned()),
         Arc::new(|_| {}),
-        Arc::new(|_| {}),
+        Arc::new(|_: &str, _| {}),
         RadioOptions {
             first_refresh: Duration::from_secs(3600),
             ..RadioOptions::default()
@@ -725,7 +725,7 @@ fn the_locale_is_read_only_as_the_last_resort() {
             "de-AT".to_owned()
         }),
         Arc::new(|_| {}),
-        Arc::new(|_| {}),
+        Arc::new(|_: &str, _| {}),
     );
     assert_eq!(service.place().origin, PlaceOrigin::Detected);
     assert_eq!(asked.load(Ordering::SeqCst), 0);

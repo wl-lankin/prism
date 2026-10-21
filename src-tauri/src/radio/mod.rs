@@ -54,8 +54,9 @@ const STATE_NEAR: &str = "near:";
 /// Near lists of this many places stay cached (home, a manual choice, one more).
 const NEAR_KEEP: usize = 3;
 
-/// Receives the stream titles of the station that plays (`None`: no title, or a new station).
-pub type TitleSink = Arc<dyn Fn(Option<String>) + Send + Sync>;
+pub use crate::audio::live::TitleSink;
+/// Receives every title change of the current station, with its id (for the media controls).
+pub type OnTitle = Arc<dyn Fn(&str, Option<String>) + Send + Sync>;
 /// A stored station by id, for the radio opener.
 pub type StationLookup = Arc<dyn Fn(&str) -> Option<Station> + Send + Sync>;
 /// The system locale (`de-DE`), asked only when no other place is known.
@@ -334,7 +335,7 @@ pub struct RadioService {
     locale_source: LocaleSource,
     locale: OnceLock<String>,
     emit: RadioEmit,
-    on_title: TitleSink,
+    on_title: OnTitle,
     options: RadioOptions,
     countries: Mutex<Option<Vec<Country>>>,
     regions: Mutex<HashMap<String, Vec<Region>>>,
@@ -360,7 +361,7 @@ impl RadioService {
         locator: Arc<dyn Locator>,
         locale: LocaleSource,
         emit: RadioEmit,
-        on_title: TitleSink,
+        on_title: OnTitle,
     ) -> Arc<RadioService> {
         RadioService::spawn_with_options(
             db,
@@ -382,7 +383,7 @@ impl RadioService {
         locator: Arc<dyn Locator>,
         locale: LocaleSource,
         emit: RadioEmit,
-        on_title: TitleSink,
+        on_title: OnTitle,
         options: RadioOptions,
     ) -> Arc<RadioService> {
         let service = Arc::new_cyclic(|me| RadioService {
@@ -766,7 +767,7 @@ impl RadioService {
             now.clone()
         };
         (self.emit)(RadioEvent::NowPlaying(event));
-        (self.on_title)(title);
+        (self.on_title)(station_id, title);
     }
 
     /// The current station and its title, for windows that load later.
