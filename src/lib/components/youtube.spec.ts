@@ -115,6 +115,9 @@ describe('YouTube Music view', () => {
     mountView();
     button('Sign in')!.click();
     expect(calls('ytm_sign_in')).toHaveLength(1);
+    flushSync();
+    expect(target.querySelector('.hint')).toBeNull();
+    expect(localStorage.getItem(HINT_KEY)).toBe('1');
   });
 
   it('the_still_shows_while_hidden_for_an_overlay', async () => {
@@ -165,6 +168,13 @@ describe('YouTube Music view', () => {
 
   it('a_hairline_shows_while_loading', () => {
     mountView();
+    expect(target.querySelector('.hairline')).not.toBeNull();
+    expect(target.querySelector('.stage')?.getAttribute('aria-busy')).toBe('true');
+    openOverlay('test');
+    flushSync();
+    expect(target.querySelector('.hairline')).toBeNull();
+    closeOverlay('test');
+    flushSync();
     expect(target.querySelector('.hairline')).not.toBeNull();
     ytm.state = { ...ytm.state, status: 'playing', title: 'Demo' };
     flushSync();

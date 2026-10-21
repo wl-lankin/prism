@@ -519,6 +519,8 @@
 
   async function doYtmSignOut() {
     confirmYtmSignOut = false;
+    await tick();
+    ytmSignOutTrigger?.focus();
     await ytmSignOut();
   }
 

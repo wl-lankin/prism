@@ -962,7 +962,8 @@ describe('YouTube Music settings (M5 Task 8)', () => {
     await tick();
     ytmButton('Sign out').click();
     await tick();
-    expect(ytmCalls('ytm_sign_out')).toHaveLength(1);
+    await vi.waitFor(() => expect(ytmCalls('ytm_sign_out')).toHaveLength(1));
+    await vi.waitFor(() => expect(document.activeElement?.textContent?.trim()).toBe('Sign out'));
     expect(ytmSection().querySelector('.confirm-row')).toBeNull();
     expect(overlayOpen('confirm-ytm-signout')).toBe(false);
   });

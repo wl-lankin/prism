@@ -47,7 +47,8 @@
   // Leaving the view hides the child; playback goes on.
   $effect(() => () => hideView());
 
-  const loading = $derived(ytm.state.status === 'idle' && !ytm.state.title);
+  // Never while a still stands in for the page: the page is there, only covered.
+  const loading = $derived(ytm.state.status === 'idle' && !ytm.state.title && !ytm.hiddenForOverlay);
   const still = $derived(ytm.hiddenForOverlay ? coverUrl(ytm.state.coverId, 600) : null);
 </script>
 
@@ -57,19 +58,29 @@
   {#if hint}
     <div class="hint" role="note">
       <span class="hint-text">{t('ytm.signInHint')}</span>
-      <button type="button" class="btn primary" onclick={() => void signIn()}>{t('ytm.signIn')}</button>
+      <button
+        type="button"
+        class="btn primary"
+        onclick={() => {
+          void signIn();
+          dismissHint();
+        }}
+      >{t('ytm.signIn')}</button>
       <button type="button" class="btn ghost" onclick={dismissHint}>{t('ytm.hintDismiss')}</button>
     </div>
   {/if}
 
-  <div class="stage" class:loading bind:this={stage}>
+  <div class="stage" class:loading aria-busy={loading} bind:this={stage}>
     {#if ytm.hiddenForOverlay}
       <div class="still" role="img" aria-label={t('ytm.unavailable')}>
         {#if still}<img src={still} alt="" />{/if}
         <i class="veil"></i>
       </div>
     {/if}
-    {#if loading}<i class="hairline" aria-hidden="true"></i>{/if}
+    {#if loading}
+      <i class="hairline" aria-hidden="true"></i>
+      <span class="sr-only" role="status">{t('ytm.loading')}</span>
+    {/if}
   </div>
 </section>
 
@@ -78,8 +89,6 @@
     height: 100%;
     display: flex;
     flex-direction: column;
-    gap: 10px;
-    padding: 0 16px 16px;
     box-sizing: border-box;
   }
 
@@ -88,6 +97,7 @@
     display: flex;
     align-items: center;
     gap: 12px;
+    margin: 0 16px 10px;
     padding: 8px 8px 8px 16px;
     border-radius: 12px;
     background: color-mix(in srgb, var(--src-youtube) 9%, transparent);
@@ -111,9 +121,7 @@
     flex: 1;
     min-height: 0;
     overflow: hidden;
-    border-radius: 14px;
     background: linear-gradient(160deg, color-mix(in srgb, var(--src-youtube) 10%, #14151a), #14151a 70%);
-    box-shadow: inset 0 0 0 1px color-mix(in srgb, white 6%, transparent);
   }
 
   .still {

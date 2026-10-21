@@ -422,11 +422,11 @@ const en = {
 
   // YouTube Music (M5 Task 8)
   'ytm.title': 'YouTube Music',
-  'ytm.signInHint': 'Sign in with your Google account to see your library',
+  'ytm.signInHint': 'Sign in with your Google account to see your library.',
   'ytm.signIn': 'Sign in',
   'ytm.signOut': 'Sign out',
   'ytm.signOutConfirm': 'Sign out of YouTube Music? Prism forgets the session on this computer.',
-  'ytm.unavailable': 'YouTube Music is paused while a menu is open',
+  'ytm.unavailable': 'YouTube Music shows again when this closes',
   'ytm.loading': 'Loading YouTube Music',
   'ytm.hintDismiss': 'Dismiss',
   'ytm.keep': 'Stay signed in',
@@ -884,11 +884,11 @@ const de: Record<Key, string> = {
 
   // YouTube Music (M5 Task 8)
   'ytm.title': 'YouTube Music',
-  'ytm.signInHint': 'Melde dich mit deinem Google-Konto an, um deine Mediathek zu sehen',
+  'ytm.signInHint': 'Melde dich mit deinem Google-Konto an, um deine Mediathek zu sehen.',
   'ytm.signIn': 'Anmelden',
   'ytm.signOut': 'Abmelden',
   'ytm.signOutConfirm': 'Von YouTube Music abmelden? Prism vergisst die Sitzung auf diesem Computer.',
-  'ytm.unavailable': 'YouTube Music ruht, solange ein Menü offen ist',
+  'ytm.unavailable': 'YouTube Music erscheint wieder, wenn das hier geschlossen ist',
   'ytm.loading': 'YouTube Music lädt',
   'ytm.hintDismiss': 'Schließen',
   'ytm.keep': 'Angemeldet bleiben',
