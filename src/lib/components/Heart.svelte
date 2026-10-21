@@ -98,7 +98,7 @@
   aria-hidden={hidden ? 'true' : undefined}
   aria-pressed={on}
   aria-label={label ?? t('favorites.toggle')}
-  title={kind === 'station' ? (disabled ? undefined : on ? t('favorites.remove') : t('favorites.add')) : disabled ? t('navidrome.notConnected') : on ? t('favorites.remove') : t('favorites.add')}
+  title={kind === 'station' ? (disabled ? undefined : on ? t('radio.menu.unfavorite') : t('radio.menu.favorite')) : disabled ? t('navidrome.notConnected') : on ? t('favorites.remove') : t('favorites.add')}
   {tabindex}
   onclick={toggle}
   onfocus={() => (focused = true)}
