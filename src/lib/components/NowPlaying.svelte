@@ -371,7 +371,7 @@
     display: grid;
     grid-template-columns: auto minmax(320px, 1fr);
     column-gap: clamp(28px, 3.4vw, 52px);
-    padding: 4px 32px 28px;
+    padding: calc(4px + var(--view-top, 0px)) 32px 28px;
     overflow: hidden;
   }
 

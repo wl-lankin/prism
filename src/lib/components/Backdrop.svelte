@@ -18,15 +18,14 @@
   const PX = 64;
   let width = $state(1000);
   let measured = $state(520);
-  const area = $derived(height ?? measured);
-  const boxHeight = $derived((PX * area) / Math.max(1, width));
+  const boxHeight = $derived((PX * measured) / Math.max(1, width));
 </script>
 
 <div
   class="backdrop"
   class:full={height === undefined}
   aria-hidden="true"
-  style:height={height === undefined ? null : `${height}px`}
+  style:height={height === undefined ? null : `calc(${height}px + var(--view-top, 0px))`}
   bind:clientWidth={width}
   bind:clientHeight={measured}
 >
@@ -44,11 +43,13 @@
     inset: 0 0 auto 0;
     overflow: hidden;
     pointer-events: none;
-    /* Fades in under the title bar and out into the list below, so it has no hard edge. */
+    /* Runs from the card's top edge (behind the floating title bar, `--view-top`) and fades
+       out into the list below, so it has no hard edge. Without a floating bar above it, it
+       fades in under the title bar instead. */
     mask-image: linear-gradient(
       to bottom,
-      rgba(0, 0, 0, 0.25) 0,
-      #000 110px,
+      rgba(0, 0, 0, var(--top-alpha, 0.25)) 0,
+      #000 calc(110px + var(--view-top, 0px)),
       rgba(0, 0, 0, 0.55) 55%,
       transparent 100%
     );
@@ -59,8 +60,8 @@
     inset: 0;
     mask-image: linear-gradient(
       to bottom,
-      rgba(0, 0, 0, 0.3) 0,
-      #000 90px,
+      rgba(0, 0, 0, var(--top-alpha, 0.3)) 0,
+      #000 calc(90px + var(--view-top, 0px)),
       rgba(0, 0, 0, 0.6) 62%,
       rgba(0, 0, 0, 0.18) 100%
     );
