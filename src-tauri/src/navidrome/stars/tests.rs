@@ -5,12 +5,14 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use serde_json::json;
 use tempfile::TempDir;
 
 use super::*;
 use crate::library::favorites::{self, FavoriteIds};
 use crate::navidrome::client::Child;
 use crate::navidrome::keychain::{CredentialStore, MemoryStore};
+use crate::navidrome::sync::{ensure_server, server_key, wipe_navidrome};
 use crate::navidrome::testserver::{FakeLibrary, FakeServer, Fault, FAKE_PASSWORD, FAKE_USER};
 use crate::navidrome::{
     LinkState, NavidromeEvent, NavidromeService, ServiceOptions, NOT_CONNECTED,
@@ -393,12 +395,12 @@ fn options() -> ServiceOptions {
     ServiceOptions {
         first_delay: Duration::from_millis(20),
         interval: Duration::from_secs(3600),
-        offline_retry: Duration::from_secs(3600),
         star_retry: [
             Duration::from_millis(100),
             Duration::from_millis(500),
             Duration::from_secs(3),
         ],
+        ..ServiceOptions::default()
     }
 }
 
@@ -586,4 +588,119 @@ fn cycle_imports_and_reports_changes() {
         .count();
     assert_eq!(imports, 2);
     assert_eq!(env.favorites_events(), 1);
+}
+
+/// Starts a service against `server` with `fault` set and waits for its first cycle.
+fn first_cycle_with(server: &FakeServer, fault: Fault) -> (TempDir, Service) {
+    server.set_fault(fault);
+    let dir = TempDir::new().unwrap();
+    let creds = Arc::new(MemoryStore::new());
+    save_account(dir.path(), server, &creds);
+    let env = service(dir.path(), None, &creds);
+    wait_for("the first cycle", || {
+        server.requests().iter().any(|r| r.method == "getStarred2")
+    });
+    assert!(env.service.wait_idle(WAIT));
+    (dir, env)
+}
+
+fn nd_tracks(db: &Db) -> i64 {
+    lock(db)
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM tracks WHERE source = 'navidrome'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+#[test]
+fn a_failed_star_import_does_not_halt_the_cycle() {
+    let faults = [
+        Fault::CodeOn {
+            method: "getStarred2",
+            code: 0,
+        },
+        Fault::CodeOn {
+            method: "getStarred2",
+            code: 50,
+        },
+        Fault::Payload {
+            method: "getStarred2",
+            payload: json!({}),
+        },
+    ];
+    for fault in faults {
+        let server = server();
+        let (_dir, env) = first_cycle_with(&server, fault.clone());
+        let status = env.service.status();
+        assert_eq!(status.state, LinkState::Online, "{fault:?}");
+        assert_eq!(status.error, None, "{fault:?}");
+        assert!(status.last_sync.is_some(), "{fault:?}");
+        assert_eq!(nd_tracks(&env.db), 12, "{fault:?}");
+        assert!(ids(&env.db).tracks.is_empty());
+    }
+}
+
+#[test]
+fn an_account_error_on_the_star_import_ends_the_cycle() {
+    let server = server();
+    let (_dir, env) = first_cycle_with(
+        &server,
+        Fault::CodeOn {
+            method: "getStarred2",
+            code: 40,
+        },
+    );
+    let status = env.service.status();
+    assert_eq!(status.state, LinkState::Error);
+    assert_eq!(status.error.unwrap().code, "wrongCredentials");
+}
+
+#[test]
+fn an_offline_flush_ends_the_cycle_early() {
+    let server = server();
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("library.db");
+    {
+        // Queued for this account, as a heart of an earlier run would be.
+        let db = Db::open(&db_path).unwrap();
+        let account = client(&server).account().clone();
+        ensure_server(&db, &server_key(&account.url, &account.user)).unwrap();
+        heart(&db, FavKind::Track, "navidrome:tr-1", true, 1);
+    }
+    let creds = Arc::new(MemoryStore::new());
+    save_account(dir.path(), &server, &creds);
+    server.set_fault(Fault::Status(503));
+    let env = service(dir.path(), Some(&db_path), &creds);
+    wait_for("Offline", || {
+        env.service.status().state == LinkState::Offline
+    });
+    // The flush tried; the library step never asked the server.
+    assert!(server.requests().iter().any(|r| r.method == "star"));
+    assert!(server.requests().iter().all(|r| r.method != "getIndexes"));
+    assert_eq!(queue(&env.db).len(), 1);
+}
+
+#[test]
+fn the_wipe_takes_every_navidrome_favorite() {
+    let db = db();
+    {
+        let conn = lock(&db).unwrap();
+        // A Navidrome id written with the local source (before stars carried theirs).
+        favorites::set_changed(&conn, FavKind::Track, "navidrome:tr-1", true).unwrap();
+        favorites::set_changed(&conn, FavKind::Track, "local:t1", true).unwrap();
+    }
+    heart(&db, FavKind::Album, "navidrome:al-1", true, 1);
+    {
+        let mut conn = lock(&db).unwrap();
+        let tx = conn.transaction().unwrap();
+        wipe_navidrome(&tx).unwrap();
+        tx.commit().unwrap();
+    }
+    let all = ids(&db);
+    assert_eq!(all.tracks, ["local:t1"]);
+    assert!(all.albums.is_empty());
+    assert!(queue(&db).is_empty());
 }

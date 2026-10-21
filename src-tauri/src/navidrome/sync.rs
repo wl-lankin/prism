@@ -155,7 +155,7 @@ pub fn wipe_navidrome(tx: &Transaction) -> anyhow::Result<()> {
          DELETE FROM albums WHERE source = 'navidrome';
          DELETE FROM covers WHERE id GLOB 'nd-*';
          DELETE FROM cover_lookups WHERE album_id GLOB 'navidrome:*';
-         DELETE FROM favorites WHERE source = 'navidrome';
+         DELETE FROM favorites WHERE source = 'navidrome' OR item_id GLOB 'navidrome:*';
          DELETE FROM track_stats WHERE track_id GLOB 'navidrome:*';
          DELETE FROM navidrome_star_queue;
          DELETE FROM navidrome_scrobble_queue;

@@ -503,10 +503,16 @@ impl Core {
         if self.panic_next.swap(false, Ordering::SeqCst) {
             panic!("test panic in the Navidrome cycle");
         }
-        // Offline, the library step below finds out too and sets the status.
-        self.flush_stars(client, epoch);
+        let flushed = self.flush_stars(client, epoch);
         if !self.is_current(epoch) {
             return Err(SyncError::Cancelled);
+        }
+        // A server that did not answer the flush would only cost the library step another
+        // timeout.
+        if flushed.offline {
+            return Err(SyncError::Api(NavidromeError::Unreachable(
+                "the server did not answer".into(),
+            )));
         }
         let last_progress: Cell<Option<Instant>> = Cell::new(None);
         let progress = |progress: SyncProgress| {
@@ -529,7 +535,19 @@ impl Core {
         let cancelled = || !self.is_current(epoch);
         let report =
             sync_library_cancellable(&self.db, client, now_ms(), &progress, &changed, &cancelled)?;
-        self.import_stars(client, epoch)?;
+        match self.import_stars(client, epoch) {
+            // The server answered, but not with stars Prism can take: the stars wait for the
+            // next cycle, the rest of this one goes on.
+            Err(SyncError::Api(
+                err @ (NavidromeError::Server { .. }
+                | NavidromeError::NotAuthorized
+                | NavidromeError::NotFound
+                | NavidromeError::NotSubsonic(_)),
+            )) => {
+                eprintln!("Navidrome star import: {}", err.code());
+            }
+            result => result?,
+        }
         Ok(report)
     }
 

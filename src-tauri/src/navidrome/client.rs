@@ -651,6 +651,19 @@ fn field<T: DeserializeOwned + Default>(
     }
 }
 
+/// [`field`] that refuses a missing or null `key`.
+fn required_field<T: DeserializeOwned + Default>(
+    response: &mut Value,
+    key: &str,
+) -> Result<T, NavidromeError> {
+    match response.get(key) {
+        None | Some(Value::Null) => Err(NavidromeError::NotSubsonic(format!(
+            "unexpected {key} response"
+        ))),
+        Some(_) => field(response, key),
+    }
+}
+
 /// A blocking client for one account.
 pub struct SubsonicClient {
     account: Account,
@@ -827,9 +840,11 @@ impl SubsonicClient {
         Ok(result.song)
     }
 
+    /// The server's stars. Strict: the import makes this the truth, so an ok envelope without
+    /// `starred2` is an error, while an empty `starred2: {}` means nothing is starred.
     pub fn starred2(&self) -> Result<Starred2, NavidromeError> {
         let mut response = self.call("getStarred2", &[])?;
-        field(&mut response, "starred2")
+        required_field(&mut response, "starred2")
     }
 
     pub fn star(&self, target: &StarTarget, on: bool) -> Result<(), NavidromeError> {
@@ -947,6 +962,8 @@ impl SubsonicClient {
 mod tests {
     use std::collections::HashSet;
     use std::path::PathBuf;
+
+    use serde_json::json;
 
     use super::*;
     use crate::navidrome::testserver::{
@@ -1757,6 +1774,29 @@ mod tests {
         assert_eq!(client.search3_songs(0, PAGE).unwrap().len(), 6);
         server.set_fault(Fault::Search3Empty);
         assert!(client.search3_songs(0, PAGE).unwrap().is_empty());
+    }
+
+    #[test]
+    fn starred2_requires_its_key() {
+        let server = FakeServer::start(FakeLibrary::synthetic(2, 2));
+        let client = client(&server);
+        let expected = NavidromeError::NotSubsonic("unexpected starred2 response".into());
+        server.set_fault(Fault::Payload {
+            method: "getStarred2",
+            payload: json!({}),
+        });
+        assert_eq!(client.starred2().unwrap_err(), expected);
+        server.set_fault(Fault::Payload {
+            method: "getStarred2",
+            payload: json!({ "starred2": null }),
+        });
+        assert_eq!(client.starred2().unwrap_err(), expected);
+        // Present but empty: nothing is starred.
+        server.set_fault(Fault::Payload {
+            method: "getStarred2",
+            payload: json!({ "starred2": {} }),
+        });
+        assert_eq!(client.starred2().unwrap(), Starred2::default());
     }
 
     #[test]
