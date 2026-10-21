@@ -14,6 +14,7 @@
   import Heart from './Heart.svelte';
   import Icon from './Icon.svelte';
   import NowPlayingBars from './NowPlayingBars.svelte';
+  import RowPlay from './RowPlay.svelte';
 
   /** What plays now, as large as the window allows, beside the whole queue. The queue is
    *  virtualized: rows of 52 px, read in pages of 200 and dropped whenever its ids change. */
@@ -309,7 +310,18 @@
                   data-index={row.index}
                 >
                   <span class="num">
-                    {#if isCurrent}
+                    {#if item?.track}
+                      <RowPlay
+                        number={row.index + 1}
+                        name={item.track.title}
+                        current={isCurrent}
+                        revealed={selected === row.index}
+                        onplay={() => {
+                          selected = row.index;
+                          jump(row.index);
+                        }}
+                      />
+                    {:else if isCurrent}
                       <NowPlayingBars playing={player.status === 'playing'} size={12} />
                     {:else}
                       {row.index + 1}

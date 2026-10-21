@@ -17,7 +17,7 @@
   import Cover from './Cover.svelte';
   import Heart from './Heart.svelte';
   import Icon from './Icon.svelte';
-  import NowPlayingBars from './NowPlayingBars.svelte';
+  import RowPlay from './RowPlay.svelte';
   import PlaylistCover from './PlaylistCover.svelte';
   import TrackMenu, { type TrackMenuState } from './TrackMenu.svelte';
 
@@ -490,12 +490,18 @@
               style:transform={drag ? `translateY(${offset(row.i)}px)` : null}
               animate:flip={{ duration: settle }}
             >
+              <span class="grip" title={t('playlist.reorder')}><Icon name="grip" size={14} /></span>
               <span class="num">
-                {#if playing}
-                  <NowPlayingBars playing={player.status === 'playing'} size={12} />
+                {#if track}
+                  <RowPlay
+                    number={row.i + 1}
+                    name={track.title}
+                    current={playing}
+                    revealed={selected === row.i}
+                    onplay={() => play(row.i)}
+                  />
                 {:else}
-                  <span class="n">{row.i + 1}</span>
-                  <span class="grip" title={t('playlist.reorder')}><Icon name="grip" size={16} /></span>
+                  {row.i + 1}
                 {/if}
               </span>
               <Cover coverId={track?.coverId ?? null} size={38} cache={96} radius="7px" />
@@ -841,14 +847,11 @@
     font-variant-numeric: tabular-nums;
   }
 
-  .num {
-    position: relative;
-  }
-
-  /* The grip takes the number's place on hover: rows are picked up anywhere, it shows how. */
+  /* On hover the grip shows in the row's left gutter (the number turns into play): rows are
+     picked up anywhere, it shows how. */
   .grip {
     position: absolute;
-    right: -3px;
+    left: 1px;
     top: 50%;
     display: grid;
     transform: translateY(-50%);
@@ -861,11 +864,6 @@
   .row:hover .grip,
   .row.lifted .grip {
     opacity: 1;
-  }
-
-  .row:hover .n,
-  .row.lifted .n {
-    opacity: 0;
   }
 
   .name {

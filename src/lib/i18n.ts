@@ -104,6 +104,9 @@ const en = {
   'album.missing': 'This album is no longer in your library.',
   'album.back': 'Back',
   'album.nowPlaying': 'Now playing',
+  'row.play': 'Play {name}',
+  'row.pause': 'Pause {name}',
+  'row.resume': 'Resume {name}',
 
   'nowPlaying.title': 'Now playing',
   'nowPlaying.open': 'Show what is playing and the queue',
@@ -359,6 +362,9 @@ const de: Record<Key, string> = {
   'album.missing': 'Dieses Album ist nicht mehr in deiner Mediathek.',
   'album.back': 'Zurück',
   'album.nowPlaying': 'Läuft gerade',
+  'row.play': '{name} abspielen',
+  'row.pause': '{name} pausieren',
+  'row.resume': '{name} fortsetzen',
 
   'nowPlaying.title': 'Läuft gerade',
   'nowPlaying.open': 'Wiedergabe und Warteschlange zeigen',

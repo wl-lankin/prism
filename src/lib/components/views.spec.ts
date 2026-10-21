@@ -748,3 +748,155 @@ describe('Now Playing', () => {
     unmount(app);
   });
 });
+
+describe('Row play button', () => {
+  afterEach(async () => {
+    const { player } = await import('../stores/player.svelte');
+    Object.assign(player, { status: 'idle', track: null, queueIndex: 0, queueLength: 0 });
+  });
+
+  const rowAt = (i: number) => target.querySelector<HTMLElement>(`[role="option"][data-index="${i}"]`)!;
+  const playIn = (row: HTMLElement) => row.querySelector<HTMLButtonElement>('.rowplay .play')!;
+
+  function hover(row: HTMLElement, on = true) {
+    row.dispatchEvent(new MouseEvent(on ? 'mouseenter' : 'mouseleave'));
+    flushSync();
+  }
+
+  async function click(button: HTMLElement) {
+    button.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    await settle();
+  }
+
+  it('turns the number into a play button on hover or selection, out of the tab order', async () => {
+    const { default: AlbumView } = await import('./AlbumView.svelte');
+    const app = mount(AlbumView, { target, props: { albumId: 'a1' } });
+    await settle();
+    const row = rowAt(1);
+    const button = playIn(row);
+    expect(button.tabIndex).toBe(-1);
+    expect(button.getAttribute('aria-label')).toBe('Play Song 2');
+    expect(button.getAttribute('aria-hidden')).toBe('true');
+    expect(row.querySelector('.rowplay')!.classList.contains('shown')).toBe(false);
+    expect(row.querySelector('.mark')!.textContent?.trim()).toBe('2');
+
+    hover(row);
+    expect(row.querySelector('.rowplay')!.classList.contains('shown')).toBe(true);
+    expect(button.getAttribute('aria-hidden')).toBeNull();
+    hover(row, false);
+    expect(row.querySelector('.rowplay')!.classList.contains('shown')).toBe(false);
+
+    // Keyboard selection reveals it too.
+    const list = target.querySelector('[role="listbox"]')!;
+    key(list, 'ArrowDown');
+    key(list, 'ArrowDown');
+    expect(row.querySelector('.rowplay')!.classList.contains('shown')).toBe(true);
+    unmount(app);
+  });
+
+  it('plays the album from the clicked row, like a double-click', async () => {
+    const { default: AlbumView } = await import('./AlbumView.svelte');
+    const app = mount(AlbumView, { target, props: { albumId: 'a1' } });
+    await settle();
+    invoke.mockClear();
+    const row = rowAt(2);
+    hover(row);
+    await click(playIn(row));
+    expect(invoke).toHaveBeenCalledWith('player_play', {
+      trackIds: ['local:t1', 'local:t2', 'local:t3'],
+      startIndex: 2,
+    });
+    // The click is the button's: it does not select the row.
+    expect(row.getAttribute('aria-selected')).toBe('false');
+    unmount(app);
+  });
+
+  it('plays the Songs list around the clicked row', async () => {
+    library.trackCount = 500;
+    library.version++;
+    const app = mount(SongList, { target });
+    await frame();
+    await settle();
+    invoke.mockClear();
+    await click(playIn(rowAt(4)));
+    expect(invoke).toHaveBeenCalledWith('library_tracks_range', { offset: 0, limit: 1000 });
+    const play = invoke.mock.calls.find(([cmd]) => cmd === 'player_play');
+    expect(play?.[1]).toMatchObject({ startIndex: 4 });
+    expect((play?.[1] as { trackIds: string[] }).trackIds[4]).toBe('local:t4');
+    unmount(app);
+  });
+
+  it('plays the favorite songs from the clicked row', async () => {
+    const { default: FavoritesView } = await import('./FavoritesView.svelte');
+    const { favorites } = await import('../stores/favorites.svelte');
+    favorites.tracks.clear();
+    favorites.tracks.add('local:t1');
+    favorites.tracks.add('local:t2');
+    const app = mount(FavoritesView, { target });
+    await settle();
+    invoke.mockClear();
+    await click(playIn(rowAt(1)));
+    expect(invoke).toHaveBeenCalledWith('player_play', { trackIds: ['local:t1', 'local:t2'], startIndex: 1 });
+    unmount(app);
+  });
+
+  it('plays the playlist from the clicked row and has no button on a missing entry', async () => {
+    const { default: PlaylistView } = await import('./PlaylistView.svelte');
+    const { reloadPlaylists } = await import('../stores/playlists.svelte');
+    await reloadPlaylists();
+    const app = mount(PlaylistView, { target, props: { playlistId: 1 } });
+    await settle();
+    expect(rowAt(1).querySelector('.rowplay')).toBeNull();
+    invoke.mockClear();
+    await click(playIn(rowAt(2)));
+    expect(invoke).toHaveBeenCalledWith('player_play', { trackIds: ['local:t1', 'local:t3'], startIndex: 1 });
+    unmount(app);
+  });
+
+  it('jumps to the clicked queue entry in Now Playing', async () => {
+    const { default: NowPlaying } = await import('./NowPlaying.svelte');
+    const { player } = await import('../stores/player.svelte');
+    queueLength = 20;
+    Object.assign(player, { status: 'playing', track: track(0), queueIndex: 0, queueLength: 20 });
+    player.queueVersion++;
+    const app = mount(NowPlaying, { target });
+    await frame();
+    await settle();
+    invoke.mockClear();
+    await click(playIn(rowAt(6)));
+    expect(invoke).toHaveBeenCalledWith('player_jump', { index: 6 });
+    unmount(app);
+  });
+
+  it('keeps the equalizer on the playing row and toggles pause and play from it on hover', async () => {
+    const { default: AlbumView } = await import('./AlbumView.svelte');
+    const { player } = await import('../stores/player.svelte');
+    Object.assign(player, { status: 'playing', track: track(2) });
+    const app = mount(AlbumView, { target, props: { albumId: 'a1' } });
+    await settle();
+    const row = rowAt(1);
+    expect(row.querySelector('.mark [role="img"]')?.getAttribute('aria-label')).toBe('Now playing');
+    // Selecting the playing row keeps the marker; only the pointer swaps it.
+    const list = target.querySelector('[role="listbox"]')!;
+    key(list, 'ArrowDown');
+    key(list, 'ArrowDown');
+    expect(row.querySelector('.rowplay')!.classList.contains('shown')).toBe(false);
+
+    hover(row);
+    const button = playIn(row);
+    expect(row.querySelector('.rowplay')!.classList.contains('shown')).toBe(true);
+    expect(button.getAttribute('aria-label')).toBe('Pause Song 2');
+    invoke.mockClear();
+    await click(button);
+    expect(invoke).toHaveBeenCalledWith('player_toggle', undefined);
+    expect(invoke).not.toHaveBeenCalledWith('player_play', expect.anything());
+
+    player.status = 'paused';
+    flushSync();
+    expect(button.getAttribute('aria-label')).toBe('Resume Song 2');
+    invoke.mockClear();
+    await click(button);
+    expect(invoke).toHaveBeenCalledWith('player_toggle', undefined);
+    unmount(app);
+  });
+});

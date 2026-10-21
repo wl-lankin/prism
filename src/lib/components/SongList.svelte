@@ -15,7 +15,7 @@
   import Cover from './Cover.svelte';
   import TrackMenu, { type TrackMenuState } from './TrackMenu.svelte';
   import Heart from './Heart.svelte';
-  import NowPlayingBars from './NowPlayingBars.svelte';
+  import RowPlay from './RowPlay.svelte';
   import ViewHead from './ViewHead.svelte';
 
   /** Every track in one virtualized list. Rows are fetched in pages of 200 when they come
@@ -243,8 +243,14 @@
           data-index={row.index}
         >
           <span class="num">
-            {#if playing}
-              <NowPlayingBars playing={player.status === 'playing'} size={12} />
+            {#if track}
+              <RowPlay
+                number={row.index + 1}
+                name={track.title}
+                current={playing}
+                revealed={selected === row.index}
+                onplay={() => void playSongsFrom(row.index)}
+              />
             {:else}
               {row.index + 1}
             {/if}

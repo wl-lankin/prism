@@ -15,7 +15,7 @@
   import TrackMenu, { type TrackMenuState } from './TrackMenu.svelte';
   import Heart from './Heart.svelte';
   import Icon from './Icon.svelte';
-  import NowPlayingBars from './NowPlayingBars.svelte';
+  import RowPlay from './RowPlay.svelte';
 
   /** One album: a large cover over a backdrop blurred from it, play and shuffle, the tracks. */
   let { albumId }: { albumId: string } = $props();
@@ -190,11 +190,13 @@
               data-index={i}
             >
               <span class="num">
-                {#if playing}
-                  <NowPlayingBars playing={player.status === 'playing'} size={12} />
-                {:else}
-                  {track.trackNo ?? i + 1}
-                {/if}
+                <RowPlay
+                  number={track.trackNo ?? i + 1}
+                  name={track.title}
+                  current={playing}
+                  revealed={selected === i}
+                  onplay={() => play(i)}
+                />
               </span>
               <span class="name">
                 <span class="title">{track.title}</span>

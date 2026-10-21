@@ -24,6 +24,7 @@
   import Heart from './Heart.svelte';
   import Icon from './Icon.svelte';
   import NowPlayingBars from './NowPlayingBars.svelte';
+  import RowPlay from './RowPlay.svelte';
   import ViewHead from './ViewHead.svelte';
 
   /** Favorite songs, albums and artists in three tabs, narrowed by source with the chips. */
@@ -301,11 +302,7 @@
               data-index={i}
             >
               <span class="num">
-                {#if playing}
-                  <NowPlayingBars playing={player.status === 'playing'} size={12} />
-                {:else}
-                  {i + 1}
-                {/if}
+                <RowPlay number={i + 1} name={track.title} current={playing} revealed={selected === i} onplay={() => play(i)} />
               </span>
               <Cover coverId={track.coverId} size={38} cache={96} radius="7px" />
               <span class="name">
