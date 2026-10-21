@@ -337,9 +337,11 @@ pub fn entries(conn: &Connection, id: &str) -> anyhow::Result<Vec<PlaylistEntry>
 mod tests {
     use super::*;
     use crate::library::playlists::assert_scan_needs_no_sort;
+    use crate::library::playlists::{entry_totals_by, EntryJoin};
     use crate::library::playlists::{
         playlist_add, playlist_create, playlist_entries, playlists_list,
     };
+    use crate::library::query::tests::{median_of_5, scale_db};
     use crate::navidrome::sync::{ensure_server, sync_library};
     use crate::navidrome::testserver::{FakeLibrary, FakeServer, Fault, FAKE_USER};
 
@@ -683,6 +685,104 @@ mod tests {
     fn summary_scan_follows_the_primary_key() {
         let env = env();
         assert_scan_needs_no_sort(&env.db.0.lock().unwrap(), "remote_playlist_tracks");
+    }
+
+    /// 100 playlists of 1000 entries each, over 30k server tracks, in both the Prism playlists
+    /// and the server playlists. One entry in 50 points at a track that is not in the index.
+    /// Timing is only meaningful in an optimized build: `cargo test --release
+    /// --manifest-path src-tauri/Cargo.toml playlist_summaries -- --nocapture`.
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "timing; run with --release")]
+    fn playlist_summaries_100x1000_under_150ms() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = scale_db(dir.path(), 30_000, 0);
+        {
+            let mut conn = db.0.lock().unwrap();
+            let tx = conn.transaction().unwrap();
+            {
+                let mut local = tx
+                    .prepare(
+                        "INSERT INTO playlists (id, name, created_at, updated_at)
+                         VALUES (?1, ?2, ?1, ?1)",
+                    )
+                    .unwrap();
+                let mut local_entry = tx
+                    .prepare(
+                        "INSERT INTO playlist_tracks (playlist_id, position, track_id)
+                         VALUES (?1, ?2, ?3)",
+                    )
+                    .unwrap();
+                let mut remote = tx
+                    .prepare(
+                        "INSERT INTO remote_playlists (id, name, owner, changed, track_count,
+                            duration_ms, updated_at)
+                         VALUES (?1, ?2, 'demo', '2026-01-01T00:00:00Z', 1000, 240000000, ?3)",
+                    )
+                    .unwrap();
+                let mut remote_entry = tx
+                    .prepare(
+                        "INSERT INTO remote_playlist_tracks (playlist_id, position, track_id)
+                         VALUES (?1, ?2, ?3)",
+                    )
+                    .unwrap();
+                for p in 0..100_i64 {
+                    let name = format!("Demo Playlist {p}");
+                    let remote_id = format!("navidrome:pl-{p}");
+                    local.execute(rusqlite::params![p + 1, name]).unwrap();
+                    remote
+                        .execute(rusqlite::params![remote_id, name, p])
+                        .unwrap();
+                    for position in 0..1000_i64 {
+                        let track = if position % 50 == 49 {
+                            format!("navidrome:gone-{p}-{position}")
+                        } else {
+                            format!("navidrome:tr-{}", (p * 997 + position * 31) % 30_000)
+                        };
+                        local_entry
+                            .execute(rusqlite::params![p + 1, position, track])
+                            .unwrap();
+                        remote_entry
+                            .execute(rusqlite::params![remote_id, position, track])
+                            .unwrap();
+                    }
+                }
+            }
+            tx.commit().unwrap();
+        }
+        let conn = db.0.lock().unwrap();
+        let prism = playlists_list(&conn).unwrap();
+        assert_eq!(prism.len(), 100);
+        assert!(prism.iter().all(|p| p.track_count == 1000));
+        assert!(prism.iter().all(|p| p.cover_ids.len() == 4));
+        let server = list(&conn).unwrap();
+        assert_eq!(server.len(), 100);
+        assert!(server.iter().all(|p| p.cover_ids.len() == 4));
+        // At this size the totals come from one scan of the tracks; they equal what one
+        // lookup per entry gives.
+        let scan: HashMap<String, EntryTotals> =
+            entry_totals_by(&conn, "remote_playlist_tracks", EntryJoin::Scan).unwrap();
+        let lookup: HashMap<String, EntryTotals> =
+            entry_totals_by(&conn, "remote_playlist_tracks", EntryJoin::Lookup).unwrap();
+        assert_eq!(scan, lookup);
+        let lookup_time = median_of_5(|| {
+            let _: HashMap<String, EntryTotals> =
+                entry_totals_by(&conn, "remote_playlist_tracks", EntryJoin::Lookup).unwrap();
+        });
+        let prism_time = median_of_5(|| {
+            playlists_list(&conn).unwrap();
+        });
+        let server_time = median_of_5(|| {
+            list(&conn).unwrap();
+        });
+        println!(
+            "playlist summaries, 100 x 1000 over 30k tracks: prism {prism_time:?}, \
+             navidrome {server_time:?} (one lookup per entry: {lookup_time:?})"
+        );
+        assert!(prism_time.as_millis() < 150, "prism took {prism_time:?}");
+        assert!(
+            server_time.as_millis() < 150,
+            "navidrome took {server_time:?}"
+        );
     }
 
     #[test]
