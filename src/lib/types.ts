@@ -170,7 +170,12 @@ export interface QueueItem {
   track: Track | null;
 }
 
+/** `track`: the track could not be played and the player moved on. `offline`: the server could
+ * not be reached; the player paused on the track and Play resumes it where it stopped. */
+export type PlayerErrorKind = 'track' | 'offline';
+
 export interface PlayerError {
   trackId: string;
   message: string;
+  kind: PlayerErrorKind;
 }

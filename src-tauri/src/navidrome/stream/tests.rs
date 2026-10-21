@@ -412,6 +412,42 @@ fn transcoded_seek_uses_time_offset() {
     assert_eq!(param(&requests[2], "timeOffset"), None);
 }
 
+/// A live transcode of a 5 s song whose library duration is `duration_ms`.
+fn transcode_of_five_seconds(env: &Env, duration_ms: u64) -> NavidromeSource {
+    env.server.set_fault(Fault::NoRanges);
+    let request = StreamRequest {
+        duration_ms: Some(duration_ms),
+        ..env.request(StreamQuality::Kbps192, "mp3")
+    };
+    NavidromeSource::open(request, None).unwrap_or_else(|err| panic!("open failed: {err:#}"))
+}
+
+#[test]
+fn a_transcode_seek_to_the_end_ends_without_a_request() {
+    let env = env(FakeLibrary::synthetic(1, 1).with_wav(SONG, 5));
+    let mut source = transcode_of_five_seconds(&env, 5_000);
+    read_ms(&mut source, 300);
+    source.seek(5_000).unwrap();
+    assert_eq!(drain_ok(&mut source), 0, "the track is over");
+    assert_eq!(env.stream_requests().len(), 1, "no timeOffset past the end");
+    // A seek back plays again.
+    source.seek(4_000).unwrap();
+    assert_seconds_left(&mut source, 1.0);
+}
+
+#[test]
+fn a_transcode_seek_past_the_real_end_ends_the_track() {
+    // Subsonic durations are whole seconds: the library can claim more than the stream has.
+    let env = env(FakeLibrary::synthetic(1, 1).with_wav(SONG, 5));
+    let mut source = transcode_of_five_seconds(&env, 5_900);
+    // A transcode whose own header does not tell its length goes by the library's.
+    source.duration_ms = Some(5_900);
+    source.seek(5_500).unwrap();
+    assert_eq!(drain_ok(&mut source), 0, "the track is over, not failed");
+    let requests = env.stream_requests();
+    assert_eq!(param(&requests[1], "timeOffset"), Some("5"), "{requests:?}");
+}
+
 #[test]
 fn raw_stream_without_ranges_seeks_back_through_the_buffer() {
     let env = env(FakeLibrary::synthetic(1, 1).with_wav(SONG, 5));

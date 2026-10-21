@@ -10,9 +10,9 @@ use tauri::{AppHandle, Emitter};
 
 pub use dropped::{with_dropped, DroppedFiles, ReadOptions, DROPPED_PREFIX};
 pub use engine::{
-    crossfade_for, default_opener, track_gain, EventSink, Opener, Player, PlayerError, PlayerEvent,
-    PlayerHandle, PlayerOptions, PlayerState, PlayerStatus, QueueItem, Resolver, DEFAULT_VOLUME,
-    MAX_FAILURES_IN_A_ROW, PRELOAD_MS, RESTART_AFTER_MS,
+    crossfade_for, default_opener, track_gain, ErrorKind, EventSink, Opener, Player, PlayerError,
+    PlayerEvent, PlayerHandle, PlayerOptions, PlayerState, PlayerStatus, QueueItem, Resolver,
+    DEFAULT_VOLUME, MAX_FAILURES_IN_A_ROW, OFFLINE_MESSAGE, PRELOAD_MS, RESTART_AFTER_MS,
 };
 pub use queue::Queue;
 
@@ -20,7 +20,8 @@ pub use queue::Queue;
 pub const EVENT_STATE: &str = "player://state";
 /// Payload: a number, 0..=1. The loudness of what plays, every 50 ms while playing.
 pub const EVENT_LEVEL: &str = "player://level";
-/// Payload: [`PlayerError`]. Sent when a track cannot be opened or decoded.
+/// Payload: [`PlayerError`]. Sent when a track cannot be opened or decoded (`kind: track`), or
+/// once when the player pauses because the server cannot be reached (`kind: offline`).
 pub const EVENT_ERROR: &str = "player://error";
 
 /// Delivers every event to each of `sinks`, in order.
