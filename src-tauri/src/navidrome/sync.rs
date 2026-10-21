@@ -185,6 +185,9 @@ pub enum SyncError {
     Db(anyhow::Error),
     /// The pass was refused as incomplete or implausible; nothing was deleted.
     Refused(String),
+    /// The caller cancelled the pass (the account changed or the app quits). Nothing was
+    /// written after the cancel was seen.
+    Cancelled,
 }
 
 impl fmt::Display for SyncError {
@@ -193,6 +196,7 @@ impl fmt::Display for SyncError {
             SyncError::Api(err) => write!(f, "{err}"),
             SyncError::Db(err) => write!(f, "library database: {err:#}"),
             SyncError::Refused(reason) => write!(f, "sync stopped: {reason}"),
+            SyncError::Cancelled => f.write_str("sync cancelled"),
         }
     }
 }
@@ -222,18 +226,25 @@ impl From<rusqlite::Error> for SyncError {
 struct Writer<'a> {
     db: &'a Db,
     changed: &'a dyn Fn(),
+    cancelled: &'a dyn Fn() -> bool,
     notified: Option<Instant>,
     any: bool,
 }
 
 impl Writer<'_> {
     /// Runs `write` in one transaction under the lock; it returns the rows it changed.
+    ///
+    /// The cancel check runs under the database lock: a caller that sets the cancel and then
+    /// takes the lock (to wipe the index) knows that no write of this pass follows its own.
     fn write(
         &mut self,
         write: impl FnOnce(&Transaction) -> Result<usize, SyncError>,
     ) -> Result<(), SyncError> {
         let rows = {
             let mut conn = lock(self.db)?;
+            if (self.cancelled)() {
+                return Err(SyncError::Cancelled);
+            }
             let tx = conn.transaction()?;
             let rows = write(&tx)?;
             tx.commit()?;
@@ -370,8 +381,25 @@ pub fn sync_library(
     progress: &dyn Fn(SyncProgress),
     changed: &dyn Fn(),
 ) -> Result<SyncReport, SyncError> {
-    sync_with(db, client, now_ms, progress, changed, LIMITS)
+    sync_library_cancellable(db, client, now_ms, progress, changed, &|| false)
 }
+
+/// [`sync_library`] that stops with [`SyncError::Cancelled`] once `cancelled` returns true.
+/// `cancelled` is checked under the database lock before every write.
+pub fn sync_library_cancellable(
+    db: &Db,
+    client: &SubsonicClient,
+    now_ms: i64,
+    progress: &dyn Fn(SyncProgress),
+    changed: &dyn Fn(),
+    cancelled: &dyn Fn() -> bool,
+) -> Result<SyncReport, SyncError> {
+    sync_with(db, client, now_ms, progress, changed, cancelled, LIMITS)
+}
+
+/// The songs listed must reach at least this share of the albums' song counts, or the pass
+/// is refused (a proxy or server that cut the listing short).
+const MIN_SONG_SHARE_PERCENT: u64 = 50;
 
 fn sync_with(
     db: &Db,
@@ -379,6 +407,7 @@ fn sync_with(
     now_ms: i64,
     progress: &dyn Fn(SyncProgress),
     changed: &dyn Fn(),
+    cancelled: &dyn Fn() -> bool,
     limits: Limits,
 ) -> Result<SyncReport, SyncError> {
     let remote = client.indexes_last_modified()?.to_string();
@@ -393,6 +422,9 @@ fn sync_with(
     // An incomplete pass never stores lastModified, so it differs here and the pass repeats.
     if stored.as_deref() == Some(remote.as_str()) && !due {
         let conn = lock(db)?;
+        if cancelled() {
+            return Err(SyncError::Cancelled);
+        }
         set_state(&conn, KEY_LAST_SYNC, &now_ms.to_string())?;
         let (tracks, albums) = counts(&conn)?;
         return Ok(SyncReport {
@@ -407,6 +439,7 @@ fn sync_with(
     let mut writer = Writer {
         db,
         changed,
+        cancelled,
         notified: None,
         any: false,
     };
@@ -507,6 +540,13 @@ fn sync_with(
             return Err(SyncError::Refused(
                 "the server listed no songs; the index is kept".into(),
             ));
+        }
+        if let Some(total) = total {
+            if (seen.max(0) as u64) * 100 < u64::from(total) * MIN_SONG_SHARE_PERCENT {
+                return Err(SyncError::Refused(format!(
+                    "the server listed {seen} of {total} songs; the index is kept"
+                )));
+            }
         }
         let mut rows = tx.execute(
             "DELETE FROM tracks WHERE source = 'navidrome'
@@ -920,7 +960,15 @@ mod tests {
             page: 5,
             max_pages: 3,
         };
-        let result = sync_with(&env.db, &env.client, NOW, &|_| {}, &|| {}, limits);
+        let result = sync_with(
+            &env.db,
+            &env.client,
+            NOW,
+            &|_| {},
+            &|| {},
+            &|| false,
+            limits,
+        );
         assert!(matches!(result, Err(SyncError::Refused(_))), "{result:?}");
         assert_eq!(env.nd_tracks(), 24);
         assert_eq!(env.nd_albums(), 4);
@@ -929,7 +977,16 @@ mod tests {
             page: 5,
             max_pages: 10,
         };
-        sync_with(&env.db, &env.client, NOW, &|_| {}, &|| {}, limits).unwrap();
+        sync_with(
+            &env.db,
+            &env.client,
+            NOW,
+            &|_| {},
+            &|| {},
+            &|| false,
+            limits,
+        )
+        .unwrap();
         assert_eq!(env.nd_tracks(), 18);
         assert_eq!(env.nd_albums(), 3);
     }
@@ -1290,5 +1347,59 @@ mod tests {
             )
             .unwrap();
         assert_eq!(cover.as_deref(), Some("nd-mf-tr-5"));
+    }
+
+    #[test]
+    fn short_song_listing_is_refused() {
+        let env = env(FakeLibrary::synthetic(4, 10));
+        env.sync().unwrap();
+        let stored = env.state("last_modified");
+        // The albums still claim 40 songs, the song listing has 12 of them.
+        env.server.edit(|lib| lib.songs.truncate(12));
+        let result = env.sync();
+        match result {
+            Err(SyncError::Refused(reason)) => assert!(reason.contains("12 of 40"), "{reason}"),
+            other => panic!("expected a refused pass, got {other:?}"),
+        }
+        assert_eq!(env.nd_tracks(), 40);
+        assert_eq!(env.state("last_modified"), stored);
+
+        // Half of the claimed songs is still accepted (song counts can lag a little).
+        env.server.edit(|lib| {
+            lib.songs = FakeLibrary::synthetic(4, 10).songs;
+            lib.songs.truncate(20);
+        });
+        env.sync().unwrap();
+        assert_eq!(env.nd_tracks(), 20);
+    }
+
+    #[test]
+    fn cancelled_pass_writes_nothing_more() {
+        let env = env(FakeLibrary::synthetic(100, 12));
+        let cancelled = std::cell::Cell::new(false);
+        let result = sync_library_cancellable(
+            &env.db,
+            &env.client,
+            NOW,
+            &|p| {
+                if p.done == 500 {
+                    cancelled.set(true);
+                }
+            },
+            &|| {},
+            &|| cancelled.get(),
+        );
+        assert!(matches!(result, Err(SyncError::Cancelled)), "{result:?}");
+        assert_eq!(env.nd_tracks(), 500);
+        assert_eq!(env.state("last_modified"), None);
+        assert_eq!(env.state("last_sync"), None);
+
+        // A pass with nothing to do stores no sync time once cancelled either.
+        env.sync().unwrap();
+        let last_sync = env.state("last_sync");
+        let result =
+            sync_library_cancellable(&env.db, &env.client, NOW + 1, &|_| {}, &|| {}, &|| true);
+        assert!(matches!(result, Err(SyncError::Cancelled)), "{result:?}");
+        assert_eq!(env.state("last_sync"), last_sync);
     }
 }

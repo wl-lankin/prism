@@ -26,6 +26,8 @@ use library::covers::CoverStore;
 use library::scan::lock;
 use library::{query, tauri_emitter, watch, Library, LibraryOptions};
 use media_controls::MediaBridge;
+use navidrome::keychain::{CredentialStore, KeyringStore};
+use navidrome::{NavidromeEmit, NavidromeEvent, NavidromeService};
 use player::{
     default_opener, fan_out, tauri_sink, with_dropped, DroppedFiles, EventSink, Player,
     PlayerOptions, Resolver,
@@ -49,6 +51,40 @@ pub struct AppState {
     pub thumbs: Arc<thumbs::ResizeGate>,
     /// Online cover lookup for albums without a cover.
     pub lookup: library::lookup::LookupWorker,
+    /// The Navidrome account, its status and the background sync.
+    pub navidrome: Arc<NavidromeService>,
+}
+
+/// Sends the Navidrome service's events to every window.
+fn navidrome_emit(handle: tauri::AppHandle) -> NavidromeEmit {
+    use tauri::Emitter;
+    Arc::new(move |event| {
+        let (name, sent) = match &event {
+            NavidromeEvent::Status(status) => (
+                navidrome::EVENT_STATUS,
+                handle.emit(navidrome::EVENT_STATUS, status),
+            ),
+            NavidromeEvent::LibraryChanged => (
+                library::EVENT_CHANGED,
+                handle.emit(library::EVENT_CHANGED, ()),
+            ),
+            NavidromeEvent::FavoritesChanged => (
+                library::favorites::EVENT_CHANGED,
+                handle.emit(library::favorites::EVENT_CHANGED, ()),
+            ),
+            NavidromeEvent::PlaylistsChanged => (
+                library::playlists::EVENT_CHANGED,
+                handle.emit(library::playlists::EVENT_CHANGED, ()),
+            ),
+            NavidromeEvent::SettingsChanged(settings) => (
+                settings::EVENT_CHANGED,
+                handle.emit(settings::EVENT_CHANGED, settings),
+            ),
+        };
+        if let Err(err) = sent {
+            eprintln!("emitting {name} failed: {err}");
+        }
+    })
 }
 
 /// Resolves queue entries against the library database.
@@ -209,7 +245,15 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
     );
     let (flow, sink) = FlowService::spawn(Arc::clone(&library.db), player.handle());
     let _ = flow_sink.set(sink);
+    // Keychain entries are keyed by the app identifier: a dev run never sees the real password.
+    let navidrome = NavidromeService::spawn(
+        Arc::clone(&library.db),
+        Arc::clone(&settings),
+        Arc::new(KeyringStore::new(&app.config().identifier)) as Arc<dyn CredentialStore>,
+        navidrome_emit(handle.clone()),
+    );
     app.manage(AppState {
+        navidrome,
         lookup,
         library: Arc::clone(&library),
         player,
@@ -343,6 +387,11 @@ pub fn run() {
             commands::settings_get,
             commands::settings_set,
             commands::audio_devices,
+            commands::navidrome_status,
+            commands::navidrome_test,
+            commands::navidrome_connect,
+            commands::navidrome_disconnect,
+            commands::navidrome_sync,
             commands::mini_toggle,
             commands::mini_layout,
             commands::mini_menu,
@@ -363,6 +412,7 @@ pub fn run() {
             tauri::RunEvent::Exit => {
                 if let Some(state) = app.try_state::<AppState>() {
                     state.settings.flush();
+                    state.navidrome.shutdown();
                 }
             }
             #[cfg(target_os = "macos")]
