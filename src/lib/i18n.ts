@@ -301,6 +301,8 @@ const en = {
   'playlist.owner': 'by {owner}',
   'playlist.remoteMissing': 'Not available from Navidrome',
   'playlist.remoteEmptyLead': 'Add songs to it in Navidrome and they show up here after the next sync.',
+  'playlist.remoteNothingPlayable': 'None of these songs are available from Navidrome yet.',
+  'playlists.emptyLocal': 'No Prism playlists yet',
 
   'about.version': 'Version {version}',
   'about.tagline': 'One player, every color of sound.',
@@ -612,6 +614,8 @@ const de: Record<Key, string> = {
   'playlist.owner': 'von {owner}',
   'playlist.remoteMissing': 'Von Navidrome nicht verfügbar',
   'playlist.remoteEmptyLead': 'Füge in Navidrome Titel hinzu, dann erscheinen sie hier nach dem nächsten Abgleich.',
+  'playlist.remoteNothingPlayable': 'Keiner dieser Titel ist bisher über Navidrome verfügbar.',
+  'playlists.emptyLocal': 'Noch keine Prism-Playlists',
 
   'about.version': 'Version {version}',
   'about.tagline': 'Ein Player, jede Farbe des Klangs.',

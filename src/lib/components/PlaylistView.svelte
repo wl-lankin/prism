@@ -7,11 +7,12 @@
 
   /** Plays `list` from the entry at `fromPosition`, as `playPlaylist` does: entries whose track
    *  is not in the index are skipped, a skipped start plays from the next available entry, and
-   *  `shuffled` plays every available entry in random order. */
+   *  `shuffled` plays every available entry in random order. `remote` words the notice for a
+   *  Navidrome playlist with nothing available. */
   export async function playEntries(
     list: PlaylistEntry[],
     fromPosition = 0,
-    options: { shuffled?: boolean } = {},
+    options: { shuffled?: boolean; remote?: boolean } = {},
   ): Promise<void> {
     const ids: string[] = [];
     let start = -1;
@@ -21,7 +22,7 @@
       ids.push(entry.trackId);
     }
     if (!ids.length) {
-      notify(t('playlist.nothingPlayable'));
+      notify(t(options.remote ? 'playlist.remoteNothingPlayable' : 'playlist.nothingPlayable'));
       return;
     }
     if (options.shuffled) return playShuffled(ids);
@@ -31,7 +32,7 @@
   /** Plays a Navidrome playlist (`navidrome:<id>`) from its first available entry. */
   export async function playRemotePlaylist(id: string, options: { shuffled?: boolean } = {}): Promise<void> {
     try {
-      await playEntries(await navidromePlaylistEntries(id), 0, options);
+      await playEntries(await navidromePlaylistEntries(id), 0, { ...options, remote: true });
     } catch (err) {
       notify(t('flow.failed', { message: String(err) }));
     }
@@ -210,7 +211,7 @@
   /** Plays from the entry at `position`. A Navidrome playlist plays the entries shown, so
    *  what plays matches the list on screen. */
   function playFrom(position: number, options: { shuffled?: boolean } = {}) {
-    if (remoteId) void playEntries(entries ?? [], position, options);
+    if (remoteId) void playEntries(entries ?? [], position, { ...options, remote: true });
     else void playPlaylist(localId, position, options);
   }
 
@@ -491,8 +492,9 @@
               {t('album.shuffle')}
             </button>
             {#if remote}
-              <span class="readonly" title={t('playlist.readOnlyHint')}>
+              <span class="readonly" title={t('playlist.readOnlyHint')} aria-describedby="pl-readonly-hint">
                 <svg
+                  class="lock"
                   width="14"
                   height="14"
                   viewBox="0 0 24 24"
@@ -508,6 +510,7 @@
                 </svg>
                 {t('playlist.readOnly')}
               </span>
+              <span id="pl-readonly-hint" class="sr-only">{t('playlist.readOnlyHint')}</span>
             {:else if confirming}
               <span class="confirm">
                 <button type="button" class="btn danger" onclick={deletePlaylist}>{t('playlist.deleteConfirm')}</button>
@@ -552,6 +555,8 @@
           tabindex="0"
           aria-label={name}
           aria-keyshortcuts={remoteId ? FAVORITE_KEY : `${FAVORITE_KEY} Delete Alt+ArrowUp Alt+ArrowDown`}
+          aria-readonly={remoteId ? 'true' : undefined}
+          aria-describedby={remote ? 'pl-readonly-hint' : undefined}
           aria-activedescendant={selected >= 0 && selected < entries.length ? `pl-row-${selected}` : undefined}
           {onkeydown}
           {oncontextmenu}
@@ -842,18 +847,19 @@
     box-shadow: 0 0 8px color-mix(in srgb, var(--src-navidrome) 55%, transparent);
   }
 
+  /* The read-only label, as on the Playlists cards: dim text, only the lock in the source color. */
   .readonly {
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    height: 30px;
-    padding: 0 12px 0 10px;
-    border-radius: 15px;
-    background: rgba(255, 255, 255, 0.04);
-    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+    margin-left: 4px;
     color: var(--text-dim);
     font-size: 12.5px;
     cursor: default;
+  }
+
+  .lock {
+    color: var(--src-navidrome);
   }
 
   .actions {

@@ -19,6 +19,8 @@
 
   const list = $derived(playlists.list);
   const remote = $derived(playlists.remote ?? []);
+  /** Prism and Navidrome playlists together, for the header. */
+  const total = $derived((list?.length ?? 0) + remote.length);
 
   $effect(() => {
     if (!scroller || !list) return;
@@ -48,7 +50,7 @@
   bind:this={scroller}
   onscroll={() => scroller && saveScroll(KEY, scroller.scrollTop)}
 >
-  <ViewHead title={t('nav.playlists')} meta={list?.length ? tc('view.count.playlists', list.length) : undefined}>
+  <ViewHead title={t('nav.playlists')} meta={total ? tc('view.count.playlists', total) : undefined}>
     {#snippet actions()}
       {#if list?.length}
         <button type="button" class="btn ghost" disabled={creating} onclick={newPlaylist}>
@@ -68,7 +70,7 @@
         <span class="sheet s2"></span>
         <span class="sheet s3"><Icon name="playlists" size={26} /></span>
       </div>
-      <h2>{t('playlists.empty')}</h2>
+      <h2>{remote.length ? t('playlists.emptyLocal') : t('playlists.empty')}</h2>
       <p class="lead">{t('playlists.emptyLead')}</p>
       <button type="button" class="btn primary" disabled={creating} onclick={newPlaylist}>
         <Icon name="plus" size={16} />
@@ -113,11 +115,17 @@
           {t('source.navidrome')}
         </h2>
         <p class="section-lead">{t('playlists.remote.lead')}</p>
+        <span id="pl-remote-hint" class="sr-only">{t('playlist.readOnlyHint')}</span>
       </header>
       <ul class="grid">
         {#each remote as playlist (playlist.id)}
           <li class="card">
-            <button type="button" class="open" onclick={() => go('playlist', playlist.id)}>
+            <button
+              type="button"
+              class="open"
+              aria-describedby="pl-remote-hint"
+              onclick={() => go('playlist', playlist.id)}
+            >
               <span class="art">
                 <PlaylistCover coverIds={playlist.coverIds} seed={remoteSeed(playlist.id)} fluid radius="12px" />
               </span>
@@ -125,6 +133,7 @@
               <span class="meta">
                 <span class="readonly" title={t('playlist.readOnlyHint')}>
                   <svg
+                    class="lock"
                     width="12"
                     height="12"
                     viewBox="0 0 24 24"
@@ -316,12 +325,28 @@
     gap: 8px;
   }
 
+  /* The read-only label, as on the playlist page: dim text, only the lock in the source color. */
   .readonly {
     flex: none;
     display: inline-flex;
     align-items: center;
-    gap: 4px;
-    color: color-mix(in srgb, var(--src-navidrome) 70%, var(--text-dim));
+    gap: 5px;
+    color: var(--text-dim);
+  }
+
+  .lock {
+    color: var(--src-navidrome);
+  }
+
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
 
   .count {

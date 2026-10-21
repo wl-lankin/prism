@@ -968,20 +968,29 @@ describe('Navidrome playlists', () => {
   let remotes: (typeof remote)[] = [];
   /** What `playlist_entries` serves instead of the default, when set. */
   let localEntries: unknown[] | null = null;
+  /** What `playlists_list` serves instead of the default, when set. */
+  let localList: unknown[] | null = null;
+  /** What `navidrome_playlist_entries` serves instead of the default, when set. */
+  let remoteEntries: unknown[] | null = null;
 
   let impl: NonNullable<ReturnType<typeof invoke.getMockImplementation>>;
   beforeEach(() => {
     remotes = [remote];
     localEntries = null;
+    localList = null;
+    remoteEntries = null;
     impl = invoke.getMockImplementation()!;
     invoke.mockImplementation(async (cmd, args) => {
       if (cmd === 'navidrome_playlists') return remotes;
       if (cmd === 'navidrome_playlist_entries')
-        return [
-          { position: 0, trackId: 'navidrome:s1', track: ndTrack(1) },
-          { position: 1, trackId: 'navidrome:s2', track: null },
-          { position: 2, trackId: 'navidrome:s3', track: ndTrack(3) },
-        ];
+        return (
+          remoteEntries ?? [
+            { position: 0, trackId: 'navidrome:s1', track: ndTrack(1) },
+            { position: 1, trackId: 'navidrome:s2', track: null },
+            { position: 2, trackId: 'navidrome:s3', track: ndTrack(3) },
+          ]
+        );
+      if (cmd === 'playlists_list' && localList) return localList;
       if (cmd === 'playlist_entries' && localEntries) return localEntries;
       return impl(cmd, args);
     });
@@ -1059,6 +1068,11 @@ describe('Navidrome playlists', () => {
     expect(target.querySelector('.readonly')?.textContent).toContain('Read-only');
     expect(target.querySelector('.meta')?.textContent).toContain('demo');
     expect(list.getAttribute('aria-keyshortcuts')).not.toContain('Delete');
+    expect(list.getAttribute('aria-readonly')).toBe('true');
+    // The read-only hint reaches screen readers, not only as a tooltip.
+    const hint = document.getElementById(list.getAttribute('aria-describedby')!);
+    expect(hint?.textContent).toContain('belongs to your Navidrome server');
+    expect(target.querySelector('.readonly')?.getAttribute('aria-describedby')).toBe(hint?.id);
 
     // The unavailable entry is dimmed and labelled, not an error.
     const rows = target.querySelectorAll('[role="option"]');
@@ -1157,6 +1171,68 @@ describe('Navidrome playlists', () => {
     rows[2].dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
     await settle();
     expect(invoke).toHaveBeenCalledWith('player_play', { trackIds: ['local:t1', 'local:t3'], startIndex: 1 });
+    unmount(app);
+  });
+
+  it('counts every playlist in the header and words the empty state for Prism playlists', async () => {
+    const app = await playlistsView();
+    expect(target.textContent).toContain('3 playlists');
+    // The card's hint is tied to it for screen readers.
+    const open = target.querySelector<HTMLElement>('section.remote .open')!;
+    expect(document.getElementById(open.getAttribute('aria-describedby')!)?.textContent).toContain(
+      'belongs to your Navidrome server',
+    );
+    unmount(app);
+
+    localList = [];
+    const empty = await playlistsView();
+    expect(target.querySelector('.empty h2')?.textContent).toBe('No Prism playlists yet');
+    expect(target.textContent).toContain('1 playlist');
+    expect(target.querySelector('section.remote')).not.toBeNull();
+    unmount(empty);
+
+    remotes = [];
+    const none = await playlistsView();
+    expect(target.querySelector('.empty h2')?.textContent).toBe('No playlists yet');
+    unmount(none);
+  });
+
+  it('says when nothing in a remote playlist is available yet', async () => {
+    const { notice } = await import('../stores/notice.svelte');
+    remoteEntries = [
+      { position: 0, trackId: 'navidrome:s1', track: null },
+      { position: 1, trackId: 'navidrome:s2', track: null },
+    ];
+    const app = await playlistsView();
+    invoke.mockClear();
+    target.querySelector<HTMLElement>('section.remote .play')!.click();
+    await settle();
+    expect(invoke).not.toHaveBeenCalledWith('player_play', expect.anything());
+    expect(notice.text).toBe('None of these songs are available from Navidrome yet.');
+    notice.text = null;
+    unmount(app);
+  });
+
+  it('still moves and removes an unavailable entry of a Prism playlist', async () => {
+    const { default: PlaylistView } = await import('./PlaylistView.svelte');
+    const { reloadPlaylists } = await import('../stores/playlists.svelte');
+    await reloadPlaylists();
+    const app = mount(PlaylistView, { target, props: { playlistId: 1 } });
+    await settle();
+    const list = target.querySelector<HTMLElement>('[role="listbox"]')!;
+    expect(list.getAttribute('aria-readonly')).toBeNull();
+    const titles = () => [...list.querySelectorAll('[role="option"] .title')].map((el) => el.textContent);
+    // Row 1 is the entry that is not in the library.
+    key(list, 'ArrowDown');
+    key(list, 'ArrowDown');
+    expect(list.getAttribute('aria-activedescendant')).toBe('pl-row-1');
+    list.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', altKey: true, bubbles: true }));
+    flushSync();
+    expect(titles()).toEqual(['Song 1', 'Song 3', 'Not in your library']);
+    key(list, 'Delete');
+    await settle();
+    expect(invoke).toHaveBeenCalledWith('playlist_move', { id: 1, from: 1, to: 2 });
+    expect(invoke).toHaveBeenCalledWith('playlist_remove', { id: 1, positions: [2] });
     unmount(app);
   });
 
