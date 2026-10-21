@@ -113,7 +113,14 @@ export interface PlayerState {
   queueVersion: number;
   /** The Flow the queue was dealt for; null outside Flow. */
   flow?: FlowVariant | null;
+  /** The chosen repeat mode; a Flow ignores it. */
+  repeat?: RepeatMode;
+  /** The upcoming part plays in random order; a Flow ignores it. */
+  shuffle?: boolean;
 }
+
+/** Off, all (the first track follows the last), one (the track plays again). */
+export type RepeatMode = 'off' | 'all' | 'one';
 
 /** Where a Flow draws its tracks from. */
 export type FlowVariant = { kind: 'favorites' } | { kind: 'library' } | { kind: 'genre'; genre: string };
@@ -142,6 +149,8 @@ export interface Settings {
   /** A global shortcut in Tauri's accelerator syntax. */
   miniShortcut: string;
   startWithSystem: boolean;
+  repeat: RepeatMode;
+  shuffle: boolean;
 }
 
 /** One entry of `player_queue_range`; `track` is null when the id no longer resolves. */

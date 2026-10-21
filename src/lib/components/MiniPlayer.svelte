@@ -27,6 +27,7 @@
   import FlowRing, { type RingMode } from './FlowRing.svelte';
   import Heart from './Heart.svelte';
   import Icon from './Icon.svelte';
+  import PlayModes from './PlayModes.svelte';
   import Slider from './Slider.svelte';
 
   /** The mini player, the whole page of the `mini` window. A card with the Flow ring hanging
@@ -280,6 +281,7 @@
       >
         <Icon name="next" size={16} />
       </button>
+      <PlayModes compact />
       <div class="volume" {onwheel}>
         <button
           type="button"
@@ -538,13 +540,13 @@
   .controls {
     display: flex;
     align-items: center;
-    gap: 2px;
+    gap: 0;
     margin-left: -6px;
   }
 
   .btn {
     flex: none;
-    width: 28px;
+    width: 26px;
     height: 28px;
     display: grid;
     place-items: center;
@@ -579,21 +581,21 @@
     min-width: 0;
     display: flex;
     align-items: center;
-    gap: 2px;
-    margin-left: 4px;
+    gap: 0;
+    margin-left: 2px;
   }
 
   .slider {
     flex: 1;
-    min-width: 36px;
+    min-width: 34px;
     max-width: 76px;
   }
 
   .open {
     flex: none;
     height: 24px;
-    margin-left: 8px;
-    padding: 0 10px;
+    margin-left: 6px;
+    padding: 0 8px;
     border: 0;
     border-radius: 12px;
     background: rgba(255, 255, 255, 0.06);

@@ -14,6 +14,8 @@ export const DEFAULT_SETTINGS: Settings = {
   miniOnTop: false,
   miniShortcut: 'CommandOrControl+Alt+P',
   startWithSystem: false,
+  repeat: 'off',
+  shuffle: false,
 };
 
 /** The saved settings as the UI shows them. Changes go through `updateSettings`. */

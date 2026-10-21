@@ -58,6 +58,10 @@ export const playerAppend = (trackIds: string[]) => call<void>('player_append', 
 /** Plays the queue entry at `index`; an index out of range is ignored. */
 export const playerJump = (index: number) => call<void>('player_jump', { index });
 /** Up to `limit` queue entries from `offset` (`limit` is capped at 1000). */
+/** Moves the queue entry at `from` to `to`; what plays keeps playing. */
+export const playerMove = (from: number, to: number) => call<void>('player_move', { from, to });
+/** Removes the queue entry at `index`; removing the playing one plays the next one. */
+export const playerRemove = (index: number) => call<void>('player_remove', { index });
 export const playerQueueRange = (offset: number, limit: number) =>
   call<QueueItem[]>('player_queue_range', { offset, limit });
 
