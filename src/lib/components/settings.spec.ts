@@ -388,5 +388,7 @@ it('has the same defaults as the backend', () => {
     miniOnTop: false,
     miniShortcut: 'CommandOrControl+Alt+P',
     startWithSystem: false,
+    repeat: 'off',
+    shuffle: false,
   });
 });

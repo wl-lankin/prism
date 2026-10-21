@@ -163,6 +163,18 @@ pub fn player_jump(state: State<'_, AppState>, index: u32) -> Result<(), String>
     state.player.jump(index as usize)
 }
 
+/// Moves the queue entry at `from` to `to`; what plays keeps playing. Out of range is ignored.
+#[tauri::command]
+pub fn player_move(state: State<'_, AppState>, from: u32, to: u32) -> Result<(), String> {
+    state.player.move_entry(from as usize, to as usize)
+}
+
+/// Removes the queue entry at `index`; removing the playing one plays the next one.
+#[tauri::command]
+pub fn player_remove(state: State<'_, AppState>, index: u32) -> Result<(), String> {
+    state.player.remove(index as usize)
+}
+
 /// A page of the queue. Resolving takes the library DB lock, so it runs off the async
 /// runtime's worker threads.
 #[tauri::command]
@@ -444,6 +456,8 @@ pub async fn settings_set(app: AppHandle, patch: serde_json::Value) -> Result<Se
                     Change::Gapless(gapless) => state.player.set_gapless(*gapless),
                     Change::ReplayGain(mode) => state.player.set_replay_gain(*mode),
                     Change::Crossfade(mode, ms) => state.player.set_crossfade(*mode, *ms),
+                    Change::Repeat(mode) => state.player.set_repeat(*mode),
+                    Change::Shuffle(on) => state.player.set_shuffle(*on),
                     // Applied above, before the save.
                     Change::MiniShortcut(_) | Change::StartWithSystem(_) => Ok(()),
                     other => shell::apply_setting(&app, other),

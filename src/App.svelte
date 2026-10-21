@@ -13,6 +13,8 @@
   import NowPlaying from './lib/components/NowPlaying.svelte';
   import PlaylistsView from './lib/components/PlaylistsView.svelte';
   import PlaylistView from './lib/components/PlaylistView.svelte';
+  import QueuePanel from './lib/components/QueuePanel.svelte';
+  import { loadQueuePanel, toggleQueuePanel } from './lib/stores/queue.svelte';
   import { initPlaylists } from './lib/stores/playlists.svelte';
   import SearchPalette from './lib/components/SearchPalette.svelte';
   import Settings from './lib/components/Settings.svelte';
@@ -84,6 +86,9 @@
   $effect(() => initLibrary());
 
   $effect(() => initRing());
+
+  // The queue panel opens as it was left.
+  $effect(() => loadQueuePanel());
 
   $effect(() => {
     let stop: (() => void) | undefined;
@@ -212,6 +217,11 @@
     if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 'k') {
       event.preventDefault();
       searching = !searching;
+    }
+    // Ctrl+Q (also on macOS, where Cmd+Q quits) opens and closes "Up next".
+    if (event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 'q') {
+      event.preventDefault();
+      toggleQueuePanel();
     }
   }
 
@@ -360,6 +370,7 @@
           </div>
         {/key}
       </section>
+      <QueuePanel />
     </main>
 
     <div class="transport">

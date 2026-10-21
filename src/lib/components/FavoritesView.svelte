@@ -6,11 +6,10 @@
 </script>
 
 <script lang="ts">
-  import { shuffle } from '../flow';
   import { formatDuration } from '../format';
   import { t, tc, type Key } from '../i18n';
   import { favoritesAlbums, favoritesArtists, favoritesTracks, libraryAlbumTracks, libraryArtistAlbums } from '../ipc';
-  import { playIds } from '../play';
+  import { playIds, playShuffled } from '../play';
   import { FAVORITE_KEY, favorites, isFavorite, isFavoriteKey, toggleFavorite } from '../stores/favorites.svelte';
   import { library } from '../stores/library.svelte';
   import { go } from '../stores/nav.svelte';
@@ -115,7 +114,7 @@
   /** Plays the listed songs (as filtered) from row `index`. */
   function play(index: number, shuffled = false) {
     const ids = shownTracks.map((x) => x.id);
-    void playIds(shuffled ? shuffle(ids) : ids, shuffled ? 0 : index);
+    void (shuffled ? playShuffled(ids) : playIds(ids, index));
   }
 
   /** Plays everything the current tab lists: the songs, or the tracks of the albums or artists. */
@@ -134,7 +133,7 @@
       notify(t('flow.failed', { message: String(err) }));
       return;
     }
-    await playIds(shuffled ? shuffle(ids) : ids, 0);
+    await (shuffled ? playShuffled(ids) : playIds(ids, 0));
   }
 
   function rowIndex(event: MouseEvent): number | null {

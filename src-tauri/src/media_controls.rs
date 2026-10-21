@@ -338,6 +338,7 @@ fn run(receiver: Receiver<PlayerState>, app: AppHandle, hwnd: Option<usize>, cov
 mod tests {
     use super::*;
     use crate::library::model::Source;
+    use crate::settings::RepeatMode;
 
     fn track() -> Track {
         Track {
@@ -404,6 +405,8 @@ mod tests {
             queue_length: 1,
             queue_version: 0,
             flow: None,
+            repeat: RepeatMode::Off,
+            shuffle: false,
         }
     }
 

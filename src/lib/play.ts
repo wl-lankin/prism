@@ -1,7 +1,7 @@
 import { t } from './i18n';
 import { libraryAlbumTracks, libraryTracksRange, playerPlay, playlistEntries } from './ipc';
-import { shuffle } from './flow';
 import { notify } from './stores/notice.svelte';
+import { updateSettings } from './stores/settings.svelte';
 
 /** Songs queued around a double-clicked row of the Songs list. */
 export const SONGS_QUEUE = 1000;
@@ -22,11 +22,25 @@ export async function playIds(ids: string[], start: number): Promise<void> {
   }
 }
 
+/** The Shuffle buttons: turns the shuffle mode on (as the transport's toggle does), then
+ *  plays `ids` from a random track. The engine deals the rest in random order and keeps
+ *  `ids` as the original order, so turning shuffle off later plays on in list order. */
+export async function playShuffled(ids: string[]): Promise<void> {
+  if (ids.length === 0) return;
+  try {
+    await updateSettings({ shuffle: true });
+  } catch (err) {
+    failed(err);
+    return;
+  }
+  await playIds(ids, Math.floor(Math.random() * ids.length));
+}
+
 /** Plays an album from its first track, from `trackId`, or shuffled. */
 export async function playAlbum(albumId: string, options: { trackId?: string; shuffled?: boolean } = {}) {
   try {
     const ids = (await libraryAlbumTracks(albumId)).map((track) => track.id);
-    if (options.shuffled) return playIds(shuffle(ids), 0);
+    if (options.shuffled) return playShuffled(ids);
     return playIds(ids, options.trackId ? Math.max(0, ids.indexOf(options.trackId)) : 0);
   } catch (err) {
     failed(err);
@@ -54,7 +68,7 @@ export async function playPlaylist(
       notify(t('playlist.nothingPlayable'));
       return;
     }
-    if (options.shuffled) return playIds(shuffle(ids), 0);
+    if (options.shuffled) return playShuffled(ids);
     if (start < 0) return;
     return playIds(ids, start);
   } catch (err) {

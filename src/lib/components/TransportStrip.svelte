@@ -4,9 +4,12 @@
   import { playerNext, playerPrev, playerSeek, playerSetVolume } from '../ipc';
   import { back, go, nav } from '../stores/nav.svelte';
   import { player } from '../stores/player.svelte';
+  import { QUEUE_TOGGLE_ID } from '../queue';
+  import { queuePanel, toggleQueuePanel } from '../stores/queue.svelte';
   import Cover from './Cover.svelte';
   import Heart from './Heart.svelte';
   import Icon from './Icon.svelte';
+  import PlayModes from './PlayModes.svelte';
   import Slider from './Slider.svelte';
 
   /** The bottom strip of the content card. The centre keeps `ringGap` px free for the Flow
@@ -109,6 +112,21 @@
   </div>
 
   <div class="right">
+    <PlayModes />
+    <button
+      type="button"
+      id={QUEUE_TOGGLE_ID}
+      class="btn small toggle"
+      class:on={queuePanel.open}
+      aria-pressed={queuePanel.open}
+      aria-label={t('transport.queue')}
+      title={t('transport.queue')}
+      aria-keyshortcuts="Control+Q"
+      onclick={() => toggleQueuePanel()}
+    >
+      <Icon name="queue" size={18} />
+    </button>
+    <span class="divider" aria-hidden="true"></span>
     <!-- Dropped files ("file:" ids) are not in the library; a favorite of one would be an orphan. -->
     {#if !idle && track && !track.id.startsWith('file:')}
       <Heart kind="track" id={track.id} label={t('favorites.toggleItem', { name: track.title })} />
@@ -280,11 +298,50 @@
     display: flex;
     align-items: center;
     justify-content: flex-end;
-    gap: 8px;
+    gap: 6px;
+    min-width: 0;
   }
 
   .volume {
     width: 104px;
+  }
+
+  .divider {
+    width: 1px;
+    height: 18px;
+    margin: 0 2px;
+    background: var(--line);
+  }
+
+  .btn.toggle {
+    position: relative;
+    color: rgba(243, 243, 245, 0.62);
+  }
+
+  .btn.toggle.on {
+    color: var(--text);
+  }
+
+  /* Open, it carries the same sliver of spectrum as an active play mode. */
+  .btn.toggle::after {
+    content: '';
+    position: absolute;
+    left: 50%;
+    bottom: 4px;
+    width: 12px;
+    height: 2px;
+    border-radius: 2px;
+    background: linear-gradient(90deg, var(--spec-1), var(--spec-2), var(--spec-3), var(--spec-4));
+    opacity: 0;
+    transform: translateX(-50%) scaleX(0.4);
+    transition:
+      opacity var(--dur) ease-out,
+      transform var(--dur) ease-out;
+  }
+
+  .btn.toggle.on::after {
+    opacity: 1;
+    transform: translateX(-50%) scaleX(1);
   }
 
   .btn {

@@ -492,6 +492,8 @@ mod tests {
     mod refill_rules {
         use rand::SeedableRng;
 
+        use crate::settings::RepeatMode;
+
         use super::super::*;
 
         fn session() -> Session {
@@ -522,6 +524,8 @@ mod tests {
                 queue_length: length,
                 queue_version: version,
                 flow: Some(FlowVariant::Library),
+                repeat: RepeatMode::Off,
+                shuffle: false,
             }
         }
 

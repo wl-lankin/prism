@@ -18,7 +18,7 @@ use crate::audio::{
 };
 use crate::flow::FlowVariant;
 use crate::library::model::Track;
-use crate::settings::{Crossfade, ReplayGain};
+use crate::settings::{Crossfade, RepeatMode, ReplayGain};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -44,6 +44,10 @@ pub struct PlayerState {
     pub queue_version: u64,
     /// The Flow this queue was dealt for; `None` (`null`) outside Flow.
     pub flow: Option<FlowVariant>,
+    /// The chosen mode; a Flow ignores it (and keeps it for the next queue).
+    pub repeat: RepeatMode,
+    /// The upcoming part plays in random order; a Flow ignores it too.
+    pub shuffle: bool,
 }
 
 /// One entry of `player_queue_range`. `track` is `None` when the id no longer resolves.
@@ -97,6 +101,8 @@ pub struct PlayerOptions {
     /// When tracks blend into each other, and for how long (ms); see [`crossfade_for`].
     pub crossfade: Crossfade,
     pub crossfade_ms: u32,
+    pub repeat: RepeatMode,
+    pub shuffle: bool,
 }
 
 impl Default for PlayerOptions {
@@ -109,6 +115,8 @@ impl Default for PlayerOptions {
             replay_gain: ReplayGain::Off,
             crossfade: Crossfade::Off,
             crossfade_ms: 0,
+            repeat: RepeatMode::Off,
+            shuffle: false,
         }
     }
 }
@@ -172,17 +180,19 @@ const OPENER_CURRENT_THREAD: &str = "prism-opener-current";
 const OPENER_NEXT_THREAD: &str = "prism-opener-next";
 
 impl PlayerState {
-    fn idle(volume: f32) -> PlayerState {
+    fn idle(options: &PlayerOptions) -> PlayerState {
         PlayerState {
             status: PlayerStatus::Idle,
             track: None,
             position_ms: 0,
             duration_ms: 0,
-            volume,
+            volume: options.volume,
             queue_index: 0,
             queue_length: 0,
             queue_version: 0,
             flow: None,
+            repeat: options.repeat,
+            shuffle: options.shuffle,
         }
     }
 }
@@ -211,6 +221,11 @@ enum Command {
     SetGapless(bool),
     SetReplayGain(ReplayGain),
     SetCrossfade(Crossfade, u32),
+    SetRepeat(RepeatMode),
+    SetShuffle(bool),
+    /// Moves the queue entry at the first index to the second.
+    Move(usize, usize),
+    Remove(usize),
     /// A fresher copy of a track (its cover changed): replaces the shown one when the ids match.
     UpdateTrack(Box<Track>),
     Shutdown,
@@ -301,6 +316,28 @@ impl PlayerHandle {
         self.send(Command::Jump(index))
     }
 
+    /// Moves the queue entry at `from` to `to`; what plays keeps playing. Out of range is
+    /// ignored.
+    pub fn move_entry(&self, from: usize, to: usize) -> Result<(), String> {
+        self.send(Command::Move(from, to))
+    }
+
+    /// Removes the queue entry at `index`. Removing the playing one plays the next one.
+    pub fn remove(&self, index: usize) -> Result<(), String> {
+        self.send(Command::Remove(index))
+    }
+
+    /// Off, all (the first track follows the last) or one (the track plays again).
+    pub fn set_repeat(&self, mode: RepeatMode) -> Result<(), String> {
+        self.send(Command::SetRepeat(mode))
+    }
+
+    /// Shuffles the upcoming part, or restores the original order (playing on after the
+    /// current track's original place).
+    pub fn set_shuffle(&self, on: bool) -> Result<(), String> {
+        self.send(Command::SetShuffle(on))
+    }
+
     /// Hands the engine a fresher copy of a track (resolve it off the engine thread). It
     /// replaces the shown track when the ids match and publishes a new state.
     pub fn refresh_track(&self, track: Track) -> Result<(), String> {
@@ -358,7 +395,7 @@ impl Player {
         let (commands, command_rx) = crossbeam_channel::unbounded();
         let handle = PlayerHandle {
             commands,
-            state: Arc::new(Mutex::new(PlayerState::idle(options.volume))),
+            state: Arc::new(Mutex::new(PlayerState::idle(&options))),
             queue: Arc::new(Mutex::new(Arc::new(Vec::new()))),
         };
         let shared = Shared {
@@ -411,6 +448,26 @@ impl Player {
     /// Plays the queue entry at `index`; an index out of range is ignored.
     pub fn jump(&self, index: usize) -> Result<(), String> {
         self.handle.jump(index)
+    }
+
+    /// See [`PlayerHandle::move_entry`].
+    pub fn move_entry(&self, from: usize, to: usize) -> Result<(), String> {
+        self.handle.move_entry(from, to)
+    }
+
+    /// See [`PlayerHandle::remove`].
+    pub fn remove(&self, index: usize) -> Result<(), String> {
+        self.handle.remove(index)
+    }
+
+    /// See [`PlayerHandle::set_repeat`].
+    pub fn set_repeat(&self, mode: RepeatMode) -> Result<(), String> {
+        self.handle.set_repeat(mode)
+    }
+
+    /// See [`PlayerHandle::set_shuffle`].
+    pub fn set_shuffle(&self, on: bool) -> Result<(), String> {
+        self.handle.set_shuffle(on)
     }
 
     /// The queue's ids, as the engine published them.
@@ -513,7 +570,8 @@ enum Slot {
 struct OpenJob {
     generation: u64,
     slot: Slot,
-    index: usize,
+    /// The queue entry (see [`Queue::uid`]): it may move while the job runs.
+    uid: u64,
     id: String,
     spec: StreamSpec,
 }
@@ -521,7 +579,7 @@ struct OpenJob {
 struct Opened {
     generation: u64,
     slot: Slot,
-    index: usize,
+    uid: u64,
     id: String,
     result: Result<(Track, Box<dyn AudioSource>), String>,
 }
@@ -598,7 +656,7 @@ fn spawn_opener(
                 let opened = Opened {
                     generation: job.generation,
                     slot: job.slot,
-                    index: job.index,
+                    uid: job.uid,
                     id: job.id,
                     result,
                 };
@@ -614,13 +672,15 @@ fn spawn_opener(
     jobs
 }
 
-/// The gapless pre-open of the track after the current one.
+/// The gapless pre-open of the track that follows the current one (the next one, the first
+/// one after the last with repeat all, the same one with repeat one). Entries are named by
+/// their queue uid, so a move elsewhere in the queue keeps it.
 enum Preload {
     None,
-    Requested(usize),
-    Ready(Box<Track>),
-    /// (index, track id, message): reported when the queue reaches it.
-    Failed(usize, String, String),
+    Requested(u64),
+    Ready(u64, Box<Track>),
+    /// (uid, track id, message): reported when the queue reaches it.
+    Failed(u64, String, String),
     /// Opened for a crossfade that does not apply (gapless off): dropped, and the track
     /// opens after the current one ends.
     Skipped,
@@ -640,6 +700,9 @@ struct Engine {
     queue_version: u64,
     /// The Flow the queue was dealt for; set by every play, kept by appends.
     flow: Option<FlowVariant>,
+    /// As chosen; see [`Engine::repeat_mode`] for what applies.
+    repeat: RepeatMode,
+    shuffle: bool,
     sink: EventSink,
     shared: Shared,
     openers: Openers,
@@ -701,6 +764,8 @@ impl Engine {
             queue: Queue::new(),
             queue_version: 0,
             flow: None,
+            repeat: options.repeat,
+            shuffle: options.shuffle,
             sink,
             shared,
             openers,
@@ -766,7 +831,9 @@ impl Engine {
             return;
         }
         let queued = match (&self.current, &self.preload) {
-            (Some(current), Preload::Ready(next)) => Some(self.crossfade_to(current, next)),
+            (Some(current), Preload::Ready(uid, next)) => {
+                Some(self.crossfade_into(current, *uid, next))
+            }
             _ => None,
         };
         match queued {
@@ -792,6 +859,73 @@ impl Engine {
             current,
             next,
         )
+    }
+
+    /// How long the queue entry `uid` (`next`) blends into `current`. Repeat one hands the
+    /// track over to itself without a fade, like a gapless loop.
+    fn crossfade_into(&self, current: &Track, uid: u64, next: &Track) -> u32 {
+        if self.queue.uid(self.queue.index()) == Some(uid) {
+            0
+        } else {
+            self.crossfade_to(current, next)
+        }
+    }
+
+    /// The repeat mode that applies: a Flow never ends and never repeats.
+    fn repeat_mode(&self) -> RepeatMode {
+        if self.flow.is_some() {
+            RepeatMode::Off
+        } else {
+            self.repeat
+        }
+    }
+
+    /// The entry that follows the current one. `ended`: the current track played to its
+    /// end (repeat one plays it again); otherwise it failed and the queue moves on.
+    fn follow_index(&self, ended: bool) -> Option<usize> {
+        match self.repeat_mode() {
+            RepeatMode::One if ended && !self.queue.is_empty() => Some(self.queue.index()),
+            RepeatMode::All => self.queue.wrap_next(),
+            RepeatMode::Off | RepeatMode::One => self.queue.next_index(),
+        }
+    }
+
+    /// The queue (or the repeat mode) changed: a pre-opened track that no longer follows
+    /// the current one is dropped, so the right one is opened in its place.
+    fn follow_changed(&mut self) {
+        let follows = self
+            .follow_index(true)
+            .and_then(|index| self.queue.uid(index));
+        let keep = match &self.preload {
+            Preload::None => true,
+            Preload::Requested(uid) | Preload::Ready(uid, _) | Preload::Failed(uid, _, _) => {
+                Some(*uid) == follows
+            }
+            // Decided again for whatever follows now.
+            Preload::Skipped => false,
+        };
+        if keep {
+            return;
+        }
+        if matches!(self.preload, Preload::Ready(..)) {
+            self.playback.queue_next(None);
+        }
+        self.preload = Preload::None;
+    }
+
+    /// Runs `change` on the queue, keeping the shown index on the shown entry; publishes the
+    /// new ids and re-decides the pre-opened track.
+    fn change_queue(&mut self, change: impl FnOnce(&mut Queue) -> bool) -> bool {
+        let shown = self.queue.uid(self.shown_index);
+        if !change(&mut self.queue) {
+            return false;
+        }
+        if let Some(index) = shown.and_then(|uid| self.queue.position_of(uid)) {
+            self.shown_index = index;
+        }
+        self.queue_changed();
+        self.follow_changed();
+        true
     }
 
     /// How long before the current track's end the next one is opened.
@@ -848,7 +982,9 @@ impl Engine {
                 self.settle_handover();
                 self.flow = flow;
                 self.crossfade_changed();
-                self.queue.set(ids, start);
+                // A Flow deals its own order.
+                let shuffle = self.shuffle && self.flow.is_none();
+                self.queue.set(ids, start, shuffle);
                 self.queue_changed();
                 self.failures = 0;
                 self.start_current(true);
@@ -864,12 +1000,37 @@ impl Engine {
             Command::Toggle => self.toggle(),
             Command::Next => {
                 self.settle_handover();
-                if self.queue.advance() {
-                    self.start_current(true);
-                } else {
-                    self.go_idle();
+                // Repeat one does not hold a manual next; repeat all goes round.
+                let next = match self.repeat_mode() {
+                    RepeatMode::All => self.queue.wrap_next(),
+                    RepeatMode::Off | RepeatMode::One => self.queue.next_index(),
+                };
+                match next {
+                    Some(index) => {
+                        self.queue.jump(index);
+                        self.start_current(true);
+                    }
+                    None => self.go_idle(),
                 }
             }
+            Command::SetRepeat(mode) => {
+                self.repeat = mode;
+                self.follow_changed();
+            }
+            Command::SetShuffle(on) => {
+                self.shuffle = on;
+                if self.flow.is_none() {
+                    self.change_queue(|queue| {
+                        let changed = queue.is_shuffled() != on;
+                        queue.set_shuffled(on);
+                        changed
+                    });
+                }
+            }
+            Command::Move(from, to) => {
+                self.change_queue(|queue| queue.move_entry(from, to));
+            }
+            Command::Remove(index) => self.remove(index),
             Command::Prev => self.prev(),
             Command::Seek(ms) => self.seek(ms),
             Command::SetVolume(volume) => {
@@ -910,7 +1071,7 @@ impl Engine {
                     // Playing already: a ramp, not a jump.
                     self.playback.ramp_gain(track_gain(track, mode));
                 }
-                if let Preload::Ready(track) = &self.preload {
+                if let Preload::Ready(_, track) = &self.preload {
                     self.playback.set_next_gain(track_gain(track, mode));
                 }
             }
@@ -926,7 +1087,7 @@ impl Engine {
     /// The queue's ids changed: bump the version and publish the ids for handle readers.
     fn queue_changed(&mut self) {
         self.queue_version += 1;
-        write_lock(&self.shared.queue, Arc::new(self.queue.ids().to_vec()));
+        write_lock(&self.shared.queue, Arc::new(self.queue.ids()));
         self.dirty = true;
     }
 
@@ -937,15 +1098,75 @@ impl Engine {
             return;
         }
         let first = self.queue.len();
-        self.queue.extend(ids);
-        self.queue_changed();
-        if matches!(self.preload, Preload::Skipped) {
-            // The next track may be another one now: decide for it again.
-            self.preload = Preload::None;
-        }
+        // The next track may be another one now (shuffled in, or after the last with repeat
+        // all): decide for it again.
+        self.change_queue(|queue| {
+            queue.extend(ids);
+            true
+        });
         if self.ending && self.queue.jump(first) {
             self.failures = 0;
             self.start_current(false);
+        }
+    }
+
+    /// Removes the queue entry at `index`. When it is the track that plays (or loads), the
+    /// one that followed it plays; after the last one, the first with repeat all, else idle.
+    /// Paused stays paused, on the track that follows.
+    ///
+    /// During a gapless hand-over the queue already stands on the next track while the UI
+    /// still shows the previous one. Removing the shown one settles the hand-over first (the
+    /// next track is what plays anyway). Removing the next one drops it unheard: the shown
+    /// track's tail plays out and the entry after it follows.
+    fn remove(&mut self, index: usize) {
+        if index >= self.queue.len() {
+            return;
+        }
+        let mut cut = true;
+        if self.handover.is_some() {
+            if index == self.queue.index() {
+                self.handover = None;
+                self.decoding = false;
+                self.current = None;
+                if self.status == PlayerStatus::Paused {
+                    // Nothing is heard while paused: nothing is cut.
+                    self.playback.stop();
+                } else {
+                    self.playback.drop_sources();
+                    cut = false;
+                }
+            } else if index == self.shown_index {
+                self.settle_handover();
+            }
+        }
+        let paused = match self.status {
+            PlayerStatus::Paused => true,
+            PlayerStatus::Loading => self.start_paused,
+            PlayerStatus::Playing | PlayerStatus::Idle => false,
+        };
+        let current = index == self.queue.index();
+        if !self.change_queue(|queue| queue.remove(index)) {
+            return;
+        }
+        if self.queue.is_empty() {
+            self.go_idle();
+            return;
+        }
+        if !current || self.status == PlayerStatus::Idle {
+            return;
+        }
+        self.failures = 0;
+        if index < self.queue.len() {
+            self.start_current(cut);
+        } else if self.repeat_mode() == RepeatMode::All {
+            self.queue.jump(0);
+            self.start_current(cut);
+        } else {
+            self.finish(cut);
+            return;
+        }
+        if self.status == PlayerStatus::Loading {
+            self.start_paused = paused;
         }
     }
 
@@ -993,6 +1214,10 @@ impl Engine {
             self.seek(0);
         } else if self.queue.back() {
             self.start_current(true);
+        } else if self.repeat_mode() == RepeatMode::All && self.queue.len() > 1 {
+            // Repeat all goes round backwards too.
+            self.queue.jump(self.queue.len() - 1);
+            self.start_current(true);
         } else if self.seekable() {
             self.seek(0);
         }
@@ -1029,7 +1254,10 @@ impl Engine {
         self.start_paused = false;
         self.paused_at = None;
         self.dirty = true;
-        let Some(id) = self.queue.current().map(str::to_string) else {
+        let (Some(id), Some(uid)) = (
+            self.queue.current().map(str::to_string),
+            self.queue.uid(self.queue.index()),
+        ) else {
             self.finish(cut);
             return;
         };
@@ -1042,7 +1270,7 @@ impl Engine {
         let job = OpenJob {
             generation,
             slot: Slot::Current,
-            index: self.queue.index(),
+            uid,
             id: id.clone(),
             spec: self.playback.output_spec(),
         };
@@ -1053,15 +1281,27 @@ impl Engine {
         }
     }
 
-    /// Moves past a track that failed (or ended): the next one, or the end of the queue.
-    /// After [`MAX_FAILURES_IN_A_ROW`] failures the player gives up and goes idle.
+    /// Moves past a track that failed: the next one (round to the first with repeat all;
+    /// repeat one does not retry it), or the end of the queue. With repeat all, a queue of
+    /// one entry tries that entry again. After [`MAX_FAILURES_IN_A_ROW`] failures in a row
+    /// the player gives up and goes idle, so such a retry stops after 10 attempts.
     fn skip(&mut self, cut: bool) {
+        self.play_on(false, cut);
+    }
+
+    /// Moves on from the current track: to the one that follows it (see
+    /// [`follow_index`](Self::follow_index)), or to the end of the queue.
+    fn play_on(&mut self, ended: bool, cut: bool) {
         if self.failures >= MAX_FAILURES_IN_A_ROW {
             self.finish(cut);
-        } else if self.queue.advance() {
-            self.start_current(cut);
-        } else {
-            self.finish(cut);
+            return;
+        }
+        match self.follow_index(ended) {
+            Some(index) => {
+                self.queue.jump(index);
+                self.start_current(cut);
+            }
+            None => self.finish(cut),
         }
     }
 
@@ -1100,7 +1340,9 @@ impl Engine {
         }
         match opened.slot {
             Slot::Current => {
-                if opened.index != self.queue.index() || self.status != PlayerStatus::Loading {
+                if self.queue.uid(self.queue.index()) != Some(opened.uid)
+                    || self.status != PlayerStatus::Loading
+                {
                     return;
                 }
                 match opened.result {
@@ -1118,15 +1360,14 @@ impl Engine {
                 }
             }
             Slot::Next => {
-                if !matches!(self.preload, Preload::Requested(index) if index == opened.index) {
+                if !matches!(self.preload, Preload::Requested(uid) if uid == opened.uid) {
                     return;
                 }
                 self.preload = match opened.result {
                     Ok((track, source)) => {
-                        let crossfade_ms = self
-                            .current
-                            .as_ref()
-                            .map_or(0, |current| self.crossfade_to(current, &track));
+                        let crossfade_ms = self.current.as_ref().map_or(0, |current| {
+                            self.crossfade_into(current, opened.uid, &track)
+                        });
                         if crossfade_ms == 0 && !self.gapless {
                             // Opened only for a fade that does not apply to this change.
                             self.skip_preloaded();
@@ -1139,9 +1380,9 @@ impl Engine {
                                 crossfade_ms,
                             },
                         );
-                        Preload::Ready(Box::new(track))
+                        Preload::Ready(opened.uid, Box::new(track))
                     }
-                    Err(message) => Preload::Failed(opened.index, opened.id, message),
+                    Err(message) => Preload::Failed(opened.uid, opened.id, message),
                 };
             }
         }
@@ -1225,7 +1466,7 @@ impl Engine {
         let Some(track) = &self.current else {
             return;
         };
-        let Some(index) = self.queue.next_index() else {
+        let Some(index) = self.follow_index(true) else {
             return;
         };
         // Durations come from the library (FFmpeg sources do not know theirs).
@@ -1237,29 +1478,34 @@ impl Engine {
         if !near_end && !self.playback.current_exhausted() {
             return;
         }
-        let Some(id) = self.queue.get(index).map(str::to_string) else {
+        let (Some(id), Some(uid)) = (
+            self.queue.get(index).map(str::to_string),
+            self.queue.uid(index),
+        ) else {
             return;
         };
         let job = OpenJob {
             generation: self.generation.load(Ordering::SeqCst),
             slot: Slot::Next,
-            index,
+            uid,
             id: id.clone(),
             spec: self.playback.output_spec(),
         };
         self.preload = match self.openers.send(job) {
-            Ok(()) => Preload::Requested(index),
-            Err(message) => Preload::Failed(index, id, message),
+            Ok(()) => Preload::Requested(uid),
+            Err(message) => Preload::Failed(uid, id, message),
         };
     }
 
     /// The pre-opened next track took over; the UI hears about it once it is audible.
     fn on_advanced(&mut self) {
-        let Preload::Ready(track) = std::mem::replace(&mut self.preload, Preload::None) else {
+        let Preload::Ready(uid, track) = std::mem::replace(&mut self.preload, Preload::None) else {
             return;
         };
         self.settle_handover();
-        self.queue.advance();
+        if let Some(index) = self.queue.position_of(uid) {
+            self.queue.jump(index);
+        }
         self.current = Some((*track).clone());
         self.decoding = true;
         let audible_at = Instant::now() + Duration::from_millis(self.playback.queued_ms());
@@ -1269,13 +1515,18 @@ impl Engine {
     /// The current track ended with nothing queued behind it.
     fn on_finished(&mut self) {
         self.decoding = false;
+        let follows = self.follow_index(true);
         match std::mem::replace(&mut self.preload, Preload::None) {
-            Preload::Failed(index, id, message) if Some(index) == self.queue.next_index() => {
-                self.queue.advance();
+            Preload::Failed(uid, id, message)
+                if follows.and_then(|index| self.queue.uid(index)) == Some(uid) =>
+            {
+                if let Some(index) = follows {
+                    self.queue.jump(index);
+                }
                 self.error(&id, &message);
                 self.skip(false);
             }
-            _ => self.skip(false),
+            _ => self.play_on(true, false),
         }
     }
 
@@ -1366,6 +1617,8 @@ impl Engine {
             queue_length: self.queue.len() as u32,
             queue_version: self.queue_version,
             flow: self.flow.clone(),
+            repeat: self.repeat,
+            shuffle: self.shuffle,
         }
     }
 
@@ -2448,8 +2701,12 @@ mod tests {
             queue_length: 2,
             queue_version: 7,
             flow: None,
+            repeat: RepeatMode::One,
+            shuffle: true,
         };
         let value = serde_json::to_value(&state).unwrap();
+        assert_eq!(value["repeat"], "one");
+        assert_eq!(value["shuffle"], true);
         assert_eq!(value["status"], "loading");
         assert_eq!(value["positionMs"], 5);
         assert_eq!(value["queueLength"], 2);
@@ -2966,6 +3223,516 @@ mod tests {
             "all of b, from its start"
         );
         assert!(played_of(&h.played, TONE_A) < TONE_A_SAMPLES * 4);
+    }
+
+    /// An idle state arrived (for a queue that was already playing).
+    fn ends_idle(events: &[PlayerEvent]) -> bool {
+        events.iter().any(|e| is_state(e, PlayerStatus::Idle))
+    }
+
+    fn with_repeat(repeat: RepeatMode) -> PlayerOptions {
+        PlayerOptions {
+            repeat,
+            ..PlayerOptions::default()
+        }
+    }
+
+    fn gap_tracks() -> Vec<Track> {
+        vec![
+            fixture_track("a", "gap_a.wav"),
+            fixture_track("b", "gap_b.wav"),
+        ]
+    }
+
+    /// No `Loading` after the first track change: every later one was a hand-over.
+    fn handed_over(events: &[PlayerEvent]) -> bool {
+        let first = events
+            .iter()
+            .position(|e| matches!(e, PlayerEvent::TrackChanged(_)))
+            .unwrap();
+        !events[first..]
+            .iter()
+            .any(|e| is_state(e, PlayerStatus::Loading))
+    }
+
+    /// `played` starts with `runs` back to back, then goes on with a prefix of `then`.
+    fn assert_continuous(played: &[f32], runs: &[Vec<f32>], then: &[f32]) {
+        let expected: Vec<f32> = runs.concat();
+        assert!(played.len() >= expected.len(), "too little was played");
+        assert!(
+            played[..expected.len()] == expected[..],
+            "one continuous run across the boundaries"
+        );
+        let rest = &played[expected.len()..];
+        let n = rest.len().min(then.len());
+        assert!(rest[..n] == then[..n], "the wrap continues at the start");
+    }
+
+    #[test]
+    fn repeat_all_wraps_to_the_first_track_gaplessly() {
+        let h = harness_options(gap_tracks(), with_repeat(RepeatMode::All));
+        h.player.play(ids(&["a", "b"]), 0).unwrap();
+        let events = collect_until(&h.events, Duration::from_secs(10), |seen| {
+            changes(seen).len() == 3
+        });
+        assert_eq!(changes(&events), ids(&["a", "b", "a"]));
+        assert!(handed_over(&events), "the wrap was pre-opened: {events:#?}");
+        let played = h.played.lock().unwrap().clone();
+        let (a, b) = (decode_all("gap_a.wav"), decode_all("gap_b.wav"));
+        assert_continuous(&played, &[a.clone(), b], &a);
+        let state = h.player.state();
+        assert_eq!(state.repeat, RepeatMode::All);
+        assert_ne!(state.status, PlayerStatus::Idle, "the queue never ends");
+    }
+
+    #[test]
+    fn repeat_all_crossfades_across_the_wrap() {
+        let mut a = album_track("a", "x", 1);
+        a.duration_ms = 2_000;
+        let mut c = album_track("c", "y", 2);
+        c.duration_ms = 2_000;
+        let tracks = [a, c];
+        let resolver: Resolver =
+            Arc::new(move |id: &str| tracks.iter().find(|track| track.id == id).cloned());
+        let opener = tone_opener(vec![("a", TONE_A, 2_000), ("c", TONE_C, 2_000)]);
+        let options = PlayerOptions {
+            repeat: RepeatMode::All,
+            ..crossfade_always(1_000)
+        };
+        let h = harness_full(resolver, 5.0, Some(opener), options);
+        h.player.play(ids(&["a", "c"]), 0).unwrap();
+        let events = collect_until(&h.events, Duration::from_secs(10), |seen| {
+            changes(seen).len() == 4
+        });
+        assert_eq!(changes(&events), ids(&["a", "c", "a", "c"]));
+        let played = h.played.lock().unwrap().clone();
+        // Where c ends and a starts again, the two are mixed as at a -> c.
+        let first_c = played
+            .iter()
+            .position(|s| (*s - TONE_C).abs() < 1e-6)
+            .unwrap();
+        let after_c = &played[first_c..];
+        let second_a = after_c
+            .iter()
+            .position(|s| (*s - TONE_A).abs() < 1e-6)
+            .expect("a again");
+        let blended = after_c[..second_a]
+            .iter()
+            .filter(|s| (**s - TONE_A).abs() > 1e-6 && (**s - TONE_C).abs() > 1e-6)
+            .count();
+        assert!(blended > 2 * 35_000, "{blended} samples mixed at the wrap");
+    }
+
+    #[test]
+    fn repeat_one_replays_the_current_track_gaplessly() {
+        let h = harness_options(gap_tracks(), with_repeat(RepeatMode::One));
+        h.player.play(ids(&["a", "b"]), 0).unwrap();
+        let events = collect_until(&h.events, Duration::from_secs(10), |seen| {
+            changes(seen).len() == 3
+        });
+        assert_eq!(changes(&events), ids(&["a", "a", "a"]));
+        assert!(
+            handed_over(&events),
+            "the repeat was pre-opened: {events:#?}"
+        );
+        let played = h.played.lock().unwrap().clone();
+        let a = decode_all("gap_a.wav");
+        assert_continuous(&played, &[a.clone(), a.clone()], &a);
+        assert_eq!(h.player.state().queue_index, 0);
+    }
+
+    #[test]
+    fn repeat_one_with_gapless_off_replays_after_the_end() {
+        let options = PlayerOptions {
+            gapless: false,
+            ..with_repeat(RepeatMode::One)
+        };
+        let h = harness_options(gap_tracks(), options);
+        h.player.play(ids(&["a", "b"]), 0).unwrap();
+        let events = collect_until(&h.events, Duration::from_secs(10), |seen| {
+            changes(seen).len() == 2
+        });
+        assert_eq!(changes(&events), ids(&["a", "a"]));
+        assert!(!handed_over(&events), "loaded again after the end");
+    }
+
+    #[test]
+    fn changing_repeat_drops_a_preloaded_next_track() {
+        let mut a = album_track("a", "x", 1);
+        a.duration_ms = 2_000;
+        let mut b = album_track("b", "y", 1);
+        b.duration_ms = 2_000;
+        let tracks = [a, b];
+        let resolver: Resolver =
+            Arc::new(move |id: &str| tracks.iter().find(|track| track.id == id).cloned());
+        let opener = tone_opener(vec![("a", TONE_A, 2_000), ("b", TONE_C, 2_000)]);
+        let h = harness_full(resolver, 5.0, Some(opener), PlayerOptions::default());
+        h.player.play(ids(&["a", "b"]), 0).unwrap();
+        collect_until(&h.events, Duration::from_secs(10), |seen| {
+            changes(seen) == ids(&["a"])
+        });
+        // "b" is pre-opened at once (2 s is within the 5 s preload window).
+        h.player.set_repeat(RepeatMode::One).unwrap();
+        let events = collect_until(&h.events, Duration::from_secs(10), |seen| {
+            !changes(seen).is_empty()
+        });
+        assert_eq!(changes(&events), ids(&["a"]), "a again, not b");
+        h.player.set_repeat(RepeatMode::Off).unwrap();
+        let events = collect_until(&h.events, Duration::from_secs(10), ends_idle);
+        assert_eq!(changes(&events), ids(&["b"]));
+        assert_eq!(
+            played_of(&h.played, TONE_A),
+            2 * 2 * 88_200,
+            "a twice, whole"
+        );
+        assert_eq!(played_of(&h.played, TONE_C), 2 * 88_200, "b once, whole");
+    }
+
+    #[test]
+    fn manual_next_follows_the_repeat_mode() {
+        // One: next goes to the next track.
+        let h = harness_full(
+            {
+                let tracks = long_tracks(&["a", "b"]);
+                Arc::new(move |id: &str| tracks.iter().find(|t| t.id == id).cloned())
+            },
+            1.0,
+            Some(silence_opener()),
+            with_repeat(RepeatMode::One),
+        );
+        h.player.play(ids(&["a", "b"]), 0).unwrap();
+        wait_state(&h.player, |s| playing_track(s, "a"));
+        h.player.next().unwrap();
+        wait_state(&h.player, |s| playing_track(s, "b"));
+        // All: next at the end wraps to the first track.
+        h.player.set_repeat(RepeatMode::All).unwrap();
+        h.player.next().unwrap();
+        let state = wait_state(&h.player, |s| playing_track(s, "a"));
+        assert_eq!(state.queue_index, 0);
+        // All: prev at the start (within 3 s) wraps to the last track.
+        h.player.prev().unwrap();
+        let state = wait_state(&h.player, |s| playing_track(s, "b"));
+        assert_eq!(state.queue_index, 1);
+        // Off: next at the end stops.
+        h.player.set_repeat(RepeatMode::Off).unwrap();
+        h.player.next().unwrap();
+        wait_state(&h.player, |s| s.status == PlayerStatus::Idle);
+    }
+
+    #[test]
+    fn repeat_all_on_a_dead_queue_still_gives_up() {
+        let h = harness_options(Vec::new(), with_repeat(RepeatMode::All));
+        h.player.play(ids(&["gone1", "gone2", "gone3"]), 0).unwrap();
+        let events = collect_until(&h.events, Duration::from_secs(10), |seen| {
+            errors(seen).len() == MAX_FAILURES_IN_A_ROW as usize
+                && seen
+                    .iter()
+                    .rev()
+                    .take_while(|e| !matches!(e, PlayerEvent::Error(_)))
+                    .any(|e| is_state(e, PlayerStatus::Idle))
+        });
+        assert_eq!(errors(&events).len(), 10);
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(errors(&h.events.try_iter().collect::<Vec<_>>()).is_empty());
+        assert_eq!(h.player.state().status, PlayerStatus::Idle);
+    }
+
+    #[test]
+    fn repeat_one_skips_a_track_that_fails() {
+        let h = harness_options(
+            vec![
+                fixture_track("bad", "corrupt.flac"),
+                fixture_track("a", "gap_a.wav"),
+            ],
+            with_repeat(RepeatMode::One),
+        );
+        h.player.play(ids(&["bad", "a"]), 0).unwrap();
+        let events = collect_until(&h.events, Duration::from_secs(10), |seen| {
+            changes(seen).len() == 2
+        });
+        assert_eq!(errors(&events), ids(&["bad"]), "reported once, not retried");
+        assert_eq!(changes(&events), ids(&["a", "a"]));
+    }
+
+    #[test]
+    fn repeat_and_shuffle_are_ignored_in_flow() {
+        let options = PlayerOptions {
+            shuffle: true,
+            ..with_repeat(RepeatMode::All)
+        };
+        let h = harness_options(gap_tracks(), options);
+        let flow = Some(FlowVariant::Library);
+        h.player
+            .handle()
+            .play_with(ids(&["a", "b"]), 0, flow)
+            .unwrap();
+        let events = collect_until(&h.events, Duration::from_secs(10), back_to_idle);
+        assert_eq!(changes(&events), ids(&["a", "b"]), "in order, once");
+        let state = h.player.state();
+        assert_eq!(state.repeat, RepeatMode::All, "the mode is kept for later");
+        assert!(state.shuffle);
+
+        let ten: Vec<String> = (0..10).map(|n| format!("t{n}")).collect();
+        h.player
+            .handle()
+            .play_with(ten.clone(), 0, Some(FlowVariant::Library))
+            .unwrap();
+        wait_state(&h.player, |s| s.queue_length == 10);
+        h.player.set_shuffle(false).unwrap();
+        h.player.set_shuffle(true).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(h.player.queue_ids(), ten, "a Flow is never reshuffled");
+    }
+
+    fn ten_long() -> Harness {
+        let names: Vec<String> = (0..10).map(|n| format!("t{n}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        harness(long_tracks(&refs), 1.0, Some(silence_opener()))
+    }
+
+    fn ten_ids() -> Vec<String> {
+        (0..10).map(|n| format!("t{n}")).collect()
+    }
+
+    #[test]
+    fn shuffle_on_and_off_while_playing() {
+        let h = ten_long();
+        h.player.play(ten_ids(), 2).unwrap();
+        let before = wait_state(&h.player, |s| playing_track(s, "t2"));
+        assert!(!before.shuffle);
+        h.player.set_shuffle(true).unwrap();
+        let on = wait_state(&h.player, |s| s.shuffle);
+        assert!(on.queue_version > before.queue_version);
+        assert!(playing_track(&on, "t2"), "keeps playing: {on:#?}");
+        assert_eq!(on.queue_index, 2);
+        let shuffled = h.player.queue_ids();
+        assert_eq!(&shuffled[..3], &ten_ids()[..3]);
+        assert_ne!(shuffled, ten_ids());
+
+        // Play on into the shuffled part, then back to the original order.
+        h.player.next().unwrap();
+        let moved_on = wait_state(&h.player, |s| {
+            s.queue_index == 3 && s.status == PlayerStatus::Playing
+        });
+        let now = moved_on.track.unwrap().id;
+        assert_eq!(now, shuffled[3]);
+        h.player.set_shuffle(false).unwrap();
+        let off = wait_state(&h.player, |s| !s.shuffle);
+        assert_eq!(h.player.queue_ids(), ten_ids());
+        assert!(playing_track(&off, &now));
+        assert_eq!(
+            off.queue_index as usize,
+            ten_ids().iter().position(|id| *id == now).unwrap()
+        );
+    }
+
+    #[test]
+    fn play_while_shuffled_starts_with_the_chosen_track() {
+        let names = ten_ids();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let options = PlayerOptions {
+            shuffle: true,
+            ..PlayerOptions::default()
+        };
+        let resolver: Resolver = {
+            let tracks = long_tracks(&refs);
+            Arc::new(move |id: &str| tracks.iter().find(|t| t.id == id).cloned())
+        };
+        let h = harness_full(resolver, 1.0, Some(silence_opener()), options);
+        h.player.play(ten_ids(), 4).unwrap();
+        let state = wait_state(&h.player, |s| playing_track(s, "t4"));
+        assert_eq!(state.queue_index, 0);
+        let mut all = h.player.queue_ids();
+        assert_eq!(all[0], "t4");
+        all.sort();
+        assert_eq!(all, ten_ids());
+
+        // Appends land in the upcoming part.
+        h.player.append(ids(&["x", "y"])).unwrap();
+        wait_state(&h.player, |s| s.queue_length == 12);
+        assert_eq!(h.player.queue_ids()[0], "t4");
+        assert!(playing_track(&h.player.state(), "t4"));
+    }
+
+    #[test]
+    fn move_keeps_the_playing_track_and_bumps_the_version() {
+        let h = harness(
+            long_tracks(&["a", "b", "c", "d"]),
+            1.0,
+            Some(silence_opener()),
+        );
+        h.player.play(ids(&["a", "b", "c", "d"]), 1).unwrap();
+        let before = wait_state(&h.player, |s| playing_track(s, "b"));
+        h.player.move_entry(3, 0).unwrap();
+        let after = wait_state(&h.player, |s| s.queue_version > before.queue_version);
+        assert_eq!(h.player.queue_ids(), ids(&["d", "a", "b", "c"]));
+        assert_eq!(after.queue_index, 2);
+        assert!(playing_track(&after, "b"), "not restarted: {after:#?}");
+        // Out of range: ignored.
+        h.player.move_entry(9, 0).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(h.player.state().queue_version, after.queue_version);
+    }
+
+    #[test]
+    fn remove_keeps_the_playing_track_and_skips_a_removed_current_one() {
+        let h = harness(long_tracks(&["a", "b", "c"]), 1.0, Some(silence_opener()));
+        h.player.play(ids(&["a", "b", "c"]), 1).unwrap();
+        let before = wait_state(&h.player, |s| playing_track(s, "b"));
+        h.player.remove(0).unwrap();
+        let after = wait_state(&h.player, |s| s.queue_version > before.queue_version);
+        assert_eq!(h.player.queue_ids(), ids(&["b", "c"]));
+        assert_eq!(after.queue_index, 0);
+        assert!(playing_track(&after, "b"));
+        // The playing one: the next one plays.
+        h.player.remove(0).unwrap();
+        let state = wait_state(&h.player, |s| playing_track(s, "c"));
+        assert_eq!(state.queue_index, 0);
+        assert_eq!(state.queue_length, 1);
+        // The last one: idle with an empty queue.
+        h.player.remove(0).unwrap();
+        let state = wait_state(&h.player, |s| s.queue_length == 0);
+        assert_eq!(state.status, PlayerStatus::Idle);
+    }
+
+    #[test]
+    fn remove_the_playing_track_while_paused_stays_paused_on_the_next() {
+        let h = harness(long_tracks(&["a", "b", "c"]), 1.0, Some(silence_opener()));
+        h.player.play(ids(&["a", "b", "c"]), 0).unwrap();
+        wait_state(&h.player, |s| playing_track(s, "a"));
+        h.player.toggle().unwrap();
+        wait_state(&h.player, |s| s.status == PlayerStatus::Paused);
+        h.player.remove(0).unwrap();
+        let state = wait_state(&h.player, |s| {
+            s.status == PlayerStatus::Paused && s.track.as_ref().is_some_and(|t| t.id == "b")
+        });
+        assert_eq!(state.queue_index, 0);
+        std::thread::sleep(Duration::from_millis(200));
+        let state = h.player.state();
+        assert_eq!(state.status, PlayerStatus::Paused, "{state:#?}");
+        assert_eq!(state.track.unwrap().id, "b");
+    }
+
+    #[test]
+    fn remove_the_next_track_during_a_hand_over_drops_it_and_keeps_the_tail() {
+        const TONE_B: f32 = 0.125;
+        let tracks: Vec<Track> = ["a", "b", "c"]
+            .iter()
+            .map(|id| {
+                let mut track = fixture_track(id, "tagged.flac");
+                track.duration_ms = TONE_A_MS;
+                track
+            })
+            .collect();
+        let resolver: Resolver =
+            Arc::new(move |id: &str| tracks.iter().find(|track| track.id == id).cloned());
+        let opener = tone_opener(vec![
+            ("a", TONE_A, TONE_A_MS),
+            ("b", TONE_B, TONE_A_MS),
+            ("c", TONE_C, TONE_A_MS),
+        ]);
+        let played = Arc::new(Mutex::new(Vec::new()));
+        let factory = Arc::new(BufferedFactory {
+            speed: 1.0,
+            ring_ms: BUFFERED_RING_MS,
+            played: Arc::clone(&played),
+        });
+        let (tx, events) = crossbeam_channel::unbounded();
+        let sink: EventSink = Arc::new(move |event| {
+            let _ = tx.send(event);
+        });
+        let player =
+            Player::spawn_with_options(factory, resolver, sink, opener, PlayerOptions::default());
+        player.play(ids(&["a", "b", "c"]), 0).unwrap();
+        // Once the device has played more than "a" minus a full ring, "a" is decoded and
+        // "b" has taken over; "a"'s tail (about 1.9 s) is still to be heard.
+        let decoded = TONE_A_SAMPLES - (BUFFERED_RING_MS * 44_100 / 1000) as usize * 2;
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while played_of(&played, TONE_A) <= decoded + 4_410 {
+            assert!(Instant::now() < deadline, "a never played");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let state = player.state();
+        assert_eq!(
+            state.track.unwrap().id,
+            "a",
+            "the hand-over is still pending"
+        );
+        assert_eq!(state.queue_index, 0);
+        // The UI's next row.
+        player.remove(1).unwrap();
+        let events = collect_until(&events, Duration::from_secs(20), back_to_idle);
+        assert_eq!(
+            changes(&events),
+            ids(&["a", "c"]),
+            "b was never announced: {events:#?}"
+        );
+        assert_eq!(player.queue_ids(), ids(&["a", "c"]));
+        assert_eq!(
+            played_of(&played, TONE_A),
+            TONE_A_SAMPLES,
+            "a's tail was not cut"
+        );
+        assert!(played_of(&played, TONE_B) < TONE_A_SAMPLES / 2);
+        assert_eq!(played_of(&played, TONE_C), TONE_A_SAMPLES);
+    }
+
+    #[test]
+    fn remove_before_a_loading_track_does_not_lose_it() {
+        let tracks = long_tracks(&["a", "b", "c"]);
+        let (opening_tx, opening) = crossbeam_channel::unbounded();
+        let (go_tx, go) = crossbeam_channel::unbounded::<()>();
+        let opener: Opener = Arc::new(move |track: &Track, _spec: StreamSpec| {
+            if track.id == "c" && std::thread::current().name() == Some(OPENER_CURRENT_THREAD) {
+                let _ = opening_tx.send(());
+                let _ = go.recv_timeout(Duration::from_secs(5));
+            }
+            Ok(Box::new(Silence {
+                frames_left: SILENCE_MS * 44_100 / 1000,
+            }) as Box<dyn AudioSource>)
+        });
+        let h = harness(tracks, 1.0, Some(opener));
+        h.player.play(ids(&["a", "b", "c"]), 2).unwrap();
+        opening.recv_timeout(Duration::from_secs(5)).unwrap();
+        h.player.remove(0).unwrap();
+        wait_state(&h.player, |s| s.queue_length == 2);
+        go_tx.send(()).unwrap();
+        let state = wait_state(&h.player, |s| playing_track(s, "c"));
+        assert_eq!(state.queue_index, 1);
+    }
+
+    #[test]
+    fn a_move_changes_the_preloaded_next_track() {
+        let mut a = album_track("a", "x", 1);
+        a.duration_ms = 2_000;
+        let mut b = album_track("b", "y", 1);
+        b.duration_ms = 1_000;
+        let mut c = album_track("c", "z", 1);
+        c.duration_ms = 1_000;
+        let tracks = [a, b, c];
+        let resolver: Resolver =
+            Arc::new(move |id: &str| tracks.iter().find(|track| track.id == id).cloned());
+        const TONE_B: f32 = 0.125;
+        let opener = tone_opener(vec![
+            ("a", TONE_A, 2_000),
+            ("b", TONE_B, 1_000),
+            ("c", TONE_C, 1_000),
+        ]);
+        let h = harness_full(resolver, 4.0, Some(opener), PlayerOptions::default());
+        h.player.play(ids(&["a", "b", "c"]), 0).unwrap();
+        collect_until(&h.events, Duration::from_secs(10), |seen| {
+            changes(seen) == ids(&["a"])
+        });
+        h.player.move_entry(2, 1).unwrap();
+        let events = collect_until(&h.events, Duration::from_secs(10), ends_idle);
+        assert_eq!(changes(&events), ids(&["c", "b"]));
+        assert!(
+            !events.iter().any(|e| is_state(e, PlayerStatus::Loading)),
+            "c was pre-opened after the move: {events:#?}"
+        );
+        assert_eq!(played_of(&h.played, TONE_A), 2 * 88_200);
+        assert_eq!(played_of(&h.played, TONE_B), 88_200);
+        assert_eq!(played_of(&h.played, TONE_C), 88_200);
     }
 
     fn levels(events: &[PlayerEvent]) -> Vec<f32> {

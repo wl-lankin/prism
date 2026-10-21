@@ -11,6 +11,9 @@ export const player: PlayerState = $state({
   queueIndex: 0,
   queueLength: 0,
   queueVersion: 0,
+  flow: null,
+  repeat: 'off',
+  shuffle: false,
 });
 
 /**
