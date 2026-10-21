@@ -8,6 +8,11 @@ export interface TrackCounts {
   navidrome: number;
 }
 
+/** Tracks of one source; a station never gets a library row, so radio has none. */
+export function countOf(counts: TrackCounts, source: Source): number {
+  return source === 'radio' ? 0 : counts[source];
+}
+
 /** The library as the views see it. Lists are raw state: they are replaced, never mutated,
  *  so tens of thousands of entries cost no deep proxies. Albums and artists hold every
  *  source; `albumsOf` / `artistsOf` narrow them. */

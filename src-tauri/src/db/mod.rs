@@ -22,6 +22,7 @@ pub const MIGRATIONS: &[Migration] = &[
     Migration::Sql(include_str!("migrations/0006_playlists.sql")),
     Migration::Sql(include_str!("migrations/0007_cover_lookups.sql")),
     Migration::Sql(include_str!("migrations/0008_navidrome.sql")),
+    Migration::Sql(include_str!("migrations/0009_radio.sql")),
 ];
 
 /// The database was written by a newer build than this one. Never quarantined: the file is fine.
