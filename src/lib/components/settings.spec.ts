@@ -1,5 +1,6 @@
 import { flushSync, mount, tick, unmount } from 'svelte';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import type { NavidromeStatus } from '../types';
 
 let stored: Record<string, unknown> = { language: 'en', volume: 0.8, outputDevice: null, gapless: true, replayGain: 'off' };
 
@@ -33,6 +34,7 @@ const { default: Settings } = await import('./Settings.svelte');
 const { setLang } = await import('../i18n');
 const { settings, updateSettings, DEFAULT_SETTINGS } = await import('../stores/settings.svelte');
 const { placeList } = await import('./Select.svelte');
+const { navidrome } = await import('../stores/navidrome.svelte');
 
 let target: HTMLElement;
 const mounted: ReturnType<typeof mount>[] = [];
@@ -373,6 +375,234 @@ it('reverts only the failed keys', async () => {
   await expect(failing).rejects.toThrow('disk full');
   expect(settings.gapless).toBe(true);
   expect(settings.replayGain).toBe('album');
+});
+
+// Navidrome section. The store is set by hand: in the app `initNavidrome` fills it from the
+// backend, here nothing listens.
+
+const OFF: NavidromeStatus = {
+  configured: false,
+  url: null,
+  user: null,
+  state: 'off',
+  lastSync: null,
+  trackCount: 0,
+  albumCount: 0,
+  progress: null,
+  error: null,
+};
+
+const DEMO_URL = 'http://127.0.0.1:4533/music';
+
+function setStatus(patch: Partial<NavidromeStatus>) {
+  Object.assign(navidrome, { ...OFF, ...patch });
+  flushSync();
+}
+
+const connected = (patch: Partial<NavidromeStatus> = {}) =>
+  setStatus({ configured: true, url: DEMO_URL, user: 'demo', state: 'online', ...patch });
+
+function section() {
+  return target.querySelector<HTMLElement>('section[aria-labelledby="settings-navidrome"]')!;
+}
+
+function field(name: 'url' | 'user' | 'password') {
+  return section().querySelector<HTMLInputElement>(`input[name="navidrome-${name}"]`)!;
+}
+
+function type(input: HTMLInputElement, value: string) {
+  input.value = value;
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  flushSync();
+}
+
+function fillForm(password = 'demo-pass') {
+  type(field('url'), DEMO_URL);
+  type(field('user'), 'demo');
+  type(field('password'), password);
+}
+
+function button(label: string) {
+  const found = [...section().querySelectorAll<HTMLButtonElement>('button')].find(
+    (b) => b.textContent?.trim() === label,
+  );
+  if (!found) throw new Error(`no button "${label}"`);
+  return found;
+}
+
+function mountSettings() {
+  mounted.push(mount(Settings, { target }));
+  flushSync();
+}
+
+it('test_connection_shows_server_version', async () => {
+  setStatus({});
+  mountSettings();
+  // The section sits between Library and Playback.
+  const ids = [...target.querySelectorAll('section h2')].map((h) => h.id);
+  expect(ids.slice(0, 3)).toEqual(['settings-library', 'settings-navidrome', 'settings-playback']);
+  expect(field('url').placeholder).toBe('https://music.example.com');
+  expect(field('password').type).toBe('password');
+
+  fillForm();
+  await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('audio_devices', undefined));
+  invoke.mockClear();
+  invoke.mockImplementationOnce(async () => ({
+    serverType: 'navidrome',
+    serverVersion: '0.53.3',
+    apiVersion: '1.16.1',
+    openSubsonic: true,
+  }));
+  button('Test connection').click();
+  await vi.waitFor(() => {
+    flushSync();
+    expect(section().querySelector('.result.ok')?.textContent).toContain('Connected to Navidrome 0.53.3 (API 1.16.1)');
+  });
+  expect(invoke).toHaveBeenCalledWith('navidrome_test', { url: DEMO_URL, user: 'demo', password: 'demo-pass' });
+  // A test saves nothing and keeps the password for the connect that follows.
+  expect(field('password').value).toBe('demo-pass');
+  expect(invoke).not.toHaveBeenCalledWith('navidrome_connect', expect.anything());
+});
+
+it('wrong_credentials_show_the_mapped_message', async () => {
+  setStatus({});
+  mountSettings();
+  fillForm('nope');
+  invoke.mockImplementationOnce(async () => {
+    throw { code: 'wrongCredentials', detail: null };
+  });
+  button('Test connection').click();
+  await vi.waitFor(() => {
+    flushSync();
+    expect(section().querySelector('[role="alert"]')?.textContent).toBe('Wrong user name or password.');
+  });
+
+  // The keychain's length cap has its own text.
+  invoke.mockImplementationOnce(async () => {
+    throw { code: 'keychainTooLong', detail: 'username too long' };
+  });
+  button('Connect').click();
+  await vi.waitFor(() => {
+    flushSync();
+    expect(section().querySelector('[role="alert"]')?.textContent).toBe(
+      'The user name and server address are too long for the system keychain. Use a shorter user name or server address.',
+    );
+  });
+});
+
+it('connect_clears_the_password_field', async () => {
+  setStatus({});
+  mountSettings();
+  fillForm();
+  // A failed attempt clears it too.
+  invoke.mockImplementationOnce(async () => {
+    throw { code: 'unreachable', detail: 'connect timed out' };
+  });
+  button('Connect').click();
+  await vi.waitFor(() => {
+    flushSync();
+    expect(section().querySelector('[role="alert"]')?.textContent).toContain('The server cannot be reached');
+  });
+  expect(field('password').value).toBe('');
+  expect(field('url').value).toBe(DEMO_URL);
+
+  type(field('password'), 'demo-pass');
+  invoke.mockImplementationOnce(async () => ({
+    ...OFF,
+    configured: true,
+    url: DEMO_URL,
+    user: 'demo',
+    state: 'syncing',
+  }));
+  button('Connect').click();
+  await vi.waitFor(() => {
+    flushSync();
+    expect(section().querySelector('input[name="navidrome-password"]')).toBeNull();
+  });
+  expect(invoke).toHaveBeenCalledWith('navidrome_connect', { url: DEMO_URL, user: 'demo', password: 'demo-pass' });
+  expect(section().textContent).toContain(DEMO_URL);
+  expect(section().textContent).toContain('demo');
+  expect(section().querySelector('.status')?.textContent).toContain('Syncing');
+});
+
+it('connected_shows_status_and_sync_now', async () => {
+  connected({ lastSync: Date.now() - 4 * 60_000, trackCount: 31204, albumCount: 2100 });
+  mountSettings();
+  const status = () => section().querySelector('.status')!.textContent!;
+  expect(status()).toContain('Synced 4 minutes ago');
+  expect(status()).toContain('31,204 tracks');
+  expect(status()).toContain('2,100 albums');
+  expect(section().textContent).toMatch(/Windows Credential Manager|macOS Keychain/);
+  expect(section().querySelector('input[name="navidrome-password"]')).toBeNull();
+
+  invoke.mockClear();
+  button('Sync now').click();
+  await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('navidrome_sync', undefined));
+
+  connected({ state: 'syncing', progress: { done: 12000, total: 31204 }, trackCount: 12000 });
+  expect(status()).toContain('Syncing 12,000 of 31,204 songs');
+  expect(button('Sync now').disabled).toBe(true);
+  expect(section().querySelector('.bar i')?.getAttribute('style')).toContain('scaleX(');
+
+  connected({ state: 'offline', trackCount: 31204 });
+  expect(status()).toContain('Server not reachable, showing the saved library');
+
+  connected({ state: 'error', error: { code: 'syncRefused', detail: 'short page' }, trackCount: 31204 });
+  expect(section().querySelector('.status [role="alert"]')?.textContent).toBe(
+    'The server sent an incomplete library, so Prism kept the songs it already had. It tries again at the next sync.',
+  );
+  expect(section().querySelector('.dot')?.classList.contains('error')).toBe(true);
+});
+
+it('disconnect_needs_the_confirm_row', async () => {
+  connected();
+  mountSettings();
+  invoke.mockClear();
+  button('Disconnect').click();
+  flushSync();
+  expect(invoke).not.toHaveBeenCalledWith('navidrome_disconnect', undefined);
+  expect(section().textContent).toContain('Sign out and remove the Navidrome library from Prism?');
+  button('Keep').click();
+  flushSync();
+  expect(section().textContent).not.toContain('Sign out and remove the Navidrome library from Prism?');
+
+  button('Disconnect').click();
+  flushSync();
+  section().querySelector<HTMLButtonElement>('.link.danger')!.click();
+  await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('navidrome_disconnect', undefined));
+});
+
+it('quality_segmented_saves_navidromeQuality', async () => {
+  await updateSettings({ navidromeQuality: 'original' });
+  setStatus({});
+  mountSettings();
+  const options = [...section().querySelectorAll<HTMLButtonElement>('[role="radio"][data-quality]')];
+  expect(options.map((o) => o.dataset.quality)).toEqual(['original', '320', '192', '128']);
+  expect(options[0].getAttribute('aria-checked')).toBe('true');
+  options[2].click();
+  await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('settings_set', { patch: { navidromeQuality: '192' } }));
+  flushSync();
+  expect(options[2].getAttribute('aria-checked')).toBe('true');
+});
+
+it('password_is_never_prefilled', async () => {
+  // A saved account whose password the server no longer takes: signing in again prefills
+  // the address and the user, never the password.
+  connected({ state: 'error', error: { code: 'wrongCredentials', detail: null } });
+  mountSettings();
+  expect(section().querySelector('input[type="password"]')).toBeNull();
+  button('Sign in again').click();
+  flushSync();
+  expect(field('url').value).toBe(DEMO_URL);
+  expect(field('user').value).toBe('demo');
+  expect(field('password').value).toBe('');
+  expect(field('password').getAttribute('autocomplete')).toBe('off');
+  button('Cancel').click();
+  flushSync();
+  expect(section().querySelector('input[type="password"]')).toBeNull();
+
+  setStatus({});
+  expect(field('password').value).toBe('');
 });
 
 it('has the same defaults as the backend', () => {
