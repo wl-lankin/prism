@@ -2,6 +2,7 @@
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import About from './lib/components/About.svelte';
   import AlbumGrid from './lib/components/AlbumGrid.svelte';
+  import HomeStations from './lib/components/HomeStations.svelte';
   import AlbumView from './lib/components/AlbumView.svelte';
   import ArtistList from './lib/components/ArtistList.svelte';
   import ArtistView from './lib/components/ArtistView.svelte';
@@ -392,6 +393,7 @@
     {@render sourceHead(tc('view.count.albums', shownAlbums.length))}
   {:else}
     <ViewHead title={t('nav.albums')} meta={tc('view.count.albums', shownAlbums.length)} />
+    {#if nav.view === 'home'}<HomeStations />{/if}
   {/if}
 {/snippet}
 
@@ -485,6 +487,9 @@
             {:else if libraryView(nav.view) && library.trackCounts === null}
               <!-- The first load takes a moment; nothing flashes meanwhile. -->
             {:else if libraryView(nav.view) && shownTracks === 0}
+              {#if nav.view === 'home' && !nav.source}
+                <div class="home-stations"><HomeStations /></div>
+              {/if}
               {#if emptyAsNavidrome}
                 <SourceEmpty source="navidrome" offerLocal={!nav.source} />
               {:else}
@@ -663,6 +668,10 @@
   .view {
     height: 100%;
     animation: fade var(--dur) ease-out;
+  }
+
+  .home-stations {
+    padding: 10px 32px 0;
   }
 
   .placeholder {

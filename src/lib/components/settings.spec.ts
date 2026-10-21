@@ -1,8 +1,18 @@
 import { flushSync, mount, tick, unmount } from 'svelte';
-import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import type { NavidromeStatus } from '../types';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { NavidromeStatus, Place } from '../types';
 
 let stored: Record<string, unknown> = { language: 'en', volume: 0.8, outputDevice: null, gapless: true, replayGain: 'off' };
+
+const TESTHAUSEN: Place = {
+  countryCode: 'DE',
+  region: 'Testland',
+  city: 'Testhausen',
+  lat: 50.0,
+  lon: 10.0,
+  origin: 'detected',
+  detectedAt: 1_700_000_000_000,
+};
 
 const invoke = vi.fn(async (cmd: string, args?: Record<string, unknown>): Promise<unknown> => {
   switch (cmd) {
@@ -13,6 +23,22 @@ const invoke = vi.fn(async (cmd: string, args?: Record<string, unknown>): Promis
       ];
     case 'audio_devices':
       return ['Speakers (Demo)', 'USB DAC'];
+    case 'radio_countries':
+      return [
+        { code: 'DE', name: 'Germany', stationCount: 900 },
+        { code: 'AT', name: 'Austria', stationCount: 300 },
+      ];
+    case 'radio_regions':
+      return (args as { countryCode: string }).countryCode === 'DE'
+        ? [
+            { name: 'Testland', stationCount: 40 },
+            { name: 'Otherland', stationCount: 20 },
+          ]
+        : [{ name: 'Wienland', stationCount: 10 }];
+    case 'radio_redetect':
+      return { ...TESTHAUSEN, city: 'Redetected' };
+    case 'radio_near':
+      return { stations: [], place: TESTHAUSEN, cached: false, stale: false, error: null };
     case 'settings_set':
       stored = { ...stored, ...((args as { patch: object }).patch ?? {}) };
       return stored;
@@ -438,9 +464,9 @@ function mountSettings() {
 it('test_connection_shows_server_version', async () => {
   setStatus({});
   mountSettings();
-  // The section sits between Library and Playback.
+  // The section sits between Library and Radio, then Playback.
   const ids = [...target.querySelectorAll('section h2')].map((h) => h.id);
-  expect(ids.slice(0, 3)).toEqual(['settings-library', 'settings-navidrome', 'settings-playback']);
+  expect(ids.slice(0, 4)).toEqual(['settings-library', 'settings-navidrome', 'settings-radio', 'settings-playback']);
   expect(field('url').placeholder).toBe('https://music.example.com');
   expect(field('password').type).toBe('password');
 
@@ -764,5 +790,99 @@ it('has the same defaults as the backend', () => {
     navidromeUser: null,
     navidromeQuality: 'original',
     radioLocation: { mode: 'auto' },
+  });
+});
+
+describe('Radio settings (M4 Task 11)', () => {
+  const radioSection = () => target.querySelector<HTMLElement>('section[aria-labelledby="settings-radio"]')!;
+  const radioButton = (label: string) => {
+    const found = [...radioSection().querySelectorAll<HTMLButtonElement>('button')].find(
+      (b) => b.textContent?.trim() === label,
+    );
+    if (!found) throw new Error(`no button "${label}"`);
+    return found;
+  };
+  const combo = (label: string) =>
+    radioSection().querySelector<HTMLButtonElement>(`[role="combobox"][aria-label="${label}"]`)!;
+  const patches = () =>
+    invoke.mock.calls
+      .filter(([cmd]) => cmd === 'settings_set')
+      .map(([, args]) => (args as { patch: { radioLocation?: unknown } }).patch.radioLocation)
+      .filter(Boolean);
+
+  /** Opens a select and picks the option with this label. */
+  async function pick(label: string, option: string) {
+    key(combo(label), 'Enter');
+    await tick();
+    flushSync();
+    const found = [...target.querySelectorAll<HTMLElement>('[role="option"]')].find((o) =>
+      o.textContent?.includes(option),
+    );
+    if (!found) throw new Error(`no option "${option}"`);
+    found.click();
+    await vi.waitFor(() => flushSync());
+  }
+
+  beforeEach(async () => {
+    const { radio } = await import('../stores/radio.svelte');
+    radio.place = null;
+    settings.radioLocation = { mode: 'auto' };
+  });
+
+  it('radio_auto_shows_place_and_redetect', async () => {
+    const { radio } = await import('../stores/radio.svelte');
+    mountSettings();
+    expect(radioSection().textContent).toContain('Not found yet');
+    // Opening Settings never asks the location service.
+    expect(invoke.mock.calls.some(([cmd]) => cmd === 'radio_place' || cmd === 'radio_redetect')).toBe(false);
+
+    radio.place = TESTHAUSEN;
+    flushSync();
+    expect(radioSection().textContent).toContain('Testhausen, Germany');
+    expect(radioSection().textContent).toContain('geojs.io once a week');
+    expect(radioSection().querySelector('[role="radio"][aria-checked="true"]')?.textContent?.trim()).toBe('Automatic');
+    expect(radioSection().querySelector('[role="combobox"]')).toBeNull();
+
+    radioButton('Detect again').click();
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('radio_near', { refresh: true }));
+    expect(invoke).toHaveBeenCalledWith('radio_redetect', undefined);
+  });
+
+  it('radio_manual_writes_location', async () => {
+    const { radio } = await import('../stores/radio.svelte');
+    radio.place = TESTHAUSEN;
+    mountSettings();
+    radioButton('Manual').click();
+    await vi.waitFor(() => expect(patches()).toEqual([{ mode: 'manual', countryCode: 'DE', region: null }]));
+    await vi.waitFor(() => {
+      flushSync();
+      expect(combo('Country')).toBeTruthy();
+    });
+    expect(radioSection().querySelector('[role="radio"][aria-checked="true"]')?.textContent?.trim()).toBe('Manual');
+    expect(radioSection().textContent).not.toContain('Detect again');
+    expect(combo('Country').textContent).toContain('Germany');
+    expect(combo('Region').textContent).toContain('Any region');
+
+    invoke.mockClear();
+    await pick('Region', 'Testland');
+    expect(patches()).toEqual([{ mode: 'manual', countryCode: 'DE', region: 'Testland' }]);
+    // The near list reloads for the new place.
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('radio_near', { refresh: false }));
+  });
+
+  it('region_resets_when_country_changes', async () => {
+    settings.radioLocation = { mode: 'manual', countryCode: 'DE', region: 'Testland' };
+    mountSettings();
+    await vi.waitFor(() => {
+      flushSync();
+      expect(combo('Region').textContent).toContain('Testland');
+    });
+    await pick('Country', 'Austria');
+    expect(patches().at(-1)).toEqual({ mode: 'manual', countryCode: 'AT', region: null });
+    await vi.waitFor(() => {
+      flushSync();
+      expect(combo('Region').textContent).toContain('Any region');
+    });
+    expect(invoke).toHaveBeenCalledWith('radio_regions', { countryCode: 'AT' });
   });
 });

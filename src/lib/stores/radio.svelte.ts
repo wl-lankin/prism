@@ -4,14 +4,24 @@ import {
   onRadioNowPlaying,
   radioFavorite,
   radioNear,
+  radioCountries,
   radioNowPlaying,
   radioPlace,
+  radioRegions,
   radioPlay,
   radioRedetect,
   radioSaved,
   radioSearch,
 } from '../ipc';
-import type { NowPlaying, Place, RadioErrorCode, Station, StationQueryArgs } from '../types';
+import type {
+  NowPlaying,
+  Place,
+  RadioCountry,
+  RadioErrorCode,
+  RadioRegion,
+  Station,
+  StationQueryArgs,
+} from '../types';
 import { changeFavorite, favorites } from './favorites.svelte';
 import { notify } from './notice.svelte';
 
@@ -211,6 +221,24 @@ export function ensureStation(id: string): void {
   void loadSaved();
 }
 
+/** A one-off name search for the search palette. It leaves `radio.search` alone, which
+ *  belongs to the Radio view. Rejects like `radioSearch` when the directory cannot answer. */
+export function findStations(name: string, limit: number): Promise<Station[]> {
+  return radioSearch({ name, limit });
+}
+
+/** The countries the directory knows, by name. Rejects when the directory cannot answer. */
+export async function listCountries(): Promise<RadioCountry[]> {
+  const countries = await radioCountries();
+  return [...(countries ?? [])].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/** The regions of one country, by name. Rejects when the directory cannot answer. */
+export async function listRegions(countryCode: string): Promise<RadioRegion[]> {
+  const regions = await radioRegions(countryCode);
+  return [...(regions ?? [])].sort((a, b) => a.name.localeCompare(b.name));
+}
+
 /** The stream title, only while `track` is the station it belongs to. */
 export function currentTitle(track: { id: string } | null | undefined): string | null {
   const now = radio.nowPlaying;
@@ -244,5 +272,7 @@ export async function initRadio(): Promise<() => void> {
   } catch (err) {
     console.error('loading the current station failed', err);
   }
+  // Home, Favorites and the search palette read the saved lists without loading them.
+  void loadSaved();
   return () => stops.forEach((stop) => stop());
 }

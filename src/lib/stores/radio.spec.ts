@@ -217,11 +217,13 @@ it('favorite_toggle_reloads_saved', async () => {
     return Promise.resolve(undefined);
   });
   const stop = await initRadio();
+  // initRadio loads the saved lists once; the toggle itself does not reload, the backend's
+  // event does.
+  const loadedAtInit = calls('radio_saved').length;
   await toggleStationFavorite(station(1));
   expect(calls('radio_favorite')[0][1]).toEqual({ station: station(1), on: true });
   expect(favorites.stations.has(station(1).id)).toBe(true);
-  // The toggle itself does not reload; the backend's event does.
-  expect(calls('radio_saved')).toHaveLength(0);
+  expect(calls('radio_saved')).toHaveLength(loadedAtInit);
   const changed = () =>
     listeners.get('favorites://changed')!({ event: 'favorites://changed', id: 1, payload: null });
   changed();
