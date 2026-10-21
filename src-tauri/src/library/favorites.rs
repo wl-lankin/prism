@@ -1,4 +1,5 @@
-//! Local favorites: tracks (by track id), albums (by album id) and artists (by name).
+//! Local favorites: tracks (by track id), albums (by album id) and artists (by artist id,
+//! which is the name for local artists).
 //!
 //! A favorite is a plain row with no foreign key: one whose item is not in the index (folder
 //! offline, file removed) is kept, not listed, and listed again when the item returns.
@@ -12,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use super::model::{Album, Artist, Track};
 use super::query::{
     album_from_row, artist_from_row, artist_select, collect, track_from_row, ALBUM_COLUMNS,
-    TRACK_COLUMNS,
+    ARTIST_ID, TRACK_COLUMNS,
 };
 
 /// Emitted (no payload) after every effective change.
@@ -109,16 +110,21 @@ pub fn albums(conn: &Connection) -> anyhow::Result<Vec<Album>> {
     collect(conn, &sql, [], album_from_row)
 }
 
-/// Favorite artists that have an album in the index, newest favorite first.
+/// Favorite artists that have an album in the index, newest favorite first. Resolved by
+/// `Artist.id`: a local artist's id is its name (what M2 rows store), a Navidrome artist's id
+/// is `navidrome:<artist id>`.
 pub fn artists(conn: &Connection) -> anyhow::Result<Vec<Artist>> {
-    let sql = artist_select("a.artist IN (SELECT item_id FROM favorites WHERE kind = 'artist')");
-    let mut resolved: HashMap<String, Artist> = collect(conn, &sql, [], artist_from_row)?
-        .into_iter()
-        .map(|artist| (artist.name.clone(), artist))
-        .collect();
+    let sql = artist_select(&format!(
+        "{ARTIST_ID} IN (SELECT item_id FROM favorites WHERE kind = 'artist')"
+    ));
+    let mut resolved: HashMap<String, Vec<Artist>> = HashMap::new();
+    for artist in collect(conn, &sql, [], artist_from_row)? {
+        resolved.entry(artist.id.clone()).or_default().push(artist);
+    }
     Ok(ids_of(conn, FavKind::Artist)?
         .into_iter()
-        .filter_map(|name| resolved.remove(&name))
+        .filter_map(|id| resolved.remove(&id))
+        .flatten()
         .collect())
 }
 
@@ -128,6 +134,7 @@ mod tests {
 
     use super::*;
     use crate::db::rekey::rekey_tracks;
+    use crate::library::model::Source;
     use crate::library::query;
     use crate::library::scan::tests::copy_fixtures;
     use crate::library::tests::library;
@@ -176,7 +183,7 @@ mod tests {
         let dir = copy_fixtures(&["corrupt.flac"]);
         library.add_folder(dir.path(), &|_| {}).unwrap();
         let conn = conn_of(&library);
-        let all_tracks = query::tracks_range(&conn, 0, 100).unwrap();
+        let all_tracks = query::tracks_range(&conn, 0, 100, None).unwrap();
         let all_albums = query::albums(&conn).unwrap();
         let all_artists = query::artists(&conn).unwrap();
         assert!(all_tracks.len() >= 2 && all_albums.len() >= 2 && all_artists.len() >= 2);
@@ -225,7 +232,7 @@ mod tests {
         library.add_folder(&folder, &|_| {}).unwrap();
         let (track, album) = {
             let conn = conn_of(&library);
-            let track = query::tracks_range(&conn, 0, 1).unwrap().remove(0);
+            let track = query::tracks_range(&conn, 0, 1, None).unwrap().remove(0);
             let album = query::albums(&conn).unwrap().remove(0);
             set(&conn, FavKind::Track, &track.id, true).unwrap();
             set(&conn, FavKind::Album, &album.id, true).unwrap();
@@ -258,6 +265,46 @@ mod tests {
         assert_eq!(listed, vec![track.to_string()]);
         let listed: Vec<String> = albums(&conn).unwrap().into_iter().map(|a| a.id).collect();
         assert_eq!(listed, vec![album.to_string()]);
+    }
+
+    fn local_and_remote(conn: &Connection) {
+        insert_track(conn, "local:t1");
+        crate::library::scan::rebuild_albums(conn, ["local:album".to_string()].iter()).unwrap();
+        query::tests::insert_navidrome(conn, "s1", "Angel", "A", "Mezzanine", "ar-1");
+    }
+
+    #[test]
+    fn local_artist_favorites_keep_working() {
+        let (library, _covers) = library();
+        let conn = conn_of(&library);
+        local_and_remote(&conn);
+        // An M2 row: artists are favorited by name.
+        set(&conn, FavKind::Artist, "A", true).unwrap();
+        let listed = artists(&conn).unwrap();
+        assert_eq!(listed.len(), 1, "{listed:?}");
+        assert_eq!(listed[0].id, "A");
+        assert_eq!(listed[0].source, Source::Local);
+        assert_eq!(listed[0].name, "A");
+    }
+
+    #[test]
+    fn navidrome_artist_favorite_resolves_by_id() {
+        let (library, _covers) = library();
+        let conn = conn_of(&library);
+        local_and_remote(&conn);
+        set(&conn, FavKind::Artist, "navidrome:ar-1", true).unwrap();
+        let listed = artists(&conn).unwrap();
+        assert_eq!(listed.len(), 1, "{listed:?}");
+        assert_eq!(listed[0].id, "navidrome:ar-1");
+        assert_eq!(listed[0].source, Source::Navidrome);
+        assert_eq!(listed[0].name, "A");
+        assert_eq!(listed[0].album_count, 1);
+        // Both favorited, newest first.
+        set(&conn, FavKind::Artist, "A", true).unwrap();
+        conn.execute("UPDATE favorites SET added_at = rowid", [])
+            .unwrap();
+        let ids: Vec<String> = artists(&conn).unwrap().into_iter().map(|a| a.id).collect();
+        assert_eq!(ids, ["A", "navidrome:ar-1"]);
     }
 
     fn insert_track(conn: &Connection, id: &str) {

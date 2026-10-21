@@ -35,15 +35,24 @@ pub(crate) const ALBUM_ORDER: &str =
 pub(crate) const TRACK_ORDER: &str = "t.artist COLLATE NOCASE, t.album COLLATE NOCASE, \
     t.disc_no IS NULL, t.disc_no, t.track_no IS NULL, t.track_no, t.title COLLATE NOCASE, t.id";
 
-/// Artist rows (`Artist` field order) grouped from the albums that match `filter`.
+/// The id of the artist an album (aliased `a`) belongs to: the server artist id of a Navidrome
+/// album, the name otherwise.
+pub(crate) const ARTIST_ID: &str = "COALESCE(a.artist_id, a.artist)";
+
+/// Artist rows (`Artist` field order) grouped from the albums that match `filter`. One row
+/// per source and artist id, so the same name in two sources gives two rows. The cover is
+/// the first album cover of that artist in that source.
 pub(crate) fn artist_select(filter: &str) -> String {
     format!(
-        "SELECT a.artist, COUNT(*), SUM(a.track_count),
+        "SELECT {ARTIST_ID} AS artist_key, a.source, MIN(a.artist) AS name, COUNT(*),
+            SUM(a.track_count),
             (SELECT b.cover_id FROM albums b
-             WHERE b.artist = a.artist AND b.cover_id IS NOT NULL
+             WHERE b.source = a.source AND b.cover_id IS NOT NULL
+                AND ((a.artist_id IS NULL AND b.artist_id IS NULL AND b.artist = a.artist)
+                    OR b.artist_id = a.artist_id)
              ORDER BY b.year IS NULL, b.year, b.title COLLATE NOCASE LIMIT 1)
          FROM albums a WHERE {filter}
-         GROUP BY a.artist ORDER BY a.artist COLLATE NOCASE"
+         GROUP BY a.source, artist_key ORDER BY name COLLATE NOCASE, a.source, artist_key"
     )
 }
 
@@ -89,10 +98,12 @@ pub(crate) fn album_from_row(row: &Row) -> rusqlite::Result<Album> {
 
 pub(crate) fn artist_from_row(row: &Row) -> rusqlite::Result<Artist> {
     Ok(Artist {
-        name: row.get(0)?,
-        album_count: row.get::<_, i64>(1)?.max(0) as u32,
-        track_count: row.get::<_, Option<i64>>(2)?.unwrap_or(0).max(0) as u32,
-        cover_id: row.get(3)?,
+        id: row.get(0)?,
+        source: Source::from_db(&row.get::<_, String>(1)?),
+        name: row.get(2)?,
+        album_count: row.get::<_, i64>(3)?.max(0) as u32,
+        track_count: row.get::<_, Option<i64>>(4)?.unwrap_or(0).max(0) as u32,
+        cover_id: row.get(5)?,
     })
 }
 
@@ -154,15 +165,47 @@ pub fn artist_albums(conn: &Connection, name: &str) -> anyhow::Result<Vec<Album>
     collect(conn, &sql, [name], album_from_row)
 }
 
-pub fn track_count(conn: &Connection) -> anyhow::Result<u32> {
-    let count: i64 = conn.query_row("SELECT COUNT(*) FROM tracks", [], |row| row.get(0))?;
+/// Tracks in the index, of one source or (`None`) of all.
+pub fn track_count(conn: &Connection, source: Option<Source>) -> anyhow::Result<u32> {
+    let count: i64 = match source {
+        Some(source) => conn.query_row(
+            "SELECT COUNT(*) FROM tracks WHERE source = ?1",
+            [source.as_str()],
+            |row| row.get(0),
+        )?,
+        None => conn.query_row("SELECT COUNT(*) FROM tracks", [], |row| row.get(0))?,
+    };
     Ok(count.max(0) as u32)
 }
 
-pub fn tracks_range(conn: &Connection, offset: u32, limit: u32) -> anyhow::Result<Vec<Track>> {
-    let sql =
-        format!("SELECT {TRACK_COLUMNS} FROM tracks t ORDER BY {TRACK_ORDER} LIMIT ?1 OFFSET ?2");
-    collect(conn, &sql, params![limit, offset], track_from_row)
+/// A page of tracks in library order, of one source (walks `idx_tracks_source_order`) or
+/// (`None`) of all (walks `idx_tracks_order`).
+pub fn tracks_range(
+    conn: &Connection,
+    offset: u32,
+    limit: u32,
+    source: Option<Source>,
+) -> anyhow::Result<Vec<Track>> {
+    match source {
+        Some(source) => {
+            let sql = format!(
+                "SELECT {TRACK_COLUMNS} FROM tracks t WHERE t.source = ?3
+                 ORDER BY {TRACK_ORDER} LIMIT ?1 OFFSET ?2"
+            );
+            collect(
+                conn,
+                &sql,
+                params![limit, offset, source.as_str()],
+                track_from_row,
+            )
+        }
+        None => {
+            let sql = format!(
+                "SELECT {TRACK_COLUMNS} FROM tracks t ORDER BY {TRACK_ORDER} LIMIT ?1 OFFSET ?2"
+            );
+            collect(conn, &sql, params![limit, offset], track_from_row)
+        }
+    }
 }
 
 /// Every genre in the library once (case-insensitively; the first spelling in byte order
@@ -236,7 +279,7 @@ fn like_pattern(input: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use rusqlite::params;
 
     use super::*;
@@ -379,8 +422,8 @@ mod tests {
     fn tracks_range_pages_in_library_order() {
         let db = sample();
         let conn = db.0.lock().unwrap();
-        assert_eq!(track_count(&conn).unwrap(), 7);
-        let all = tracks_range(&conn, 0, 100).unwrap();
+        assert_eq!(track_count(&conn, None).unwrap(), 7);
+        let all = tracks_range(&conn, 0, 100, None).unwrap();
         assert_eq!(
             titles(&all),
             [
@@ -393,9 +436,112 @@ mod tests {
                 "Everything In Its Right Place"
             ]
         );
-        let page = tracks_range(&conn, 2, 2).unwrap();
+        let page = tracks_range(&conn, 2, 2, None).unwrap();
         assert_eq!(titles(&page), ["Teardrop", "Roads"]);
-        assert!(tracks_range(&conn, 50, 10).unwrap().is_empty());
+        assert!(tracks_range(&conn, 50, 10, None).unwrap().is_empty());
+    }
+
+    /// A Navidrome track and its album row, written as a sync would.
+    pub(crate) fn insert_navidrome(
+        conn: &Connection,
+        song: &str,
+        title: &str,
+        artist: &str,
+        album: &str,
+        artist_id: &str,
+    ) {
+        let album_id = format!("navidrome:al-{album}");
+        conn.execute(
+            "INSERT INTO tracks (id, source, title, artist, album_artist, album, album_id,
+                duration_ms, format)
+             VALUES (?1, 'navidrome', ?2, ?3, ?3, ?4, ?5, 1000, 'flac')",
+            params![format!("navidrome:{song}"), title, artist, album, album_id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO albums (id, source, title, artist, artist_id, track_count, duration_ms)
+             VALUES (?1, 'navidrome', ?2, ?3, ?4, 1, 1000)
+             ON CONFLICT(id) DO UPDATE SET track_count = track_count + 1",
+            params![album_id, album, artist, format!("navidrome:{artist_id}")],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn track_count_by_source() {
+        let db = db(&[
+            (
+                "Teardrop",
+                "Massive Attack",
+                "Mezzanine",
+                1,
+                1,
+                1998,
+                "/music",
+            ),
+            ("Roads", "Portishead", "Dummy", 1, 4, 1994, "/music"),
+        ]);
+        let conn = db.0.lock().unwrap();
+        insert_navidrome(&conn, "s1", "Angel", "Massive Attack", "Mezzanine", "ar-1");
+        insert_navidrome(&conn, "s2", "Glory Box", "Portishead", "Dummy", "ar-2");
+        insert_navidrome(&conn, "s3", "Aria", "Bjork", "Post", "ar-3");
+        assert_eq!(track_count(&conn, None).unwrap(), 5);
+        assert_eq!(track_count(&conn, Some(Source::Local)).unwrap(), 2);
+        assert_eq!(track_count(&conn, Some(Source::Navidrome)).unwrap(), 3);
+        let remote = tracks_range(&conn, 0, 100, Some(Source::Navidrome)).unwrap();
+        assert_eq!(titles(&remote), ["Aria", "Angel", "Glory Box"]);
+        assert!(remote.iter().all(|t| t.source == Source::Navidrome));
+        let local = tracks_range(&conn, 0, 100, Some(Source::Local)).unwrap();
+        assert_eq!(titles(&local), ["Teardrop", "Roads"]);
+        let page = tracks_range(&conn, 1, 1, Some(Source::Navidrome)).unwrap();
+        assert_eq!(titles(&page), ["Angel"]);
+        assert_eq!(tracks_range(&conn, 0, 100, None).unwrap().len(), 5);
+    }
+
+    #[test]
+    fn artists_split_by_source_with_ids() {
+        let db = db(&[(
+            "Teardrop",
+            "Massive Attack",
+            "Mezzanine",
+            1,
+            1,
+            1998,
+            "/music",
+        )]);
+        let conn = db.0.lock().unwrap();
+        insert_navidrome(&conn, "s1", "Angel", "Massive Attack", "Mezzanine", "ar-1");
+        insert_navidrome(
+            &conn,
+            "s2",
+            "Karmacoma",
+            "Massive Attack",
+            "Protection",
+            "ar-1",
+        );
+        conn.execute(
+            "UPDATE albums SET cover_id = 'nd-al-Protection' WHERE id = 'navidrome:al-Protection'",
+            [],
+        )
+        .unwrap();
+        let artists = artists(&conn).unwrap();
+        assert_eq!(artists.len(), 2, "{artists:?}");
+        let local = artists.iter().find(|a| a.source == Source::Local).unwrap();
+        assert_eq!(local.id, "Massive Attack");
+        assert_eq!(local.name, "Massive Attack");
+        assert_eq!((local.album_count, local.track_count), (1, 1));
+        assert_eq!(local.cover_id.as_deref(), Some("cover-Mezzanine"));
+        let remote = artists
+            .iter()
+            .find(|a| a.source == Source::Navidrome)
+            .unwrap();
+        assert_eq!(remote.id, "navidrome:ar-1");
+        assert_eq!(remote.name, "Massive Attack");
+        assert_eq!((remote.album_count, remote.track_count), (2, 2));
+        // The cover comes from the artist's own source, never from the local album.
+        assert_eq!(remote.cover_id.as_deref(), Some("nd-al-Protection"));
+        let found = search(&conn, "massive", 10).unwrap();
+        assert_eq!(found.artists.len(), 2);
     }
 
     #[test]

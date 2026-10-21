@@ -52,7 +52,7 @@
       listTop = node.offsetTop;
     }}
   >
-    {#each visible as artist, i (artist.name)}
+    {#each visible as artist, i (`${artist.source}:${artist.id}`)}
       <li style="transform:translateY({(range.start + i) * ROW}px)">
         <button type="button" class="row" onclick={() => go('artist', artist.name)}>
           <Cover coverId={artist.coverId} size={44} cache={96} radius="50%" />

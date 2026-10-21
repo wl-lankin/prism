@@ -381,12 +381,15 @@ pub(crate) fn is_registered(conn: &Connection, key: &str) -> anyhow::Result<bool
 }
 
 /// Creates album rows for tracks whose album is missing, e.g. after a crash between a
-/// track write and its album rebuild in older builds or an aborted scan.
+/// track write and its album rebuild in older builds or an aborted scan. Local tracks only:
+/// a Navidrome track written before its album row waits for the sync to write that row and
+/// must never get a local album.
 fn reconcile_albums(db: &Db) -> anyhow::Result<()> {
     let mut conn = lock(db)?;
     let missing: Vec<String> = {
         let mut stmt = conn.prepare(
-            "SELECT DISTINCT album_id FROM tracks WHERE album_id NOT IN (SELECT id FROM albums)",
+            "SELECT DISTINCT album_id FROM tracks
+             WHERE source = 'local' AND album_id NOT IN (SELECT id FROM albums)",
         )?;
         let rows = stmt.query_map([], |row| row.get(0))?;
         rows.collect::<Result<_, _>>()?
@@ -682,6 +685,40 @@ pub(crate) mod tests {
                 std::fs::copy(entry.path(), target).unwrap();
             }
         }
+    }
+
+    #[test]
+    fn reconcile_ignores_navidrome_tracks() {
+        let h = harness();
+        {
+            let conn = h.db.0.lock().unwrap();
+            // A Navidrome track written before its album row, and a local orphan.
+            conn.execute(
+                "INSERT INTO tracks (id, source, title, artist, album_artist, album, album_id,
+                    duration_ms, format)
+                 VALUES ('navidrome:s1', 'navidrome', 'Angel', 'A', 'A', 'Mezzanine',
+                    'navidrome:al-1', 1000, 'flac')",
+                [],
+            )
+            .unwrap();
+        }
+        let folder = tempfile::tempdir().unwrap();
+        h.insert_row(
+            "local:orphan",
+            &folder.path().join("orphan.flac"),
+            folder.path(),
+            "local:orphan-album",
+            (1, 1, 1000, "flac"),
+        );
+        reconcile_albums(&h.db).unwrap();
+        assert_eq!(
+            h.count("SELECT COUNT(*) FROM albums WHERE id = 'navidrome:al-1'"),
+            0
+        );
+        assert_eq!(
+            h.count("SELECT COUNT(*) FROM albums WHERE id = 'local:orphan-album'"),
+            1
+        );
     }
 
     #[test]

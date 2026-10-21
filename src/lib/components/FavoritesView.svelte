@@ -63,7 +63,7 @@
   const shownTracks = $derived((tracks ?? []).filter((x) => isFavorite('track', x.id) && keepSource(x)));
   const shownAlbums = $derived((albums ?? []).filter((x) => isFavorite('album', x.id) && keepSource(x)));
   // Artists carry no source yet; every artist in the index is local until other sources land.
-  const shownArtists = $derived((artists ?? []).filter((x) => isFavorite('artist', x.name)));
+  const shownArtists = $derived((artists ?? []).filter((x) => isFavorite('artist', x.id)));
 
   /** All, then every source that has favorites, Local files always among them. */
   const sources = $derived.by(() => {
@@ -320,7 +320,7 @@
         </div>
       {:else if tab === 'artist'}
         <ul class="artists">
-          {#each shownArtists as artist (artist.name)}
+          {#each shownArtists as artist (`${artist.source}:${artist.id}`)}
             <li class="artist">
               <button type="button" class="open" onclick={() => go('artist', artist.name)}>
                 <span class="portrait">
@@ -333,7 +333,7 @@
                 <span class="counts">{artistCounts(artist)}</span>
               </button>
               <span class="pin">
-                <Heart kind="artist" id={artist.name} size={16} label={t('favorites.toggleItem', { name: artist.name })} />
+                <Heart kind="artist" id={artist.id} size={16} label={t('favorites.toggleItem', { name: artist.name })} />
               </span>
             </li>
           {/each}
