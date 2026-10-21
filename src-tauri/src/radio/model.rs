@@ -41,10 +41,7 @@ impl Station {
     /// The station as the queue and the engine see it. Duration 0 together with
     /// `Source::Radio` is what the engine calls live.
     pub fn as_track(&self) -> Track {
-        let cover_id = self
-            .cover_id
-            .clone()
-            .or_else(|| station_cover_id(self.favicon.as_deref(), self.homepage.as_deref()));
+        let cover_id = station_cover_id(self.favicon.as_deref(), self.homepage.as_deref());
         Track {
             id: self.id.clone(),
             source: Source::Radio,
@@ -145,7 +142,7 @@ pub fn clean_name(raw: &str) -> Option<String> {
         .filter_map(|ch| {
             if ch.is_whitespace() {
                 Some(' ')
-            } else if ch.is_control() {
+            } else if ch.is_control() || is_format_char(ch) {
                 None
             } else {
                 Some(ch)
@@ -160,9 +157,23 @@ pub fn clean_name(raw: &str) -> Option<String> {
     if trimmed.chars().count() <= MAX_NAME_CHARS {
         return Some(trimmed.to_string());
     }
-    let mut cut: String = trimmed.chars().take(MAX_NAME_CHARS - 3).collect();
+    let head: String = trimmed.chars().take(MAX_NAME_CHARS - 3).collect();
+    let mut cut = head.trim_end_matches(NAME_DECORATION).to_string();
     cut.push_str("...");
     Some(cut)
+}
+
+/// Invisible Unicode format characters (zero-width, bidi controls, BOM) that would spoof or
+/// hide parts of a name.
+fn is_format_char(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{FEFF}'
+    )
 }
 
 /// Lowercased, split on commas, trimmed, deduplicated, at most 8 kept.
@@ -171,7 +182,10 @@ pub fn clean_tags(raw: &str) -> Vec<String> {
     for part in raw.split(',') {
         let tag: String = part
             .chars()
-            .filter(|ch| !ch.is_control())
+            .filter(|ch| !ch.is_control() && !is_format_char(*ch))
+            .collect::<String>()
+            .trim()
+            .chars()
             .take(MAX_TAG_CHARS)
             .collect::<String>()
             .trim()
@@ -381,6 +395,40 @@ pub(crate) mod tests {
         let emoji = clean_name(&"😀".repeat(100)).unwrap();
         assert_eq!(emoji.chars().count(), 80);
         assert_eq!(clean_name(&"y".repeat(80)).unwrap().chars().count(), 80);
+    }
+
+    #[test]
+    fn clean_name_cut_end_is_trimmed_before_the_ellipsis() {
+        // The 77th char is a space and a dash: they must not sit in front of "...".
+        let name = format!("{}- {}", "a".repeat(75), "b".repeat(50));
+        let cut = clean_name(&name).unwrap();
+        assert_eq!(cut, format!("{}...", "a".repeat(75)));
+        assert!(cut.chars().count() <= 80);
+        let plain = clean_name(&format!("{} {}", "a".repeat(76), "b".repeat(50))).unwrap();
+        assert_eq!(plain, format!("{}...", "a".repeat(76)));
+    }
+
+    #[test]
+    fn invisible_format_characters_are_dropped() {
+        assert_eq!(
+            clean_name("Ra\u{200B}dio\u{202E} Ei\u{2066}ns\u{FEFF}").as_deref(),
+            Some("Radio Eins")
+        );
+        assert_eq!(clean_name("\u{200B}\u{2060}\u{FEFF}"), None);
+        assert_eq!(
+            clean_tags("po\u{200D}p, \u{202E}rock\u{2069}"),
+            vec!["pop", "rock"]
+        );
+        // A zero-width character does not make two tags different.
+        assert_eq!(clean_tags("pop,p\u{200B}op"), vec!["pop"]);
+    }
+
+    #[test]
+    fn clean_tags_trims_before_the_cut() {
+        let padded = format!("   {}", "t".repeat(60));
+        assert_eq!(clean_tags(&padded)[0], "t".repeat(40));
+        let spaced = format!("{}  ", "t".repeat(39));
+        assert_eq!(clean_tags(&spaced)[0], "t".repeat(39));
     }
 
     #[test]
