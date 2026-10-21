@@ -1,11 +1,13 @@
 import { t } from '../i18n';
-import { onPlayerError, onPlayerState, playerState } from '../ipc';
-import type { PlayerError, PlayerState, Track } from '../types';
+import { onActivePlayer, onPlayerError, onPlayerState, playerState } from '../ipc';
+import type { ActivePlayer, PlayerError, PlayerState, Track } from '../types';
 import { notice, notify } from './notice.svelte';
 import { findStation } from './radio.svelte';
 
 /** The player as the engine last reported it. Call `initPlayer()` once per window. */
-export const player: PlayerState = $state({
+export const player: PlayerState & { active: ActivePlayer } = $state({
+  /** Who answers the transport; `transport://active` sets it. */
+  active: 'prism',
   status: 'idle',
   track: null,
   positionMs: 0,
@@ -52,10 +54,20 @@ function nameOf(trackId: string): string | undefined {
  */
 export async function initPlayer(): Promise<() => void> {
   let fresh = false;
-  const unlisten = await onPlayerState((state) => {
+  const unlistenState = await onPlayerState((state) => {
     fresh = true;
     apply(state);
   });
+  let unlistenActive: () => void = () => {};
+  try {
+    unlistenActive = await onActivePlayer((active) => (player.active = active));
+  } catch (err) {
+    console.error('following the active player failed', err);
+  }
+  const unlisten = () => {
+    unlistenState();
+    unlistenActive();
+  };
   try {
     const state = await playerState();
     if (!fresh) apply(state);
