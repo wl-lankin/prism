@@ -557,11 +557,13 @@
     height: 100%;
     overflow-y: auto;
     overflow-x: hidden;
+    /* Fades in the title bar scrim once scrolled (App). */
+    scroll-timeline: --view-scroll y;
   }
 
   .inner {
     position: relative;
-    padding: 0 32px 40px;
+    padding: var(--view-top, 0px) 32px 40px;
   }
 
   .back {

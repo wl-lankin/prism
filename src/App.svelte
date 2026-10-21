@@ -251,6 +251,10 @@
     return view === 'home' || view === 'albums' || view === 'artists' || view === 'songs';
   }
 
+  /** Views tinted by a cover backdrop: the title bar floats over them, so the tint runs up to
+   *  the card's top edge instead of stopping under a plain header band. */
+  const immersive = $derived(nav.view === 'album' || nav.view === 'playlist' || nav.view === 'nowplaying');
+
   const titles: Record<View, Key> = {
     home: 'nav.home',
     favorites: 'nav.favorites',
@@ -302,7 +306,7 @@
   <div class="card">
     <Sidebar />
 
-    <main class="main">
+    <main class="main" class:immersive>
       <TitleBar>
         <button
           type="button"
@@ -451,6 +455,49 @@
     flex: 1;
     min-height: 0;
     overflow: hidden;
+  }
+
+  /* Over a backdrop view the title bar floats: the view starts at the card's top edge, so its
+     backdrop runs behind the bar, and the view keeps its content clear of the bar with
+     `--view-top`. The bar stays put while the view scrolls. A view that scrolls names its
+     scroller `--view-scroll`; scrolled content then fades in a blurred scrim behind the bar,
+     so the search field and the window controls stay readable over it. At the top there is
+     no scrim, and the backdrop shows through untouched. */
+  .main.immersive {
+    timeline-scope: --view-scroll;
+  }
+
+  .main.immersive > :global(.titlebar) {
+    position: absolute;
+    inset: 0 0 auto 0;
+    z-index: 2;
+  }
+
+  .main.immersive > :global(.titlebar)::before {
+    content: '';
+    position: absolute;
+    inset: 0 0 -18px 0;
+    z-index: -1;
+    pointer-events: none;
+    background: rgba(16, 16, 20, 0.42);
+    backdrop-filter: blur(18px) saturate(1.2);
+    mask-image: linear-gradient(to bottom, #000 calc(100% - 26px), transparent);
+    opacity: 0;
+    animation: scrim linear both;
+    animation-timeline: --view-scroll;
+    animation-range: 0 96px;
+  }
+
+  @keyframes scrim {
+    to {
+      opacity: 1;
+    }
+  }
+
+  /* The backdrop keeps most of its colour up to the edge: there is no header line to fade into. */
+  .main.immersive .content {
+    --view-top: var(--header-h);
+    --top-alpha: 0.8;
   }
 
   .view {
