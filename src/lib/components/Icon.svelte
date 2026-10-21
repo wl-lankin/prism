@@ -49,7 +49,12 @@
     refresh: '<path d="M19 12a7 7 0 1 1-2.05-4.95"/><path d="M19 4.5v4h-4"/>',
     external: '<path d="M13.5 5.5H18.5V10.5"/><path d="M18.5 5.5 11 13"/><path d="M16.5 14v3.5a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1v-9a1 1 0 0 1 1-1H10"/>',
     lock: '<rect x="5.5" y="10.5" width="13" height="9" rx="2"/><path d="M8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5"/>',
-    drop: '<path d="M12 4v11M7.5 10.5 12 15l4.5-4.5"/><path d="M5 15.5V18a1.5 1.5 0 0 0 1.5 1.5h11A1.5 1.5 0 0 0 19 18v-2.5"/>',
+    radio:
+      '<rect x="4" y="9.5" width="16" height="9.5" rx="2"/><path d="M7 9.5 17 4.5"/><circle cx="9" cy="14.2" r="2.2"/><path d="M14 13h3.5M14 15.6h3.5"/>',
+    live: '<circle cx="12" cy="12" r="1.8"/><path d="M8.2 8.2a5.4 5.4 0 0 0 0 7.6M15.8 8.2a5.4 5.4 0 0 1 0 7.6M5.4 5.4a9.4 9.4 0 0 0 0 13.2M18.6 5.4a9.4 9.4 0 0 1 0 13.2"/>',
+    location:
+      '<path d="M12 20.5s6-5.3 6-10.2a6 6 0 0 0-12 0c0 4.9 6 10.2 6 10.2z"/><circle cx="12" cy="10.3" r="2.2"/>',
+    drop:'<path d="M12 4v11M7.5 10.5 12 15l4.5-4.5"/><path d="M5 15.5V18a1.5 1.5 0 0 0 1.5 1.5h11A1.5 1.5 0 0 0 19 18v-2.5"/>',
   } as const;
 
   export type IconName = keyof typeof ICONS;

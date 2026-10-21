@@ -22,6 +22,7 @@
     tabindex,
     ghost = false,
     revealed = false,
+    onflip,
   }: {
     kind: FavKind;
     id: string | readonly string[];
@@ -36,6 +37,8 @@
      *  hovered or `revealed` (selected). Rows toggle it with the "f" key instead. */
     ghost?: boolean;
     revealed?: boolean;
+    /** Takes over the click (a station's favorite is saved with the station itself). */
+    onflip?: () => void;
   } = $props();
 
   let focused = $state(false);
@@ -65,6 +68,10 @@
     }
     const next = !on;
     if (next) bursts++;
+    if (onflip) {
+      onflip();
+      return;
+    }
     // Only the items not already in the new state, so nothing is queued for nothing.
     for (const x of usable) if (isFavorite(kind, x) !== next) void setFavorite(kind, x, next);
   }

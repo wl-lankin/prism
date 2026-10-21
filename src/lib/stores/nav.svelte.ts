@@ -11,11 +11,13 @@ export type View =
   | 'album'
   | 'artist'
   | 'nowplaying'
+  | 'radio'
   | 'settings';
 
 export interface Nav {
   view: View;
-  /** The album id for 'album', the artist name for 'artist', the playlist id for 'playlist'. */
+  /** The album id for 'album', the artist name for 'artist', the playlist id for 'playlist',
+   *  the tab (`near`, `search`, `saved`) for 'radio'. */
   param?: string;
   /** A library view narrowed to one source; none shows every source. */
   source?: Source;
