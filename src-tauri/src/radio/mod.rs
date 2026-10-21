@@ -5,6 +5,7 @@ pub mod directory;
 pub mod location;
 pub mod model;
 pub mod store;
+pub mod stream;
 
 #[cfg(test)]
 pub(crate) mod testserver;

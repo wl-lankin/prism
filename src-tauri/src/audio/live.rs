@@ -51,7 +51,7 @@ pub const MAX_REDIRECTS: usize = 5;
 pub const OFFLINE_TEXT: &str = "The station is not reachable";
 pub const NOT_AUDIO: &str = "This station is not sending audio";
 pub const PLAYLIST_NOWHERE: &str = "This station's playlist points nowhere";
-const NOT_AN_ADDRESS: &str = "This station's address is not a web address";
+pub const NOT_AN_ADDRESS: &str = "This station's address is not a web address";
 const SECURE_FAILED: &str = "The station's secure connection failed";
 const TOO_MANY_REDIRECTS: &str = "The station redirects too often";
 

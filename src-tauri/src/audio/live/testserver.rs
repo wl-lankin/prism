@@ -37,6 +37,13 @@ pub(crate) enum Body {
     Hls,
     /// A 302 to this server's `target` path.
     Redirect(String),
+    /// A file of `tests/fixtures` (an HLS segment, `radio/tone.mka`): once, or back to back
+    /// forever like an endless station.
+    Fixture {
+        name: &'static str,
+        content_type: &'static str,
+        endless: bool,
+    },
 }
 
 /// What the server does wrong.
@@ -162,6 +169,30 @@ impl FakeRadio {
             },
         );
         self
+    }
+
+    /// An HLS station: the live playlist at `<dir>/live.m3u8` and the two real segments it names
+    /// (`radio/seg1.ts`, `radio/seg2.ts`) next to it. Returns the playlist's path.
+    pub fn hls_station(&self, dir: &str) -> String {
+        for name in ["seg1.ts", "seg2.ts"] {
+            self.station(
+                &format!("{dir}/{name}"),
+                Body::Fixture {
+                    name: if name == "seg1.ts" {
+                        "radio/seg1.ts"
+                    } else {
+                        "radio/seg2.ts"
+                    },
+                    content_type: "video/mp2t",
+                    endless: false,
+                },
+                None,
+                &[],
+            );
+        }
+        let playlist = format!("{dir}/live.m3u8");
+        self.station(&playlist, Body::Hls, None, &[]);
+        playlist
     }
 
     /// `http://127.0.0.1:<port><path>`.
@@ -339,7 +370,15 @@ fn handle(mut stream: TcpStream, shared: &Shared) {
             .get(&path)
             .map(|s| (s.body.clone(), s.metaint, s.titles.clone()));
         // One-shot faults apply to the next audio response only.
-        if matches!(station, Some((Body::Mp3Tone { .. } | Body::Ogg, _, _)))
+        let audio = matches!(
+            station,
+            Some((
+                Body::Mp3Tone { .. } | Body::Ogg | Body::Fixture { endless: true, .. },
+                _,
+                _
+            ))
+        );
+        if audio
             && matches!(
                 fault,
                 Fault::CutAfter(_) | Fault::StallAfter(..) | Fault::CutThen { .. }
@@ -446,6 +485,36 @@ fn handle(mut stream: TcpStream, shared: &Shared) {
                 fault: &fault,
             },
         ),
+        Body::Fixture {
+            name,
+            content_type,
+            endless: false,
+        } => {
+            let data =
+                std::fs::read(fixtures().join(name)).unwrap_or_else(|err| panic!("{name}: {err}"));
+            whole(&mut stream, 200, content_type, &data);
+        }
+        Body::Fixture {
+            name,
+            content_type,
+            endless: true,
+        } => {
+            let data =
+                std::fs::read(fixtures().join(name)).unwrap_or_else(|err| panic!("{name}: {err}"));
+            endless(
+                &mut stream,
+                shared,
+                epoch,
+                Endless {
+                    content_type,
+                    data: &data,
+                    pace: Duration::ZERO,
+                    metaint: metaint.filter(|_| wants_meta),
+                    titles: &titles,
+                    fault: &fault,
+                },
+            );
+        }
     }
 }
 
