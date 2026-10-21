@@ -66,9 +66,13 @@ pub struct Album {
     pub duration_ms: u64,
 }
 
+/// An artist of one source. `id` is the name for local artists (what M2 favorites store) and
+/// `navidrome:<artist id>` for Navidrome artists.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Artist {
+    pub id: String,
+    pub source: Source,
     pub name: String,
     pub album_count: u32,
     pub track_count: u32,
@@ -155,6 +159,45 @@ pub fn album_id(album_artist: &str, album: &str) -> String {
         album.to_lowercase()
     );
     format!("local:{}", sha1_hex(&key))
+}
+
+/// Prefix of every Navidrome track, album and artist id.
+pub const NAVIDROME_PREFIX: &str = "navidrome:";
+
+/// Prefix of every Navidrome cover id.
+pub const NAVIDROME_COVER_PREFIX: &str = "nd-";
+
+/// Longest server cover id that becomes a Prism cover id.
+const NAVIDROME_COVER_MAX: usize = 128;
+
+/// The Prism id of a Navidrome song, album or artist id.
+pub fn navidrome_id(raw: &str) -> String {
+    format!("{NAVIDROME_PREFIX}{raw}")
+}
+
+/// The server id inside a Navidrome id; `None` for any other id or an empty server id.
+pub fn navidrome_raw(id: &str) -> Option<&str> {
+    id.strip_prefix(NAVIDROME_PREFIX)
+        .filter(|raw| !raw.is_empty())
+}
+
+fn safe_cover_art(raw: &str) -> bool {
+    (1..=NAVIDROME_COVER_MAX).contains(&raw.len())
+        && raw
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
+}
+
+/// The cover id of a server `coverArt` value. Cover ids become file names and URL paths, so
+/// only `[A-Za-z0-9_.-]{1,128}` is accepted; anything else has no cover.
+pub fn navidrome_cover_id(cover_art: &str) -> Option<String> {
+    safe_cover_art(cover_art).then(|| format!("{NAVIDROME_COVER_PREFIX}{cover_art}"))
+}
+
+/// The server `coverArt` value inside a Navidrome cover id, checked like `navidrome_cover_id`.
+pub fn navidrome_cover_raw(id: &str) -> Option<&str> {
+    id.strip_prefix(NAVIDROME_COVER_PREFIX)
+        .filter(|raw| safe_cover_art(raw))
 }
 
 #[cfg(test)]
@@ -253,6 +296,51 @@ mod tests {
         assert!(id.starts_with("local:"));
         assert_ne!(id, album_id("Radiohead", "Amnesiac"));
         assert_ne!(album_id("ab", "c"), album_id("a", "bc"));
+    }
+
+    #[test]
+    fn navidrome_ids_round_trip() {
+        let id = navidrome_id("so-42");
+        assert_eq!(id, "navidrome:so-42");
+        assert_eq!(navidrome_raw(&id), Some("so-42"));
+        assert_eq!(navidrome_raw("local:abc"), None);
+        assert_eq!(navidrome_raw("Massive Attack"), None);
+        assert_eq!(navidrome_raw("navidrome:"), None);
+        let cover = navidrome_cover_id("al-1_abc").unwrap();
+        assert_eq!(cover, "nd-al-1_abc");
+        assert_eq!(navidrome_cover_raw(&cover), Some("al-1_abc"));
+        assert_eq!(navidrome_cover_raw("abcdef"), None);
+        assert_eq!(navidrome_cover_raw("nd-../x"), None);
+    }
+
+    #[test]
+    fn cover_id_rejects_unsafe_chars() {
+        assert!(navidrome_cover_id("al-1_abc").is_some());
+        assert!(navidrome_cover_id("mf-2.jpg").is_some());
+        assert!(navidrome_cover_id(&"a".repeat(128)).is_some());
+        assert_eq!(navidrome_cover_id("../x"), None);
+        assert_eq!(navidrome_cover_id("a b"), None);
+        assert_eq!(navidrome_cover_id("a/b"), None);
+        assert_eq!(navidrome_cover_id("a\\b"), None);
+        assert_eq!(navidrome_cover_id("ä"), None);
+        assert_eq!(navidrome_cover_id(""), None);
+        assert_eq!(navidrome_cover_id(&"a".repeat(129)), None);
+    }
+
+    #[test]
+    fn artist_serializes_id_and_source() {
+        let artist = Artist {
+            id: "navidrome:ar-1".into(),
+            source: Source::Navidrome,
+            name: "Lumen Field".into(),
+            album_count: 1,
+            track_count: 3,
+            cover_id: None,
+        };
+        let value = serde_json::to_value(&artist).unwrap();
+        assert_eq!(value["id"], "navidrome:ar-1");
+        assert_eq!(value["source"], "navidrome");
+        assert_eq!(value["albumCount"], 1);
     }
 
     #[test]

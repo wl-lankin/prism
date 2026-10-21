@@ -21,6 +21,7 @@ pub const MIGRATIONS: &[Migration] = &[
     Migration::Sql(include_str!("migrations/0005_track_stats.sql")),
     Migration::Sql(include_str!("migrations/0006_playlists.sql")),
     Migration::Sql(include_str!("migrations/0007_cover_lookups.sql")),
+    Migration::Sql(include_str!("migrations/0008_navidrome.sql")),
 ];
 
 /// The database was written by a newer build than this one. Never quarantined: the file is fine.
@@ -182,6 +183,115 @@ mod tests {
         );
         assert!(plan.contains("idx_albums_order"), "{plan}");
         assert!(!plan.contains("USE TEMP B-TREE"), "{plan}");
+    }
+
+    #[test]
+    fn source_tracks_range_uses_index() {
+        let db = Db::open_in_memory().unwrap();
+        let plan = plan(
+            &db,
+            &format!(
+                "SELECT id FROM tracks t WHERE t.source = ?1 ORDER BY {TRACK_ORDER} LIMIT 200 OFFSET 0"
+            ),
+            &[&"navidrome"],
+        );
+        assert!(plan.contains("idx_tracks_source_order"), "{plan}");
+        assert!(!plan.contains("USE TEMP B-TREE"), "{plan}");
+    }
+
+    #[test]
+    fn navidrome_tables_exist() {
+        let db = Db::open_in_memory().unwrap();
+        let conn = db.0.lock().unwrap();
+        for table in [
+            "navidrome_state",
+            "navidrome_star_queue",
+            "navidrome_scrobble_queue",
+            "remote_playlists",
+            "remote_playlist_tracks",
+        ] {
+            let found: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(found, 1, "{table}");
+        }
+        let artist_id: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('albums') WHERE name = 'artist_id'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(artist_id, 1);
+        let index: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_albums_artist_id'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(index, 1);
+        // Entries go with their playlist.
+        conn.execute(
+            "INSERT INTO remote_playlists (id, name, updated_at) VALUES ('navidrome:p1', 'Mix', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO remote_playlist_tracks (playlist_id, position, track_id)
+             VALUES ('navidrome:p1', 0, 'navidrome:s1')",
+            [],
+        )
+        .unwrap();
+        conn.execute("DELETE FROM remote_playlists", []).unwrap();
+        let left: i64 = conn
+            .query_row("SELECT COUNT(*) FROM remote_playlist_tracks", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(left, 0);
+    }
+
+    #[test]
+    fn fts_update_trigger_ignores_other_columns() {
+        let db = Db::open_in_memory().unwrap();
+        let conn = db.0.lock().unwrap();
+        let sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'tracks_fts_au'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(sql.contains("UPDATE OF title, artist, album"), "{sql}");
+        conn.execute(
+            "INSERT INTO tracks (id, source, title, artist, album_artist, album, album_id, duration_ms, format)
+             VALUES ('t1', 'local', 'Teardrop', 'Massive Attack', 'Massive Attack', 'Mezzanine', 'a1', 1000, 'flac')",
+            [],
+        )
+        .unwrap();
+        let hits = |query: &str| -> i64 {
+            conn.query_row(
+                "SELECT COUNT(*) FROM tracks_fts WHERE tracks_fts MATCH ?1",
+                [query],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        conn.execute("UPDATE tracks SET duration_ms = 2000 WHERE id = 't1'", [])
+            .unwrap();
+        assert_eq!(hits("tear*"), 1);
+        assert_eq!(hits("massive"), 1);
+        assert_eq!(hits("mezz*"), 1);
+        conn.execute("UPDATE tracks SET album = 'Angel' WHERE id = 't1'", [])
+            .unwrap();
+        assert_eq!(hits("mezz*"), 0);
+        assert_eq!(hits("angel"), 1);
+        assert_eq!(hits("tear*"), 1);
     }
 
     #[test]
