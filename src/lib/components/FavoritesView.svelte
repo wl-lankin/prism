@@ -22,6 +22,7 @@
   import AlbumGrid from './AlbumGrid.svelte';
   import TrackMenu, { type TrackMenuState } from './TrackMenu.svelte';
   import Cover from './Cover.svelte';
+  import EmptyArt, { type EmptyKind } from './EmptyArt.svelte';
   import Heart from './Heart.svelte';
   import Icon from './Icon.svelte';
   import NowPlayingBars from './NowPlayingBars.svelte';
@@ -32,6 +33,13 @@
 
   /** Favorite songs, albums, artists and stations in four tabs, narrowed by source with the chips. */
   type Filter = 'all' | Source;
+
+  const EMPTY_ART: Record<FavKind, EmptyKind> = {
+    track: 'songs',
+    album: 'albums',
+    artist: 'artists',
+    station: 'stations',
+  };
 
   let tab = $state<FavKind>(lastTab);
   let source = $state<Filter>('all');
@@ -283,7 +291,7 @@
       <p class="lead">{t('favorites.emptySource', { source: t(`source.${source}`) })}</p>
       <button type="button" class="btn ghost" onclick={() => (source = 'all')}>{t('favorites.all')}</button>
     {:else}
-      <span class="mark" aria-hidden="true"><Icon name="heart" size={26} /></span>
+      <div class="illus"><EmptyArt kind={EMPTY_ART[tab]} /></div>
       <h2>{t(`favorites.empty.${tab}`)}</h2>
       <p class="lead">{t(`favorites.empty.${tab}Lead`)}</p>
       {#if tab === 'station'}
@@ -776,16 +784,9 @@
     padding: 28px 0 12px;
   }
 
-  .mark {
-    width: 52px;
-    height: 52px;
-    display: grid;
-    place-items: center;
-    margin-bottom: 18px;
-    border-radius: 50%;
-    color: var(--spec-1);
-    background: color-mix(in srgb, var(--spec-1) 10%, transparent);
-    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--spec-1) 28%, transparent);
+  /* The tilted back slab starts about 20 px into the artboard; pull it back to the text edge. */
+  .illus {
+    margin: 0 0 14px -20px;
   }
 
   h2 {

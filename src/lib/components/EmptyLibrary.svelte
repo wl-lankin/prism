@@ -4,8 +4,8 @@
   import { lang, t } from '../i18n';
   import { libraryAddFolder } from '../ipc';
   import { library, reloadLibrary } from '../stores/library.svelte';
+  import EmptyArt from './EmptyArt.svelte';
   import Icon from './Icon.svelte';
-  import PrismIllustration from './PrismIllustration.svelte';
 
   /** Shown while the library has no tracks: one action, adding a music folder, and the scan
    *  progress right under it. `compact`: a left-aligned section under other Home content
@@ -46,7 +46,7 @@
       <h2>{t('library.emptyTitle')}</h2>
     {:else}
       <div class="mark">
-        <PrismIllustration width={150} />
+        <EmptyArt kind="library" />
       </div>
       <h1>{t('library.emptyTitle')}</h1>
     {/if}
@@ -91,9 +91,8 @@
     text-align: center;
   }
 
-  /* The logo sits on a soft pool of the spectrum, the one bit of color on this screen. */
   .mark {
-    margin-bottom: 24px;
+    margin-bottom: 18px;
   }
 
   h1 {
