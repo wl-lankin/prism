@@ -1,7 +1,7 @@
 <script lang="ts">
   import { t, tc } from '../i18n';
   import { saveScroll, savedScroll } from '../scroll';
-  import { go } from '../stores/nav.svelte';
+  import { go, nav } from '../stores/nav.svelte';
   import { player } from '../stores/player.svelte';
   import type { Artist } from '../types';
   import { visibleRange } from '../virtual';
@@ -13,7 +13,8 @@
   let { artists }: { artists: Artist[] } = $props();
 
   const ROW = 64;
-  const KEY = 'artists';
+  /** Each source view keeps its own scroll position. */
+  const KEY = $derived(`artists:${nav.source ?? 'all'}`);
 
   let scroller = $state<HTMLDivElement>();
   let listTop = $state(0);

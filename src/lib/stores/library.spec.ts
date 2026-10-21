@@ -63,17 +63,17 @@ const artist = (id: string, source: Artist['source']): Artist => ({
   coverId: null,
 });
 
-it('fills the track counts from three calls, one per source and one for all', async () => {
+it('fills the track counts from one call per source, all being their sum', async () => {
   invoke.mockImplementation(async (cmd: string, args?: { source?: string }) => {
     if (cmd !== 'library_track_count') return [];
     if (args?.source === 'local') return 7;
     if (args?.source === 'navidrome') return 5;
-    return 12;
+    return 999;
   });
   await reloadLibrary();
   expect(library.trackCounts).toEqual({ all: 12, local: 7, navidrome: 5 });
   const counts = invoke.mock.calls.filter(([cmd]) => cmd === 'library_track_count').map(([, args]) => args);
-  expect(counts).toEqual([undefined, { source: 'local' }, { source: 'navidrome' }]);
+  expect(counts).toEqual([{ source: 'local' }, { source: 'navidrome' }]);
 });
 
 it('filters albums and artists by source', async () => {

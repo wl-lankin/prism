@@ -355,7 +355,7 @@
             {:else if libraryView(nav.view) && library.trackCounts?.all === 0}
               <EmptyLibrary />
             {:else if nav.view === 'home' || nav.view === 'albums'}
-              <AlbumGrid albums={library.albums ?? []} scrollKey="albums" header={albumsHead} />
+              <AlbumGrid albums={library.albums ?? []} scrollKey="albums:{nav.source ?? 'all'}" header={albumsHead} />
             {:else if nav.view === 'album' && nav.param}
               <AlbumView albumId={nav.param} />
             {:else if nav.view === 'artists'}

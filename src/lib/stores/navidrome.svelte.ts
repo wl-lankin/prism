@@ -30,6 +30,7 @@ export const NAVIDROME_ERROR_CODES: readonly NavidromeErrorCode[] = [
   'server',
   'syncRefused',
   'keychain',
+  'keychainTooLong',
   'database',
   'settings',
   'internal',
@@ -40,13 +41,10 @@ const KNOWN = new Set<string>(NAVIDROME_ERROR_CODES);
 /** Codes whose `detail` is the server's own words and worth showing. */
 const WITH_DETAIL = new Set<NavidromeErrorCode>(['server', 'notSubsonic']);
 
-/** What a heart or a stream answers while no account is signed in (`NOT_CONNECTED` in the
- *  backend); a plain message, not a `NavidromeFailure`. */
-const NOT_CONNECTED = 'Navidrome is not connected';
-
-/** The keychain's `TooLong` (Windows caps the entry's user name at 513 characters, and the
- *  entry is named `<user>@<server address>`). Matches `keychain.rs` `describe`. */
-const KEYCHAIN_TOO_LONG = 'too long for the keychain';
+/** What a heart or a stream answers while no account is signed in: a plain message, not a
+ *  `NavidromeFailure`. The one copy of the backend's `navidrome::NOT_CONNECTED`, whose exact
+ *  text the Rust tests pin. */
+export const NAVIDROME_NOT_CONNECTED = 'Navidrome is not connected';
 
 function apply(status: NavidromeStatus): void {
   Object.assign(navidrome, status);
@@ -87,19 +85,20 @@ export function isNavidromeError(err: unknown): err is NavidromeFailure {
  *  `notSubsonic`; other details are technical English and stay out. */
 export function failureText(failure: NavidromeFailure): string {
   const code: NavidromeErrorCode = KNOWN.has(failure.code) ? failure.code : 'internal';
-  if (code === 'keychain' && failure.detail?.includes(KEYCHAIN_TOO_LONG)) {
-    return t('navidrome.error.keychainTooLong');
-  }
   const text = t(`navidrome.error.${code}`);
   const detail = failure.detail?.trim();
   return detail && WITH_DETAIL.has(code) ? t('navidrome.error.withDetail', { text, detail }) : text;
 }
 
-/** Any rejection of a Navidrome command (or of a heart on a Navidrome item) as a text. */
+/** Any rejection of a Navidrome command (or of a heart on a Navidrome item) as a text. An
+ *  object with a string `code` counts as a failure even when the code is newer than this
+ *  build (`failureText` shows the generic text for it). */
 export function navidromeErrorText(err: unknown): string {
-  if (isNavidromeError(err)) return failureText(err);
-  if (err === NOT_CONNECTED || (err instanceof Error && err.message === NOT_CONNECTED)) {
-    return t('navidrome.notConnected');
+  const fields = (typeof err === 'object' && err !== null ? err : {}) as { code?: unknown; detail?: unknown };
+  if (typeof fields.code === 'string') {
+    const detail = typeof fields.detail === 'string' ? fields.detail : null;
+    return failureText({ code: fields.code as NavidromeErrorCode, detail });
   }
-  return err instanceof Error ? err.message : String(err);
+  const message = err instanceof Error ? err.message : String(err);
+  return message === NAVIDROME_NOT_CONNECTED ? t('navidrome.notConnected') : message;
 }

@@ -15,8 +15,15 @@ vi.mock('@tauri-apps/api/event', () => ({
 const invoke = vi.fn();
 vi.mock('@tauri-apps/api/core', () => ({ invoke: (...args: unknown[]) => invoke(...args) }));
 
-const { navidrome, initNavidrome, failureText, isNavidromeError, navidromeErrorText, NAVIDROME_ERROR_CODES } =
-  await import('./navidrome.svelte');
+const {
+  navidrome,
+  initNavidrome,
+  failureText,
+  isNavidromeError,
+  navidromeErrorText,
+  NAVIDROME_ERROR_CODES,
+  NAVIDROME_NOT_CONNECTED,
+} = await import('./navidrome.svelte');
 const { setLang, strings } = await import('../i18n');
 
 const status = (patch: Partial<NavidromeStatus>): NavidromeStatus => ({
@@ -48,6 +55,7 @@ const BACKEND_CODES: NavidromeErrorCode[] = [
   'server',
   'syncRefused',
   'keychain',
+  'keychainTooLong',
   'database',
   'settings',
   'internal',
@@ -119,15 +127,12 @@ it('appends the detail for server and notSubsonic only', () => {
   expect(failureText({ code: 'database', detail: 'disk I/O error' })).not.toContain('disk I/O');
 });
 
-it('says clearly when the keychain refuses a value that is too long', () => {
-  const plain = failureText({ code: 'keychain', detail: 'saving failed: the keychain failed' });
-  const long = failureText({ code: 'keychain', detail: 'saving failed: a value is too long for the keychain' });
-  expect(plain).toBe(strings.en['navidrome.error.keychain']);
+it('says clearly when the keychain refuses a value that is too long, by its code only', () => {
+  const long = failureText({ code: 'keychainTooLong', detail: 'saving the password failed: a value is too long' });
   expect(long).toBe(strings.en['navidrome.error.keychainTooLong']);
-  setLang('de');
-  expect(failureText({ code: 'keychain', detail: 'a value is too long for the keychain' })).toBe(
-    strings.de['navidrome.error.keychainTooLong'],
-  );
+  // The plain keychain code never looks into its detail.
+  const plain = failureText({ code: 'keychain', detail: 'a value is too long for the keychain' });
+  expect(plain).toBe(strings.en['navidrome.error.keychain']);
 });
 
 it('falls back to a generic text for a code it does not know', () => {
@@ -140,7 +145,7 @@ it('recognizes a NavidromeFailure', () => {
   expect(isNavidromeError({ code: 'wrongCredentials', detail: null })).toBe(true);
   expect(isNavidromeError({ code: 'later', detail: null })).toBe(false);
   expect(isNavidromeError({ code: 'tls', detail: 3 })).toBe(false);
-  expect(isNavidromeError('Navidrome is not connected')).toBe(false);
+  expect(isNavidromeError(NAVIDROME_NOT_CONNECTED)).toBe(false);
   expect(isNavidromeError(null)).toBe(false);
   expect(isNavidromeError(undefined)).toBe(false);
 });
@@ -149,6 +154,13 @@ it('turns any Navidrome command error into a text', () => {
   expect(navidromeErrorText({ code: 'wrongCredentials', detail: null })).toBe(
     strings.en['navidrome.error.wrongCredentials'],
   );
-  expect(navidromeErrorText('Navidrome is not connected')).toBe(strings.en['navidrome.notConnected']);
+  expect(navidromeErrorText(NAVIDROME_NOT_CONNECTED)).toBe(strings.en['navidrome.notConnected']);
+  expect(navidromeErrorText(new Error(NAVIDROME_NOT_CONNECTED))).toBe(strings.en['navidrome.notConnected']);
   expect(navidromeErrorText('disk full')).toBe('disk full');
+});
+
+it('shows the generic text for a failure with a code newer than this build', () => {
+  expect(navidromeErrorText({ code: 'later', detail: 'x' })).toBe(strings.en['navidrome.error.internal']);
+  expect(navidromeErrorText({ code: 'later' })).toBe(strings.en['navidrome.error.internal']);
+  expect(navidromeErrorText({ code: 'server', detail: 'busy' })).toContain('busy');
 });

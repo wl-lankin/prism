@@ -5,7 +5,7 @@
   import { playSongsFrom } from '../play';
   import { saveScroll, savedScroll } from '../scroll';
   import { library } from '../stores/library.svelte';
-  import { go } from '../stores/nav.svelte';
+  import { go, nav } from '../stores/nav.svelte';
   import { FAVORITE_KEY, isFavoriteKey, toggleFavorite } from '../stores/favorites.svelte';
   import { player } from '../stores/player.svelte';
   import type { Track } from '../types';
@@ -22,7 +22,8 @@
    *  into view and kept in a cache that is dropped whenever the library changes. */
   const ROW = 44;
   const PAGE = 200;
-  const KEY = 'songs';
+  /** Each source view keeps its own scroll position. */
+  const KEY = $derived(`songs:${nav.source ?? 'all'}`);
 
   const total = $derived(library.trackCounts?.all ?? 0);
 

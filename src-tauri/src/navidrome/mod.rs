@@ -54,6 +54,8 @@ pub const EVENT_STATUS: &str = "navidrome://status";
 /// Failure codes of the service itself, next to [`NavidromeError::code`].
 pub const FAILURE_SYNC_REFUSED: &str = "syncRefused";
 pub const FAILURE_KEYCHAIN: &str = "keychain";
+/// The keychain refused the account as too long (Windows caps `<user>@<url>` at 513 chars).
+pub const FAILURE_KEYCHAIN_TOO_LONG: &str = "keychainTooLong";
 pub const FAILURE_DATABASE: &str = "database";
 pub const FAILURE_SETTINGS: &str = "settings";
 pub const FAILURE_INTERNAL: &str = "internal";
@@ -180,6 +182,16 @@ fn failure(code: &'static str, detail: impl Into<String>) -> NavidromeFailure {
         code,
         detail: Some(detail.into()),
     }
+}
+
+/// A keychain error as the UI sees it; a value too long has a code of its own.
+fn keychain_failure(err: &anyhow::Error) -> NavidromeFailure {
+    let code = if keychain::is_too_long(err) {
+        FAILURE_KEYCHAIN_TOO_LONG
+    } else {
+        FAILURE_KEYCHAIN
+    };
+    failure(code, format!("{err:#}"))
 }
 
 /// The account as typed: the URL normalized, the user trimmed and not empty.
@@ -683,7 +695,7 @@ impl NavidromeService {
                 }
                 Err(err) => {
                     status.state = LinkState::Error;
-                    status.error = Some(failure(FAILURE_KEYCHAIN, format!("{err:#}")));
+                    status.error = Some(keychain_failure(&err));
                 }
             }
         }
@@ -804,7 +816,7 @@ impl NavidromeService {
             .is_some_and(|(u, n)| account_key(u, n).eq_ignore_ascii_case(&new_key));
         core.creds
             .set(&url, &user, &account.password)
-            .map_err(|err| failure(FAILURE_KEYCHAIN, format!("{err:#}")))?;
+            .map_err(|err| keychain_failure(&err))?;
         let saved = match core
             .settings
             .set_navidrome_account(Some((url.clone(), user.clone())))

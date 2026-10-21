@@ -51,16 +51,17 @@ export function reloadLibrary(): Promise<void> {
     try {
       do {
         again = false;
-        const [albums, artists, all, local, navidrome] = await Promise.all([
+        const [albums, artists, local, navidrome] = await Promise.all([
           libraryAlbums(),
           libraryArtists(),
-          libraryTrackCount(),
           libraryTrackCount('local'),
           libraryTrackCount('navidrome'),
         ]);
         library.albums = albums ?? [];
         library.artists = artists ?? [];
-        library.trackCounts = { all: all ?? 0, local: local ?? 0, navidrome: navidrome ?? 0 };
+        // `all` is the sum, so the three counts always agree (no third read in between).
+        const counts = { local: local ?? 0, navidrome: navidrome ?? 0 };
+        library.trackCounts = { all: counts.local + counts.navidrome, ...counts };
         library.error = null;
         library.version++;
       } while (again);

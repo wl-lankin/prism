@@ -45,7 +45,33 @@ impl KeyringStore {
 
     fn entry(&self, url: &str, user: &str) -> anyhow::Result<keyring::Entry> {
         keyring::Entry::new(&self.service, &account_key(url, user))
-            .map_err(|err| anyhow::anyhow!("opening the keychain entry failed: {}", describe(&err)))
+            .map_err(|err| failed("opening the keychain entry failed", &err))
+    }
+}
+
+/// The keychain refused a value as too long. Windows Credential Manager caps the entry's user
+/// name (`<user>@<url>`, see [`account_key`]) at 513 characters. Find it with [`is_too_long`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TooLong;
+
+impl std::fmt::Display for TooLong {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("a value is too long for the keychain")
+    }
+}
+
+impl std::error::Error for TooLong {}
+
+/// True when the keychain refused a value as too long.
+pub fn is_too_long(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<TooLong>().is_some()
+}
+
+/// A keyring error under `action`; `TooLong` stays typed for [`is_too_long`].
+fn failed(action: &'static str, err: &keyring::Error) -> anyhow::Error {
+    match err {
+        keyring::Error::TooLong(_, _) => anyhow::Error::new(TooLong).context(action),
+        _ => anyhow::anyhow!("{action}: {}", describe(err)),
     }
 }
 
@@ -69,20 +95,20 @@ impl CredentialStore for KeyringStore {
         match self.entry(url, user)?.get_password() {
             Ok(password) => Ok(Some(Secret::new(password))),
             Err(keyring::Error::NoEntry) => Ok(None),
-            Err(err) => anyhow::bail!("reading the password failed: {}", describe(&err)),
+            Err(err) => Err(failed("reading the password failed", &err)),
         }
     }
 
     fn set(&self, url: &str, user: &str, password: &Secret) -> anyhow::Result<()> {
         self.entry(url, user)?
             .set_password(password.expose())
-            .map_err(|err| anyhow::anyhow!("saving the password failed: {}", describe(&err)))
+            .map_err(|err| failed("saving the password failed", &err))
     }
 
     fn delete(&self, url: &str, user: &str) -> anyhow::Result<()> {
         match self.entry(url, user)?.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(err) => anyhow::bail!("deleting the password failed: {}", describe(&err)),
+            Err(err) => Err(failed("deleting the password failed", &err)),
         }
     }
 }
@@ -91,11 +117,28 @@ impl CredentialStore for KeyringStore {
 #[derive(Default)]
 pub struct MemoryStore {
     entries: Mutex<HashMap<String, Secret>>,
+    /// Refuses every read and write with [`TooLong`], as Windows does for a long account.
+    too_long: bool,
 }
 
 impl MemoryStore {
     pub fn new() -> MemoryStore {
         MemoryStore::default()
+    }
+
+    /// A store that refuses every read and write with [`TooLong`].
+    pub fn too_long() -> MemoryStore {
+        MemoryStore {
+            too_long: true,
+            ..MemoryStore::default()
+        }
+    }
+
+    fn refuse(&self, action: &'static str) -> anyhow::Result<()> {
+        if self.too_long {
+            return Err(anyhow::Error::new(TooLong).context(action));
+        }
+        Ok(())
     }
 
     fn entries(&self) -> std::sync::MutexGuard<'_, HashMap<String, Secret>> {
@@ -108,10 +151,12 @@ impl MemoryStore {
 
 impl CredentialStore for MemoryStore {
     fn get(&self, url: &str, user: &str) -> anyhow::Result<Option<Secret>> {
+        self.refuse("reading the password failed")?;
         Ok(self.entries().get(&account_key(url, user)).cloned())
     }
 
     fn set(&self, url: &str, user: &str, password: &Secret) -> anyhow::Result<()> {
+        self.refuse("saving the password failed")?;
         self.entries()
             .insert(account_key(url, user), password.clone());
         Ok(())
@@ -140,6 +185,33 @@ mod tests {
             account_key("https://nas:4533", "demo"),
             "demo@https://nas:4533"
         );
+    }
+
+    #[test]
+    fn too_long_stays_recognizable_under_its_context() {
+        let store = MemoryStore::too_long();
+        let err = store
+            .set("http://127.0.0.1:4533", "demo", &Secret::new("demo-pass"))
+            .unwrap_err();
+        assert!(is_too_long(&err));
+        assert_eq!(
+            format!("{err:#}"),
+            "saving the password failed: a value is too long for the keychain"
+        );
+        assert!(is_too_long(
+            &store.get("http://127.0.0.1:4533", "demo").unwrap_err()
+        ));
+        assert!(!is_too_long(&anyhow::anyhow!("the keychain failed")));
+        let other = failed(
+            "saving the password failed",
+            &keyring::Error::NoStorageAccess("locked".into()),
+        );
+        assert!(!is_too_long(&other));
+        let long = failed(
+            "saving the password failed",
+            &keyring::Error::TooLong("username".into(), 513),
+        );
+        assert!(is_too_long(&long));
     }
 
     #[test]

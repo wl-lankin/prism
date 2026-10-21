@@ -222,5 +222,5 @@ export const onMiniLayout = (cb: (layout: MiniLayout) => void): Promise<Unlisten
 /** The Navidrome status after every change (state, counts, sync progress, failure). */
 export const onNavidromeStatus = (cb: (status: NavidromeStatus) => void): Promise<UnlistenFn> =>
   listen<NavidromeStatus>('navidrome://status', (event) => cb(event.payload));
-export const onScanProgress =(cb: (progress: ScanProgress) => void): Promise<UnlistenFn> =>
+export const onScanProgress = (cb: (progress: ScanProgress) => void): Promise<UnlistenFn> =>
   listen<ScanProgress>('library://scan-progress', (event) => cb(event.payload));

@@ -653,6 +653,8 @@ fn not_connected_is_offline() {
         .expect("no server, no stream");
     assert!(crate::audio::is_offline(&err), "{err:#}");
     assert_eq!(err.to_string(), NOT_CONNECTED);
+    // The whole chain, as a command or the player error sends it.
+    assert_eq!(format!("{err:#}"), crate::navidrome::NOT_CONNECTED);
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
 

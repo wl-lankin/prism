@@ -180,6 +180,7 @@ export type NavidromeErrorCode =
   | 'server'
   | 'syncRefused'
   | 'keychain'
+  | 'keychainTooLong'
   | 'database'
   | 'settings'
   | 'internal';

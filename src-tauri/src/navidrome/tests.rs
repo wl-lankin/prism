@@ -593,6 +593,51 @@ fn missing_keychain_entry_is_an_error_state() {
     assert!(server.requests().is_empty());
 }
 
+/// The service over a keychain that refuses every value as too long.
+fn spawn_too_long(path: &Path) -> Arc<NavidromeService> {
+    NavidromeService::spawn_with_options(
+        Arc::new(Db::open_in_memory().unwrap()),
+        Arc::new(SettingsStore::load(path)),
+        Arc::new(MemoryStore::too_long()) as Arc<dyn CredentialStore>,
+        Arc::new(|_| {}),
+        options(),
+    )
+}
+
+#[test]
+fn connect_with_a_too_long_keychain_value_has_its_own_code() {
+    let server = FakeServer::start(FakeLibrary::synthetic(1, 2));
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.json");
+    let service = spawn_too_long(&path);
+    let err = service
+        .connect(&server.url(), FAKE_USER, Secret::new(FAKE_PASSWORD))
+        .unwrap_err();
+    assert_eq!(err.code, FAILURE_KEYCHAIN_TOO_LONG);
+    assert!(!format!("{err:?}").contains(FAKE_PASSWORD));
+    // Nothing was saved.
+    assert!(SettingsStore::load(&path).get().navidrome_url.is_none());
+    service.shutdown();
+}
+
+#[test]
+fn startup_with_a_too_long_keychain_value_has_its_own_code() {
+    let server = FakeServer::start(FakeLibrary::synthetic(1, 2));
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("settings.json");
+    SettingsStore::load(&path)
+        .set_navidrome_account(Some((server.url(), FAKE_USER.into())))
+        .unwrap();
+    let service = spawn_too_long(&path);
+    let status = service.status();
+    assert_eq!(status.state, LinkState::Error);
+    assert_eq!(
+        status.error.as_ref().map(|e| e.code),
+        Some(FAILURE_KEYCHAIN_TOO_LONG)
+    );
+    service.shutdown();
+}
+
 #[test]
 fn incomplete_account_never_reads_the_keychain() {
     let dir = tempfile::tempdir().unwrap();
