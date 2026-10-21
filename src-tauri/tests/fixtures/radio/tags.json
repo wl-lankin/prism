@@ -1,0 +1,6 @@
+[
+  {"name": "pop", "stationcount": 9100},
+  {"name": "Rock", "stationcount": 7400},
+  {"name": "jazz", "stationcount": "880"},
+  {"name": "", "stationcount": 3}
+]

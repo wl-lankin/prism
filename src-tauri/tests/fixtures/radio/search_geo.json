@@ -1,0 +1,42 @@
+[
+  {
+    "stationuuid": "00000000-0000-4000-8000-000000000011",
+    "name": "Demo Radio 11",
+    "url": "http://stream.example.org/demo11.mp3",
+    "url_resolved": "http://stream.example.org/demo11.mp3",
+    "homepage": "https://www.example.org/demo11",
+    "favicon": "https://www.example.org/demo11/logo.png",
+    "tags": "pop",
+    "countrycode": "DE",
+    "state": "Testland",
+    "codec": "MP3",
+    "bitrate": 192,
+    "hls": 0,
+    "lastcheckok": 1,
+    "clickcount": 90,
+    "votes": 14,
+    "geo_lat": 50.03,
+    "geo_long": 10.01,
+    "geo_distance": 3412.7
+  },
+  {
+    "stationuuid": "00000000-0000-4000-8000-000000000012",
+    "name": "Demo Radio 12",
+    "url": "http://stream.example.org/demo12.ogg",
+    "url_resolved": "http://stream.example.org/demo12.ogg",
+    "homepage": "",
+    "favicon": "",
+    "tags": "folk",
+    "countrycode": "DE",
+    "state": "Testland",
+    "codec": "OGG",
+    "bitrate": 96,
+    "hls": 0,
+    "lastcheckok": 1,
+    "clickcount": 40,
+    "votes": 2,
+    "geo_lat": "50.2",
+    "geo_long": "9.9",
+    "geo_distance": "24800"
+  }
+]
