@@ -470,6 +470,7 @@
   // Radio location. Opening Settings never asks the location service: only "Automatic" and
   // "Detect again" do, and the Radio view when it first needs the place.
   const radioLocation = $derived(settings.radioLocation ?? { mode: 'auto' });
+  const isManual = $derived(radioLocation.mode === 'manual');
   const manualCountry = $derived(radioLocation.mode === 'manual' ? radioLocation.countryCode : null);
   const manualRegion = $derived(radioLocation.mode === 'manual' ? radioLocation.region : null);
   let countries = $state.raw<RadioCountry[]>([]);
@@ -491,7 +492,7 @@
   });
 
   $effect(() => {
-    if (manualCountry === null) return;
+    if (!isManual) return;
     let gone = false;
     listCountries()
       .then((list) => {
@@ -520,11 +521,11 @@
 
   // The saved choice stays selectable while the directory cannot list it.
   const countryOptions: SelectOption[] = $derived.by(() => {
-    const list = countries.map((c) => ({ value: c.code, label: c.name }));
+    const list = countries.map((c) => ({ value: c.code, label: countryName(c.code) }));
     if (manualCountry && !list.some((c) => c.value === manualCountry)) {
-      list.unshift({ value: manualCountry, label: countryName(manualCountry) });
+      list.push({ value: manualCountry, label: countryName(manualCountry) });
     }
-    return list;
+    return list.sort((a, b) => a.label.localeCompare(b.label, lang()));
   });
   const regionOptions: SelectOption[] = $derived.by(() => {
     const list = [

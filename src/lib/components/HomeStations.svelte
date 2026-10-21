@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { t } from '../i18n';
   import { favorites } from '../stores/favorites.svelte';
   import { loadSaved, radio } from '../stores/radio.svelte';
@@ -8,10 +9,8 @@
   /** Home's "Your stations" row: up to 12 favorite stations, nothing while there are none. */
   const MAX = 12;
 
-  $effect(() => {
-    void favorites.version;
-    void loadSaved();
-  });
+  // Later changes arrive through the favorites listener and the heart toggle.
+  onMount(() => void loadSaved());
 
   // A heart taken off elsewhere removes the tile before the saved list reloads.
   const shown = $derived(radio.saved.favorites.filter((x) => favorites.stations.has(x.id)).slice(0, MAX));

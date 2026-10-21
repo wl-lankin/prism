@@ -295,3 +295,14 @@ it('palette_enter_plays_a_station', async () => {
   expect(state.open).toBe(false);
   unmount(app);
 });
+
+it('home_row_shows_on_an_empty_library', async () => {
+  await favoriteStations(station(1));
+  const { default: App } = await import('../../App.svelte');
+  const app = mount(App, { target });
+  await vi.waitFor(() => {
+    flushSync();
+    expect(target.querySelector('#home-stations')?.textContent).toBe('Your stations');
+  });
+  unmount(app);
+});

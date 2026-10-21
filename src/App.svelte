@@ -487,6 +487,9 @@
             {:else if libraryView(nav.view) && library.trackCounts === null}
               <!-- The first load takes a moment; nothing flashes meanwhile. -->
             {:else if libraryView(nav.view) && shownTracks === 0}
+              {#if nav.view === 'home' && !nav.source}
+                <div class="home-stations"><HomeStations /></div>
+              {/if}
               {#if emptyAsNavidrome}
                 <SourceEmpty source="navidrome" offerLocal={!nav.source} />
               {:else}
@@ -665,6 +668,10 @@
   .view {
     height: 100%;
     animation: fade var(--dur) ease-out;
+  }
+
+  .home-stations {
+    padding: 10px 32px 0;
   }
 
   .placeholder {

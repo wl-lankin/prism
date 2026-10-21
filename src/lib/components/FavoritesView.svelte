@@ -9,6 +9,7 @@
 </script>
 
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { formatDuration } from '../format';
   import { t, tc, type Key } from '../i18n';
   import { favoritesAlbums, favoritesArtists, favoritesTracks, libraryAlbumTracks, libraryArtistAlbums } from '../ipc';
@@ -65,10 +66,7 @@
     };
   });
 
-  $effect(() => {
-    void favorites.version;
-    void loadSaved();
-  });
+  onMount(() => void loadSaved());
 
   // A station un-hearted here leaves the list at once, like the other kinds.
   const shownStations = $derived(
@@ -234,7 +232,7 @@
   </ViewHead>
 
   <div class="bar">
-    <div class="tabs" role="tablist" aria-label={t('favorites.kinds')} tabindex="-1" onkeydown={onTabKey}>
+    <div class="tabs" role="tablist" aria-label={t('favorites.kinds')} tabindex="-1" onkeydown={onTabKey} hidden={source === 'radio'}>
       {#each tabs as item (item.kind)}
         <button
           type="button"
@@ -451,6 +449,10 @@
     background: rgba(255, 255, 255, 0.04);
     box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.05);
     outline: none;
+  }
+
+  .tabs[hidden] {
+    display: none;
   }
 
   .tab {

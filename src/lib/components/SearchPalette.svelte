@@ -14,8 +14,9 @@
   import StationArt from './StationArt.svelte';
   import { playStationNotified, stationSub } from './stationUi';
 
-  /** Ctrl+K / Cmd+K: search the whole library. Results come in three groups; arrows move
-   *  through all of them, Enter opens an album or artist or plays a song with its album. */
+  /** Ctrl+K / Cmd+K: search the whole library. Results come in four groups (albums, artists,
+   *  songs, stations); arrows move through all of them, Enter opens an album or artist, plays a
+   *  song with its album, or plays a station. */
   let { open = $bindable(false) }: { open?: boolean } = $props();
 
   /** Results carry their source's dot once the library has more than one source. */

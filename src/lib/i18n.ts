@@ -797,7 +797,7 @@ const de: Record<Key, string> = {
   'settings.radio.notFound': 'Noch nicht gefunden',
   'settings.radio.redetect': 'Erneut erkennen',
   'settings.radio.privacy':
-    'Prism fragt einmal pro Woche bei geojs.io nach einem groben Standort anhand deiner IP-Adresse. Er bleibt auf diesem Computer.',
+    'Prism fragt einmal pro Woche bei geojs.io nach einem groben Standort anhand deiner IP-Adresse. Der Standort bleibt auf diesem Computer.',
   'settings.radio.country': 'Land',
   'settings.radio.region': 'Region',
   'settings.radio.anyRegion': 'Alle Regionen',
