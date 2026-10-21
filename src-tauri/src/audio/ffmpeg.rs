@@ -8,7 +8,7 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Context};
 use crossbeam_channel::{Receiver, RecvTimeoutError};
 
-use super::source::{AudioSource, Input, StreamSpec};
+use super::source::{describe, AudioSource, Input, StreamSpec};
 use crate::tools;
 
 /// How long FFmpeg may stay silent before it counts as hung.
@@ -111,7 +111,13 @@ impl AudioSource for FfmpegSource {
 impl Process {
     fn spawn(input: &Input, rate: u32, start_ms: u64) -> anyhow::Result<Self> {
         let program = tools::ffmpeg_path().context("ffmpeg was not found")?;
-        let Input::File(path) = input;
+        let path = match input {
+            Input::File(path) => path,
+            Input::Http(_) => bail!(
+                "{} is a stream; streams are not playable yet",
+                describe(input)
+            ),
+        };
         let mut command = tools::command(&program);
         command.args(["-nostdin", "-hide_banner", "-loglevel", "error"]);
         if start_ms > 0 {
@@ -226,11 +232,6 @@ fn collect_stderr(mut stderr: ChildStderr) -> anyhow::Result<JoinHandle<String>>
             text
         })
         .context("spawning the ffmpeg stderr thread")
-}
-
-fn describe(input: &Input) -> String {
-    let Input::File(path) = input;
-    path.display().to_string()
 }
 
 #[cfg(test)]

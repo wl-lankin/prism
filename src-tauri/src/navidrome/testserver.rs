@@ -57,6 +57,12 @@ pub(crate) enum Fault {
         method: &'static str,
         after_bytes: usize,
     },
+    /// Like [`Fault::CutOnce`] on a server without range support: the cut request already
+    /// advertises no `Accept-Ranges`, and the fault becomes [`Fault::NoRanges`] afterwards.
+    CutOnceNoRanges {
+        method: &'static str,
+        after_bytes: usize,
+    },
     /// `stream` ignores `Range` and advertises no `Accept-Ranges`.
     NoRanges,
     /// `search3` returns no songs.
@@ -665,6 +671,13 @@ fn route(
             after_bytes,
         } if cut == method => {
             state.fault = Fault::None;
+            delivery = Delivery::Cut { after: after_bytes };
+        }
+        Fault::CutOnceNoRanges {
+            method: cut,
+            after_bytes,
+        } if cut == method => {
+            state.fault = Fault::NoRanges;
             delivery = Delivery::Cut { after: after_bytes };
         }
         _ => {}

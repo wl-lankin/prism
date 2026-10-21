@@ -593,7 +593,7 @@ pub(crate) fn classify_reqwest(err: reqwest::Error) -> NavidromeError {
 
 /// Classifies an I/O error from reading a response body; a reqwest error inside it goes through
 /// [`classify_reqwest`].
-fn classify_io(err: std::io::Error) -> NavidromeError {
+pub(crate) fn classify_io(err: std::io::Error) -> NavidromeError {
     if err
         .get_ref()
         .is_some_and(|inner| inner.is::<reqwest::Error>())

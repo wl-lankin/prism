@@ -14,7 +14,7 @@ use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::units::{Time, TimeBase, Timestamp};
 
-use super::source::{guarded, AudioSource, DecoderPanic, Input, StreamSpec};
+use super::source::{describe, guarded, AudioSource, DecoderPanic, Input, StreamSpec};
 
 /// Consecutive undecodable packets after which a stream is considered broken.
 const MAX_CONSECUTIVE_ERRORS: u32 = 32;
@@ -50,7 +50,13 @@ impl SymphoniaSource {
     /// `Ok(None)` when the probe fails or no decoder exists (the caller falls back to FFmpeg);
     /// `Err` when symphonia should handle the file but it does not decode.
     pub fn open_if_supported(input: &Input) -> anyhow::Result<Option<Self>> {
-        let Input::File(path) = input;
+        let path = match input {
+            Input::File(path) => path,
+            Input::Http(_) => bail!(
+                "{} is a stream; streams are not playable yet",
+                describe(input)
+            ),
+        };
         let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
         let stream = MediaSourceStream::new(Box::new(file), MediaSourceStreamOptions::default());
         let mut hint = Hint::new();
@@ -286,9 +292,4 @@ impl AudioSource for SymphoniaSource {
     fn duration_ms(&self) -> Option<u64> {
         self.duration_ms
     }
-}
-
-fn describe(input: &Input) -> String {
-    let Input::File(path) = input;
-    path.display().to_string()
 }

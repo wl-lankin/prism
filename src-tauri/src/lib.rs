@@ -109,6 +109,8 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
     })?;
     let cover_cache = dirs.cache.join("covers");
     let cover_dir = cover_cache.join("original");
+    // Stream buffers left behind by a crash.
+    audio::http::cleanup_spill_dir(&audio::http::spill_dir(&dirs.cache));
 
     let config_dir = dirs.config;
     let settings = Arc::new(SettingsStore::load(&config_dir.join("settings.json")));
