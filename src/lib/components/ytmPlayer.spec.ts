@@ -46,7 +46,7 @@ const { default: TrackMenu } = await import('./TrackMenu.svelte');
 const { default: StationMenu } = await import('./StationMenu.svelte');
 const { default: FlowMenu } = await import('./FlowMenu.svelte');
 const { player } = await import('../stores/player.svelte');
-const { ytm } = await import('../stores/ytm.svelte');
+const { ytm, reportRect, hideView } = await import('../stores/ytm.svelte');
 const { overlayOpen } = await import('../stores/overlays.svelte');
 const { queuePanel } = await import('../stores/queue.svelte');
 const { notice } = await import('../stores/notice.svelte');
@@ -166,6 +166,29 @@ describe('each_overlay_registers_while_open', () => {
   });
 });
 
+describe('a replaced notice', () => {
+  it('does not hide and show the YouTube Music view again', async () => {
+    vi.stubGlobal('requestAnimationFrame', (cb: () => void) => setTimeout(cb, 0));
+    show(App);
+    await settle();
+    reportRect({ x: 1, y: 2, width: 300, height: 200 });
+    await vi.waitFor(() => expect(calls('ytm_show')).toHaveLength(1));
+    notice.text = 'First';
+    await settle();
+    expect(calls('ytm_hide')).toHaveLength(1);
+    notice.text = 'Second';
+    await settle();
+    expect(calls('ytm_hide')).toHaveLength(1);
+    expect(calls('ytm_show')).toHaveLength(1);
+    expect(overlayOpen('notice')).toBe(true);
+    notice.text = null;
+    await settle();
+    await vi.waitFor(() => expect(calls('ytm_show')).toHaveLength(2));
+    hideView();
+    vi.unstubAllGlobals();
+  });
+});
+
 describe('transport strip with YouTube Music', () => {
   it('strip_shows_ytm_when_active', async () => {
     show(TransportStrip);
@@ -264,6 +287,15 @@ describe('queue panel with YouTube Music', () => {
       'The queue belongs to YouTube Music. Change it in the YouTube Music view.',
     );
     expect(target.querySelector('[role="listbox"]')).toBeNull();
+  });
+
+  it('keeps the normal heading, not a leftover Flow name', async () => {
+    player.flow = { kind: 'genre', genre: 'Ambient' };
+    queuePanel.open = true;
+    show(QueuePanel);
+    await settle();
+    expect(target.querySelector('h2')?.textContent).toBe('Up next');
+    player.flow = null;
   });
 });
 

@@ -254,7 +254,7 @@
     {@const yl = ytmLines(ytm.state)}
     <div class="stage">
       <div class="art">
-        <Cover coverId={ytm.state.coverId} fluid cache={600} radius="18px" alt={ytm.state.album} />
+        <Cover coverId={ytm.state.coverId} fluid cache={600} radius="18px" alt="" />
       </div>
     </div>
 

@@ -313,8 +313,10 @@
 
   // The notice and the drop overlay sit inside the content area, above the YouTube Music
   // view, so each hides it while it shows. The registry reads the set it writes: untrack.
+  // Only whether a notice shows is tracked: a replaced text must not close and reopen it.
+  const noticeShown = $derived(!!notice.text);
   $effect(() => {
-    if (!notice.text) return;
+    if (!noticeShown) return;
     untrack(() => openOverlay('notice'));
     return () => untrack(() => closeOverlay('notice'));
   });

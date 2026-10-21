@@ -48,7 +48,7 @@
   const empty = $derived(idle || total === 0);
   /** A station is a queue of one: no "up next" count and no tail note. */
   const live = $derived(!idle && isLive(player.track));
-  const flow = $derived((player.flow ?? null) as FlowVariant | null);
+  const flow = $derived(yt ? null : ((player.flow ?? null) as FlowVariant | null));
   const upcoming = $derived(Math.max(0, total - current - 1));
 
   let showPlayed = $state(false);
