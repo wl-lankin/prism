@@ -383,6 +383,19 @@ const en = {
   'about.licensesLead': 'Prism is MIT licensed and built on these open-source components.',
   'about.external': 'used as an external program',
   'about.close': 'Close',
+
+  // Live player (M4 Task 10)
+  'radio.live': 'LIVE',
+  'radio.liveHeard': 'Time heard: {time}',
+  'radio.noSkip': 'Not available while a station plays',
+  'radio.offlineNotice': '{name} is not reachable. Press Play to try again.',
+  'radio.stationFailed': '{name} cannot be played.',
+  'radio.unnamed': 'The station',
+  'radio.menu.favorite': 'Save station',
+  'radio.menu.unfavorite': 'Remove station',
+  'radio.menu.homepage': 'Open homepage',
+  'player.trackFailed': '{title} cannot be played.',
+  'player.unnamed': 'This track',
 } as const;
 
 export type Key = keyof typeof en;
@@ -765,6 +778,19 @@ const de: Record<Key, string> = {
   'about.licensesLead': 'Prism steht unter der MIT-Lizenz und baut auf diesen Open-Source-Komponenten auf.',
   'about.external': 'als externes Programm genutzt',
   'about.close': 'Schließen',
+
+  // Live player (M4 Task 10)
+  'radio.live': 'LIVE',
+  'radio.liveHeard': 'Gehörte Zeit: {time}',
+  'radio.noSkip': 'Nicht verfügbar, solange ein Sender läuft',
+  'radio.offlineNotice': '{name} ist nicht erreichbar. Mit Abspielen erneut versuchen.',
+  'radio.stationFailed': '{name} lässt sich nicht abspielen.',
+  'radio.unnamed': 'Der Sender',
+  'radio.menu.favorite': 'Sender speichern',
+  'radio.menu.unfavorite': 'Sender entfernen',
+  'radio.menu.homepage': 'Webseite öffnen',
+  'player.trackFailed': '{title} lässt sich nicht abspielen.',
+  'player.unnamed': 'Dieser Titel',
 };
 
 /** The string tables, exported for tests. */

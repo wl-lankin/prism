@@ -1,12 +1,13 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import { formatDuration, sourceQualityLabel, streamedFrom } from '../format';
+  import { formatDuration, isLive, liveLines, sourceQualityLabel, stationInitials, streamedFrom } from '../format';
   import { t } from '../i18n';
   import { coverUrl, playerJump, playerQueueRange } from '../ipc';
   import { evictPages, pagesFor } from '../pages';
   import { FAVORITE_KEY, isFavoriteKey, toggleFavorite } from '../stores/favorites.svelte';
   import { go } from '../stores/nav.svelte';
   import { player } from '../stores/player.svelte';
+  import { currentTitle, findStation, toggleStationFavorite } from '../stores/radio.svelte';
   import { settings } from '../stores/settings.svelte';
   import type { FlowVariant, QueueItem, Track } from '../types';
   import { visibleRange } from '../virtual';
@@ -14,6 +15,7 @@
   import Cover from './Cover.svelte';
   import Heart from './Heart.svelte';
   import Icon from './Icon.svelte';
+  import LivePill from './LivePill.svelte';
   import NowPlayingBars from './NowPlayingBars.svelte';
   import RowPlay from './RowPlay.svelte';
 
@@ -38,7 +40,15 @@
     const file = streamedFrom(track, settings.navidromeQuality);
     return file ? t('quality.from', { stream: label, file }) : label;
   });
-  const backdrop = $derived(coverUrl(track?.coverId ?? null, 96));
+  /** A station: no seek, no queue to speak of, the stream title over the station name. */
+  const live = $derived(!idle && isLive(track));
+  const lines = $derived(track ? liveLines(track, live ? currentTitle(track) : null) : null);
+  // A station without a logo tints the view with a plain radio-blue tile.
+  function blueTile(): string {
+    const fill = getComputedStyle(document.documentElement).getPropertyValue('--src-radio').trim() || '#4da6ff';
+    return `data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"><rect width="4" height="4" fill="${fill}"/></svg>`)}`;
+  }
+  const backdrop = $derived(coverUrl(track?.coverId ?? null, 96) ?? (live ? blueTile() : null));
 
   const flow = $derived((player.flow ?? null) as FlowVariant | null);
   const heading = $derived(flow ? t('nowPlaying.flow', { variant: variantName(flow) }) : t('nowPlaying.queue'));
@@ -211,7 +221,10 @@
       const item = entry(selected)?.track;
       if (!item || item.id.startsWith('file:')) return;
       event.preventDefault();
-      void toggleFavorite('track', item.id);
+      if (isLive(item)) {
+        const station = findStation(item.id);
+        if (station) void toggleStationFavorite(station);
+      } else void toggleFavorite('track', item.id);
     }
   }
 
@@ -234,21 +247,25 @@
   {:else}
     <div class="stage">
       <div class="art">
-        <Cover coverId={track.coverId} fluid cache={600} radius="18px" alt={track.album} />
+        <Cover coverId={track.coverId} fluid cache={600} radius="18px" alt={track.album} initials={live ? stationInitials(track.title) : undefined} />
       </div>
     </div>
 
     <div class="side">
       <header class="info">
         <h1>
-          {#if inLibrary && track.albumId}
+          {#if live && lines}
+            {lines.title}
+          {:else if inLibrary && track.albumId}
             <button type="button" class="link" onclick={() => openAlbum(track)}>{track.title}</button>
           {:else}
             {track.title}
           {/if}
         </h1>
         <p class="byline">
-          {#if inLibrary && track.artist}
+          {#if live && lines}
+            <span class="artist">{lines.sub}</span>
+          {:else if inLibrary && track.artist}
             <button type="button" class="link artist" onclick={() => go('artist', track.artist)}>{track.artist}</button>
           {:else if track.artist}
             <span class="artist">{track.artist}</span>
@@ -263,8 +280,11 @@
           <span class="quality" style="--dot:var(--src-{track.source})">
             <span class="qtext" title={qualityText}>{qualityText}</span>
           </span>
+          {#if live}
+            <LivePill />
+          {/if}
           {#if inLibrary}
-            <Heart kind="track" id={track.id} round label={t('favorites.toggleItem', { name: track.title })} />
+            <Heart kind={live ? 'station' : 'track'} id={track.id} round label={t('favorites.toggleItem', { name: track.title })} />
           {/if}
         </div>
       </header>
@@ -337,7 +357,7 @@
                   </span>
                   {#if item?.track}
                     {@const q = item.track}
-                    <Cover coverId={q.coverId} size={36} cache={96} radius="6px" />
+                    <Cover coverId={q.coverId} size={36} cache={96} radius="6px" initials={isLive(q) ? stationInitials(q.title) : undefined} />
                     <span class="name">
                       <span class="qtitle">{q.title}</span>
                       <span class="qartist">{q.artist}</span>
@@ -345,9 +365,11 @@
                     {#if q.id.startsWith('file:')}
                       <span></span>
                     {:else}
-                      <Heart kind="track" id={q.id} size={16} tabindex={-1} ghost revealed={selected === row.index} label={t('favorites.toggleItem', { name: q.title })} />
+                      <Heart kind={isLive(q) ? 'station' : 'track'} id={q.id} size={16} tabindex={-1} ghost revealed={selected === row.index} label={t('favorites.toggleItem', { name: q.title })} />
                     {/if}
-                    <span class="time">{formatDuration(q.durationMs)}</span>
+                    <span class="time">
+                      {#if isLive(q)}<LivePill size="small" />{:else}{formatDuration(q.durationMs)}{/if}
+                    </span>
                   {:else if item}
                     <span class="ghost-cover"></span>
                     <span class="name"><span class="qartist">{t('nowPlaying.missing')}</span></span>
@@ -586,7 +608,7 @@
   .qrow {
     position: relative;
     display: grid;
-    grid-template-columns: 28px 36px minmax(0, 1fr) 30px 48px;
+    grid-template-columns: 28px 36px minmax(0, 1fr) 30px minmax(48px, auto);
     column-gap: 12px;
     align-items: center;
     height: 52px;

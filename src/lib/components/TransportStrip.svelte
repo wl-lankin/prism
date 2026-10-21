@@ -1,15 +1,17 @@
 <script lang="ts">
-  import { formatDuration, qualityLabel, streamedFrom } from '../format';
+  import { formatDuration, isLive, liveLines, qualityLabel, stationInitials, streamedFrom } from '../format';
   import { t } from '../i18n';
   import { playerNext, playerPrev, playerSeek, playerSetVolume } from '../ipc';
   import { back, go, nav } from '../stores/nav.svelte';
   import { player } from '../stores/player.svelte';
+  import { currentTitle } from '../stores/radio.svelte';
   import { settings } from '../stores/settings.svelte';
   import { QUEUE_TOGGLE_ID } from '../queue';
   import { queuePanel, toggleQueuePanel } from '../stores/queue.svelte';
   import Cover from './Cover.svelte';
   import Heart from './Heart.svelte';
   import Icon from './Icon.svelte';
+  import LivePill from './LivePill.svelte';
   import PlayModes from './PlayModes.svelte';
   import Slider from './Slider.svelte';
 
@@ -21,6 +23,9 @@
   const track = $derived(player.track);
   const idle = $derived(player.status === 'idle' || !track);
   const duration = $derived(player.durationMs || track?.durationMs || 0);
+  /** A station: no seek bar, no duration, no next or previous. */
+  const live = $derived(!idle && isLive(track));
+  const lines = $derived(track ? liveLines(track, live ? currentTitle(track) : null) : null);
 
   /** How the track plays; a Navidrome transcode names the file behind it in the tooltip. */
   const quality = $derived(track ? qualityLabel(track, settings.navidromeQuality) : '');
@@ -64,22 +69,27 @@
 </script>
 
 <div class="strip" class:inside={ringInside} style="--gap:{ringGap}px">
-  <div class="seek">
-    <Slider
-      value={duration ? position / duration : 0}
-      label={t('transport.seek')}
-      valueText={`${formatDuration(position)} / ${formatDuration(duration)}`}
-      step={duration ? 5000 / duration : 0.05}
-      spectrum
-      disabled={idle || !duration}
-      oninput={(v) => (seeking = v * duration)}
-      oncancel={() => (seeking = null)}
-      oncommit={(v) => {
-        seeking = null;
-        player.positionMs = v * duration;
-        playerSeek(v * duration).catch(report('seeking'));
-      }}
-    />
+  <div class="seek" class:live>
+    {#if live}
+      <span class="live-rail" aria-hidden="true"></span>
+      <span class="live-pill"><LivePill size="small" /></span>
+    {:else}
+      <Slider
+        value={duration ? position / duration : 0}
+        label={t('transport.seek')}
+        valueText={`${formatDuration(position)} / ${formatDuration(duration)}`}
+        step={duration ? 5000 / duration : 0.05}
+        spectrum
+        disabled={idle || !duration}
+        oninput={(v) => (seeking = v * duration)}
+        oncancel={() => (seeking = null)}
+        oncommit={(v) => {
+          seeking = null;
+          player.positionMs = v * duration;
+          playerSeek(v * duration).catch(report('seeking'));
+        }}
+      />
+    {/if}
   </div>
 
   <div class="now">
@@ -88,17 +98,17 @@
     {:else}
       <!-- The title below is the keyboard stop; the cover is the same target for the pointer. -->
       <button type="button" class="open cover" tabindex="-1" aria-label={openLabel} title={openLabel} onclick={toggleNowPlaying}>
-        <Cover coverId={track?.coverId ?? null} size={48} alt="" />
+        <Cover coverId={track?.coverId ?? null} size={48} alt="" initials={live && track ? stationInitials(track.title) : undefined} />
       </button>
     {/if}
     <div class="meta">
       {#if idle}
         <div class="title">{t('transport.idleTitle')}</div>
         <div class="sub">{t('transport.idleHint')}</div>
-      {:else if track}
-        <button type="button" class="open title" title={openLabel} aria-pressed={nav.view === 'nowplaying'} onclick={toggleNowPlaying}>{track.title}</button>
-        <div class="sub" title={track.artist}>
-          {player.status === 'loading' ? t('transport.loading') : track.artist}
+      {:else if track && lines}
+        <button type="button" class="open title" title={openLabel} aria-pressed={nav.view === 'nowplaying'} onclick={toggleNowPlaying}>{lines.title}</button>
+        <div class="sub" title={lines.sub}>
+          {player.status === 'loading' ? t('transport.loading') : lines.sub}
         </div>
       {/if}
     </div>
@@ -108,15 +118,15 @@
   </div>
 
   <div class="center">
-    <span class="time elapsed" class:dim={idle}>{formatDuration(position)}</span>
-    <button type="button" class="btn" disabled={idle} aria-label={t('transport.previous')} title={t('transport.previous')} onclick={() => playerPrev().catch(report('previous'))}>
+    <span class="time elapsed" class:dim={idle} title={live ? t('radio.liveHeard', { time: formatDuration(position) }) : undefined}>{formatDuration(position)}</span>
+    <button type="button" class="btn" disabled={idle || live} aria-label={t('transport.previous')} title={live ? t('radio.noSkip') : t('transport.previous')} onclick={() => playerPrev().catch(report('previous'))}>
       <Icon name="prev" size={20} />
     </button>
     <span class="ring-space" aria-hidden="true"></span>
-    <button type="button" class="btn" disabled={idle} aria-label={t('transport.next')} title={t('transport.next')} onclick={() => playerNext().catch(report('next'))}>
+    <button type="button" class="btn" disabled={idle || live} aria-label={t('transport.next')} title={live ? t('radio.noSkip') : t('transport.next')} onclick={() => playerNext().catch(report('next'))}>
       <Icon name="next" size={20} />
     </button>
-    <span class="time" class:dim={idle}>{formatDuration(duration)}</span>
+    <span class="time" class:dim={idle}>{live ? '' : formatDuration(duration)}</span>
   </div>
 
   <div class="right">
@@ -137,7 +147,7 @@
     <span class="divider" aria-hidden="true"></span>
     <!-- Dropped files ("file:" ids) are not in the library; a favorite of one would be an orphan. -->
     {#if !idle && track && !track.id.startsWith('file:')}
-      <Heart kind="track" id={track.id} label={t('favorites.toggleItem', { name: track.title })} />
+      <Heart kind={live ? 'station' : 'track'} id={track.id} label={t('favorites.toggleItem', { name: track.title })} />
     {/if}
     <button type="button" class="btn small" aria-label={muted ? t('transport.unmute') : t('transport.mute')} title={muted ? t('transport.unmute') : t('transport.mute')} onclick={toggleMute}>
       <Icon name={volumeIcon} size={18} />
@@ -178,6 +188,23 @@
     right: 0;
     top: -8.5px;
     z-index: 2;
+  }
+
+  /* A station: a steady spectral hairline in place of the seek rail, the pill sits on it. */
+  .live-rail {
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 7px;
+    height: 2px;
+    background: linear-gradient(90deg, var(--spec-1), var(--spec-2), var(--spec-3), var(--spec-4));
+    opacity: 0.55;
+  }
+
+  .live-pill {
+    position: absolute;
+    left: 20px;
+    top: -2px;
   }
 
   .now {

@@ -9,6 +9,27 @@ export function formatDuration(ms: number): string {
   return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${s}` : `${m}:${s}`;
 }
 
+/** A station: radio with no duration (the engine's `is_live`). */
+export function isLive(track: Pick<Track, 'source' | 'durationMs'> | null | undefined): boolean {
+  return track?.source === 'radio' && track.durationMs === 0;
+}
+
+/** The two lines a station shows: the stream title over the station name, or, without a
+ *  title, the station name over its region line (the track's artist). */
+export function liveLines(track: Pick<Track, 'title' | 'artist'>, streamTitle: string | null): { title: string; sub: string } {
+  const heard = streamTitle?.trim();
+  return heard ? { title: heard, sub: track.title } : { title: track.title, sub: track.artist };
+}
+
+/** "Radio Testhausen" -> "RT": up to two capitals for a station without a logo. */
+export function stationInitials(name: string): string {
+  const words = name.split(/\s+/).filter((w) => /[\p{L}\p{N}]/u.test(w));
+  return words
+    .slice(0, 2)
+    .map((w) => ([...w].find((c) => /[\p{L}\p{N}]/u.test(c)) ?? '').toUpperCase())
+    .join('');
+}
+
 export type QualityInput = Pick<Track, 'format'> &
   Partial<Pick<Track, 'source' | 'bitDepth' | 'sampleRate' | 'bitrateKbps'>>;
 

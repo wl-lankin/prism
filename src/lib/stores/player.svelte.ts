@@ -1,7 +1,8 @@
 import { t } from '../i18n';
 import { onPlayerError, onPlayerState, playerState } from '../ipc';
-import type { PlayerError, PlayerState } from '../types';
+import type { PlayerError, PlayerState, Track } from '../types';
 import { notice, notify } from './notice.svelte';
+import { findStation } from './radio.svelte';
 
 /** The player as the engine last reported it. Call `initPlayer()` once per window. */
 export const player: PlayerState = $state({
@@ -28,6 +29,20 @@ function apply(state: PlayerState) {
   if (track?.id !== player.track?.id || track?.coverId !== player.track?.coverId) {
     player.track = track;
   }
+  if (track) remember(track);
+}
+
+/** Titles of the tracks shown lately, so an error can name a track that is no longer shown. */
+const seen = new Map<string, string>();
+
+function remember(track: Track) {
+  seen.delete(track.id);
+  seen.set(track.id, track.title);
+  if (seen.size > 20) seen.delete(seen.keys().next().value as string);
+}
+
+function nameOf(trackId: string): string | undefined {
+  return (player.track?.id === trackId ? player.track.title : undefined) ?? seen.get(trackId) ?? findStation(trackId)?.name;
 }
 
 /**
@@ -50,14 +65,25 @@ export async function initPlayer(): Promise<() => void> {
   return unlisten;
 }
 
-/** What the window shows for one `player://error`. `offline`: the player paused on a Navidrome
- *  track it could not reach, so one notice says why and how to go on; a second report while
- *  that notice still shows adds nothing. `track`: nothing, as in M2 (the player moves on by
- *  itself, and a dead queue ends with the player idle). */
+/** What the window shows for one `player://error`. `offline`: the player paused on an entry
+ *  it could not reach (a Navidrome track or a station, by `source`), so one notice says why
+ *  and how to go on; a second report while that notice still shows adds nothing. `track`:
+ *  the entry could not be played and the player moved on (or ended); a notice names it. */
 export function showPlayerError(error: PlayerError): void {
-  if (error?.kind !== 'offline') return;
-  const text = t('navidrome.offlineNotice');
-  if (notice.text !== text) notify(text);
+  if (!error) return;
+  const station = error.source === 'radio';
+  if (error.kind === 'offline') {
+    const text = station
+      ? t('radio.offlineNotice', { name: nameOf(error.trackId) ?? t('radio.unnamed') })
+      : t('navidrome.offlineNotice');
+    if (notice.text !== text) notify(text);
+  } else if (error.kind === 'track') {
+    const name = nameOf(error.trackId);
+    const text = station
+      ? t('radio.stationFailed', { name: name ?? t('radio.unnamed') })
+      : t('player.trackFailed', { title: name ?? t('player.unnamed') });
+    if (notice.text !== text) notify(text);
+  }
 }
 
 /** Follows `player://error` in this window. Resolves with the cleanup. */

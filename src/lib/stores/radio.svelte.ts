@@ -187,6 +187,30 @@ export async function toggleStationFavorite(station: Station): Promise<void> {
   // The saved lists reload on the `favorites://changed` event the backend sends.
 }
 
+/** A station the app already holds (saved, recent, near you or a search result). */
+export function findStation(id: string): Station | null {
+  const lists = [radio.saved.favorites, radio.saved.recent, radio.near.stations, radio.search.stations];
+  for (const list of lists) {
+    const found = list.find((station) => station.id === id);
+    if (found) return found;
+  }
+  return null;
+}
+
+let ensured: string | null = null;
+
+/** A played station is stored, so the saved lists know it; a window that has not read them
+ *  since (the mini player) reads them once per station so its heart has a station to save. */
+export function ensureStation(id: string): void {
+  if (findStation(id)) {
+    if (ensured === id) ensured = null;
+    return;
+  }
+  if (ensured === id) return;
+  ensured = id;
+  void loadSaved();
+}
+
 /** The stream title, only while `track` is the station it belongs to. */
 export function currentTitle(track: { id: string } | null | undefined): string | null {
   const now = radio.nowPlaying;
