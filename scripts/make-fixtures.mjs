@@ -2,11 +2,13 @@
 // Run with `node scripts/make-fixtures.mjs`; needs `ffmpeg` on PATH.
 // Every file is a 1-second sine (or derived from one), so the set stays far below 300 KB.
 //
+// `node scripts/make-fixtures.mjs --radio` writes only the generated radio fixtures.
+//
 // `node scripts/make-fixtures.mjs --demo <n>` instead writes a synthetic demo library of
 // <n> tagged FLAC tracks (about 10 per album, fictional names, generated cover art, silent
 // audio) to the gitignored `demo/` folder, for trying the library views at scale.
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -58,9 +60,36 @@ const id3v23Latin1Title = (title) => {
   return Buffer.concat([header, frames]);
 };
 
+// The fake radio station's endless body: CBR MP3 frames without ID3 tags or a Xing header, so
+// the file loops cleanly when it is served back to back.
+const makeRadio = () => {
+  mkdirSync(join(out, 'radio'), { recursive: true });
+  ffmpeg([
+    '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=44100:duration=2', '-ac', '2', ...bitexact,
+    '-c:a', 'libmp3lame', '-b:a', '128k', '-id3v2_version', '0', '-write_id3v1', '0', '-write_xing', '0',
+    join(out, 'radio/tone.mp3'),
+  ]);
+};
+
+// Hand-written fixtures (Subsonic and Radio Browser JSON) live next to the generated files.
+const handWritten = new Set(['subsonic', 'radio']);
+
+if (process.argv.includes('--radio')) {
+  try {
+    makeRadio();
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+  process.exit(0);
+}
+
 try {
-  rmSync(out, { recursive: true, force: true });
+  mkdirSync(out, { recursive: true });
+  for (const entry of readdirSync(out)) {
+    if (!handWritten.has(entry)) rmSync(join(out, entry), { recursive: true, force: true });
+  }
   mkdirSync(join(out, 'cover'), { recursive: true });
+  makeRadio();
 
   const png = join(work, 'cover.png');
   ffmpeg(['-f', 'lavfi', '-i', 'color=c=0xff4d6d:s=64x64', '-frames:v', '1', png]);
