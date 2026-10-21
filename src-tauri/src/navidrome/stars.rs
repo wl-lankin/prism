@@ -25,6 +25,8 @@ pub fn target(kind: FavKind, id: &str) -> Option<StarTarget> {
         FavKind::Track => StarTarget::Song(raw),
         FavKind::Album => StarTarget::Album(raw),
         FavKind::Artist => StarTarget::Artist(raw),
+        // Stations have no server side; their ids never start with the Navidrome prefix.
+        FavKind::Station => return None,
     })
 }
 

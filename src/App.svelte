@@ -30,7 +30,7 @@
   import { lang, t, tc, type Key } from './lib/i18n';
   import { onNavGo, playerPlayFiles, playerToggle, startupNotice, traySetLabels, windowVibrancy } from './lib/ipc';
   import { initFavorites } from './lib/stores/favorites.svelte';
-  import { albumsOf, artistsOf, hasMixedSources, initLibrary, library } from './lib/stores/library.svelte';
+  import { albumsOf, artistsOf, countOf, hasMixedSources, initLibrary, library } from './lib/stores/library.svelte';
   import { failureText, initNavidrome, navidrome } from './lib/stores/navidrome.svelte';
   import { go, nav, overlays, type View } from './lib/stores/nav.svelte';
   import { notice, notify } from './lib/stores/notice.svelte';
@@ -296,7 +296,7 @@
   const shownArtists = $derived(artistsOf(nav.source));
   /** Tracks of the shown source (or of every source); null before the first load. */
   const shownTracks = $derived(
-    library.trackCounts ? (nav.source ? library.trackCounts[nav.source] : library.trackCounts.all) : null,
+    library.trackCounts ? (nav.source ? countOf(library.trackCounts, nav.source) : library.trackCounts.all) : null,
   );
   /** The views of every source mark their items with a source, once there is more than one. */
   const mixed = $derived(!nav.source && hasMixedSources());

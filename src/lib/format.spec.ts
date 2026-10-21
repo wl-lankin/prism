@@ -41,7 +41,7 @@ describe('qualityLabel', () => {
 });
 
 describe('sourceQualityLabel', () => {
-  const names: Record<Source, string> = { local: 'Local files', navidrome: 'Navidrome' };
+  const names: Record<Source, string> = { local: 'Local files', navidrome: 'Navidrome', radio: 'Radio' };
   const name = (s: Source) => names[s];
   const base = { source: 'local', format: 'flac', bitDepth: null, sampleRate: null, bitrateKbps: null } as const;
   const track = (over: Partial<Track>) => ({ ...base, ...over }) as Track;
