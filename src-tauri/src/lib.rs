@@ -245,8 +245,6 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
             })
         },
     );
-    let (flow, sink) = FlowService::spawn(Arc::clone(&library.db), player.handle());
-    let _ = flow_sink.set(sink);
     // Keychain entries are keyed by the app identifier: a dev run never sees the real password.
     let navidrome = NavidromeService::spawn(
         Arc::clone(&library.db),
@@ -254,6 +252,13 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
         Arc::new(KeyringStore::new(&app.config().identifier)) as Arc<dyn CredentialStore>,
         navidrome_emit(handle.clone()),
     );
+    // Flows deal Navidrome tracks only while the server answers.
+    let (flow, sink) = FlowService::spawn(
+        Arc::clone(&library.db),
+        player.handle(),
+        navidrome.online_flag(),
+    );
+    let _ = flow_sink.set(sink);
     let thumbs = Arc::new(thumbs::ResizeGate::new(thumbs::ResizeGate::default_limit()));
     navidrome::covers::attach(&thumbs, &navidrome, cover_cache.clone());
     app.manage(AppState {

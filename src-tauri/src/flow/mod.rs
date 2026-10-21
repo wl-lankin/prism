@@ -3,6 +3,7 @@
 pub mod deck;
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -38,6 +39,8 @@ pub enum FlowOutcome {
 struct Session {
     variant: FlowVariant,
     deck: Deck,
+    /// The deck's pool was read with Navidrome tracks (the server answered then).
+    with_navidrome: bool,
     /// The queue version before the Flow's play: older states are ignored.
     after_version: u64,
     /// The queue version an append in flight was sent at; no second refill until a state
@@ -55,10 +58,12 @@ enum Message {
 
 /// Keeps a Flow going: deals the first batch and, on its own thread, appends another batch
 /// whenever the queue nears its end, for as long as the player says the queue is still that
-/// Flow's (`PlayerState::flow`). Any other play ends the session.
+/// Flow's (`PlayerState::flow`). Any other play ends the session. Navidrome tracks are dealt
+/// only while the server answers: the flag is read at the start and at every refill.
 pub struct FlowService {
     db: Arc<Db>,
     player: PlayerHandle,
+    navidrome_online: Arc<AtomicBool>,
     messages: Sender<Message>,
     /// One start at a time, so sessions reach the service thread in the order they played.
     starting: Mutex<()>,
@@ -74,9 +79,16 @@ fn now_ms() -> i64 {
 impl FlowService {
     /// Starts the service thread. The returned sink must receive the player's events (it
     /// only forwards states to the service thread, so the engine never waits on a refill).
-    pub fn spawn(db: Arc<Db>, player: PlayerHandle) -> (Arc<FlowService>, EventSink) {
+    /// `navidrome_online` is `NavidromeService::online_flag`.
+    pub fn spawn(
+        db: Arc<Db>,
+        player: PlayerHandle,
+        navidrome_online: Arc<AtomicBool>,
+    ) -> (Arc<FlowService>, EventSink) {
         let (messages, received) = crossbeam_channel::unbounded::<Message>();
         let refill_player = player.clone();
+        let refill_db = Arc::clone(&db);
+        let refill_online = Arc::clone(&navidrome_online);
         let spawned = std::thread::Builder::new()
             .name("prism-flow".into())
             .spawn(move || {
@@ -86,7 +98,18 @@ impl FlowService {
                         Message::Start(started) => session = Some(*started),
                         Message::State(state) => {
                             if let Some(current) = session.as_mut() {
-                                if !refill(current, &state, |ids| refill_player.append(ids)) {
+                                let variant = current.variant.clone();
+                                let alive = refill(
+                                    current,
+                                    &state,
+                                    refill_online.load(Ordering::SeqCst),
+                                    |include| {
+                                        let conn = lock(&refill_db)?;
+                                        Ok(deal_pool(&conn, &variant, include)?.1)
+                                    },
+                                    |ids| refill_player.append(ids),
+                                );
+                                if !alive {
                                     session = None;
                                 }
                             }
@@ -107,6 +130,7 @@ impl FlowService {
         let service = Arc::new(FlowService {
             db,
             player,
+            navidrome_online,
             messages,
             starting: Mutex::new(()),
         });
@@ -117,14 +141,10 @@ impl FlowService {
     /// Reads the library, so call it off the UI thread.
     pub fn start(&self, variant: FlowVariant) -> anyhow::Result<FlowOutcome> {
         let _one_at_a_time = self.starting.lock().unwrap_or_else(|p| p.into_inner());
+        let with_navidrome = self.navidrome_online.load(Ordering::SeqCst);
         let (variant, candidates) = {
             let conn = lock(&self.db)?;
-            let candidates = pool(&conn, &variant)?;
-            if candidates.is_empty() && variant == FlowVariant::Favorites {
-                (FlowVariant::Library, pool(&conn, &FlowVariant::Library)?)
-            } else {
-                (variant, candidates)
-            }
+            deal_pool(&conn, &variant, with_navidrome)?
         };
         if candidates.is_empty() {
             return Ok(FlowOutcome::Empty);
@@ -138,6 +158,7 @@ impl FlowService {
         let session = Session {
             variant: variant.clone(),
             deck,
+            with_navidrome,
             after_version,
             awaiting: None,
             seen: false,
@@ -149,10 +170,13 @@ impl FlowService {
 }
 
 /// Acts on one player state for `session`, appending through `append`; false once the queue
-/// is no longer this Flow's.
+/// is no longer this Flow's. `online` is the Navidrome flag now: when it differs from the
+/// deck's, the pool is read again through `repool(online)` before dealing.
 fn refill(
     session: &mut Session,
     state: &PlayerState,
+    online: bool,
+    repool: impl FnOnce(bool) -> anyhow::Result<Vec<Candidate>>,
     append: impl FnOnce(Vec<String>) -> Result<(), String>,
 ) -> bool {
     if state.queue_version <= session.after_version {
@@ -175,7 +199,21 @@ fn refill(
     if state.queue_length.saturating_sub(state.queue_index) > FLOW_REFILL_AT {
         return true;
     }
-    let batch = session.deck.next_batch(FLOW_BATCH);
+    if online != session.with_navidrome {
+        match repool(online) {
+            Ok(candidates) => {
+                session.deck.replace_pool(candidates, now_ms());
+                session.with_navidrome = online;
+            }
+            // Kept: the next refill reads the pool again.
+            Err(err) => eprintln!("reading the Flow pool failed: {err:#}"),
+        }
+    }
+    let mut batch = session.deck.next_batch(FLOW_BATCH);
+    if !online {
+        // Only while a failed read left the online deck in place.
+        batch.retain(|id| !is_navidrome(id));
+    }
     if !batch.is_empty() && append(batch).is_ok() {
         session.awaiting = Some(state.queue_version);
     }
@@ -206,15 +244,35 @@ pub const PAD_TARGET: usize = 100;
 const CANDIDATE_SELECT: &str = "SELECT t.id, t.artist, s.last_played, t.genre
      FROM tracks t LEFT JOIN track_stats s ON s.track_id = t.id";
 
+/// A Navidrome track id (`navidrome:<song id>`).
+fn is_navidrome(id: &str) -> bool {
+    id.starts_with("navidrome:")
+}
+
 /// A candidate with the track's genre (padding needs the pool's genres).
 type Row = (Candidate, Option<String>);
 
+/// The tracks matching `filter` (an SQL condition, empty for every track) in index order,
+/// without Navidrome tracks unless `with_navidrome`, handed to `take` until it says stop.
 fn rows<P: rusqlite::Params>(
     conn: &Connection,
     filter: &str,
+    with_navidrome: bool,
     params: P,
     mut take: impl FnMut(Row) -> bool,
 ) -> anyhow::Result<()> {
+    let mut conditions: Vec<String> = Vec::new();
+    if !filter.is_empty() {
+        conditions.push(format!("({filter})"));
+    }
+    if !with_navidrome {
+        conditions.push("t.source <> 'navidrome'".into());
+    }
+    let filter = if conditions.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", conditions.join(" AND "))
+    };
     let mut stmt = conn.prepare(&format!("{CANDIDATE_SELECT} {filter} ORDER BY t.row_id"))?;
     let mut found = stmt.query(params)?;
     while let Some(row) = found.next()? {
@@ -234,31 +292,56 @@ fn placeholders(count: usize) -> String {
     vec!["?"; count].join(", ")
 }
 
+/// The pool a Flow of `variant` deals from and the variant it plays as: favorites without any
+/// fall back to the library.
+fn deal_pool(
+    conn: &Connection,
+    variant: &FlowVariant,
+    with_navidrome: bool,
+) -> anyhow::Result<(FlowVariant, Vec<Candidate>)> {
+    let candidates = pool(conn, variant, with_navidrome)?;
+    if candidates.is_empty() && *variant == FlowVariant::Favorites {
+        let library = pool(conn, &FlowVariant::Library, with_navidrome)?;
+        return Ok((FlowVariant::Library, library));
+    }
+    Ok((variant.clone(), candidates))
+}
+
 /// The tracks a Flow of `variant` deals from, each once. Favorites: favorite tracks, every
-/// track of a favorite album, and every track whose artist or album artist is a favorite
-/// artist (exact name). A favorites pool under `PAD_TARGET` is padded from the library:
-/// first tracks by the pool's artists, then tracks of the pool's genres. A genre pool is
-/// never padded.
-pub fn pool(conn: &Connection, variant: &FlowVariant) -> anyhow::Result<Vec<Candidate>> {
+/// track of a favorite album, every track whose artist or album artist is a favorite artist
+/// (exact name, a local artist's id), and every track on an album of a favorite server artist
+/// (`albums.artist_id`, a Navidrome artist's id). A favorites pool under `PAD_TARGET` is padded
+/// from the library: first tracks by the pool's artists, then tracks of the pool's genres. A
+/// genre pool is never padded. Without `with_navidrome` (the server does not answer) neither
+/// the pool nor its padding holds a Navidrome track.
+pub fn pool(
+    conn: &Connection,
+    variant: &FlowVariant,
+    with_navidrome: bool,
+) -> anyhow::Result<Vec<Candidate>> {
     let mut found: Vec<Row> = Vec::new();
     let push = |row: Row| {
         found.push(row);
         true
     };
     match variant {
-        FlowVariant::Library => rows(conn, "", [], push)?,
+        FlowVariant::Library => rows(conn, "", with_navidrome, [], push)?,
         FlowVariant::Favorites => rows(
             conn,
-            "WHERE t.id IN (SELECT item_id FROM favorites WHERE kind = 'track')
+            "t.id IN (SELECT item_id FROM favorites WHERE kind = 'track')
                 OR t.album_id IN (SELECT item_id FROM favorites WHERE kind = 'album')
                 OR t.artist IN (SELECT item_id FROM favorites WHERE kind = 'artist')
-                OR t.album_artist IN (SELECT item_id FROM favorites WHERE kind = 'artist')",
+                OR t.album_artist IN (SELECT item_id FROM favorites WHERE kind = 'artist')
+                OR t.album_id IN (SELECT a.id FROM albums a WHERE a.artist_id IN
+                    (SELECT item_id FROM favorites WHERE kind = 'artist'))",
+            with_navidrome,
             [],
             push,
         )?,
         FlowVariant::Genre { genre } => rows(
             conn,
-            "WHERE t.genre = ?1 COLLATE NOCASE",
+            "t.genre = ?1 COLLATE NOCASE",
+            with_navidrome,
             [genre.as_str()],
             push,
         )?,
@@ -266,12 +349,12 @@ pub fn pool(conn: &Connection, variant: &FlowVariant) -> anyhow::Result<Vec<Cand
     // Only favorites are padded: a genre Flow stays in its genre however small, and the
     // library already holds everything.
     if *variant == FlowVariant::Favorites && found.len() < PAD_TARGET {
-        pad(conn, &mut found)?;
+        pad(conn, &mut found, with_navidrome)?;
     }
     Ok(found.into_iter().map(|(candidate, _)| candidate).collect())
 }
 
-fn pad(conn: &Connection, found: &mut Vec<Row>) -> anyhow::Result<()> {
+fn pad(conn: &Connection, found: &mut Vec<Row>, with_navidrome: bool) -> anyhow::Result<()> {
     let mut seen: HashSet<String> = found.iter().map(|(c, _)| c.id.clone()).collect();
     let mut artists: Vec<String> = Vec::new();
     let mut genres: Vec<String> = Vec::new();
@@ -288,14 +371,11 @@ fn pad(conn: &Connection, found: &mut Vec<Row>) -> anyhow::Result<()> {
     }
     let passes = [
         (
-            format!("WHERE t.artist IN ({})", placeholders(artists.len())),
+            format!("t.artist IN ({})", placeholders(artists.len())),
             artists,
         ),
         (
-            format!(
-                "WHERE t.genre COLLATE NOCASE IN ({})",
-                placeholders(genres.len())
-            ),
+            format!("t.genre COLLATE NOCASE IN ({})", placeholders(genres.len())),
             genres,
         ),
     ];
@@ -303,12 +383,18 @@ fn pad(conn: &Connection, found: &mut Vec<Row>) -> anyhow::Result<()> {
         if found.len() >= PAD_TARGET || values.is_empty() {
             continue;
         }
-        rows(conn, filter, params_from_iter(values), |row| {
-            if seen.insert(row.0.id.clone()) {
-                found.push(row);
-            }
-            found.len() < PAD_TARGET
-        })?;
+        rows(
+            conn,
+            filter,
+            with_navidrome,
+            params_from_iter(values),
+            |row| {
+                if seen.insert(row.0.id.clone()) {
+                    found.push(row);
+                }
+                found.len() < PAD_TARGET
+            },
+        )?;
     }
     Ok(())
 }
@@ -351,6 +437,111 @@ mod tests {
         ids
     }
 
+    /// A Navidrome track (`navidrome:<id>`) on the album `navidrome:<album>`.
+    fn add_navidrome(conn: &Connection, id: &str, artist: &str, album: &str, genre: Option<&str>) {
+        conn.execute(
+            "INSERT INTO tracks (id, source, title, artist, album_artist, album, album_id,
+                duration_ms, format, genre)
+             VALUES ('navidrome:' || ?1, 'navidrome', ?1, ?2, ?2, ?3, 'navidrome:' || ?3,
+                1000, 'mp3', ?4)",
+            params![id, artist, album, genre],
+        )
+        .unwrap();
+    }
+
+    /// The Navidrome album `navidrome:<id>` by the server artist `navidrome:<artist_id>`.
+    fn navidrome_album(conn: &Connection, id: &str, artist: &str, artist_id: &str) {
+        conn.execute(
+            "INSERT INTO albums (id, source, title, artist, artist_id)
+             VALUES ('navidrome:' || ?1, 'navidrome', ?1, ?2, 'navidrome:' || ?3)",
+            params![id, artist, artist_id],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn navidrome_favorites_join_the_pool() {
+        let db = Db::open_in_memory().unwrap();
+        let conn = db.0.lock().unwrap();
+        add(&conn, "local", "Nobody", "Nobody", "nowhere", None);
+        // A favorite track.
+        navidrome_album(&conn, "al-1", "Tricky", "ar-1");
+        add_navidrome(&conn, "s1", "Tricky", "al-1", None);
+        add_navidrome(&conn, "s1b", "Tricky Kid", "al-1", None);
+        favorite(&conn, "track", "navidrome:s1");
+        // A favorite album.
+        navidrome_album(&conn, "al-2", "Portishead", "ar-2");
+        add_navidrome(&conn, "s2", "Portishead", "al-2", None);
+        add_navidrome(&conn, "s3", "Portishead", "al-2", None);
+        favorite(&conn, "album", "navidrome:al-2");
+        // A favorite server artist: every track of its albums, whatever the track artist.
+        navidrome_album(&conn, "al-3", "Massive Attack", "ar-3");
+        add_navidrome(&conn, "s4", "Massive Attack", "al-3", None);
+        add_navidrome(
+            &conn,
+            "s5",
+            "Massive Attack feat. Horace Andy",
+            "al-3",
+            None,
+        );
+        favorite(&conn, "artist", "navidrome:ar-3");
+        // Another server artist, not a favorite.
+        navidrome_album(&conn, "al-4", "Morcheeba", "ar-4");
+        add_navidrome(&conn, "s6", "Morcheeba", "al-4", None);
+        let pool = pool(&conn, &FlowVariant::Favorites, true).unwrap();
+        assert_eq!(
+            ids(&pool),
+            vec![
+                "navidrome:s1",
+                "navidrome:s2",
+                "navidrome:s3",
+                "navidrome:s4",
+                "navidrome:s5"
+            ]
+        );
+    }
+
+    #[test]
+    fn offline_navidrome_tracks_leave_the_pool() {
+        let db = Db::open_in_memory().unwrap();
+        let conn = db.0.lock().unwrap();
+        add(&conn, "l1", "A", "A", "la", Some("Rock"));
+        add(&conn, "l2", "B", "B", "lb", Some("rock"));
+        navidrome_album(&conn, "al-1", "A", "ar-1");
+        add_navidrome(&conn, "n1", "A", "al-1", Some("Rock"));
+        navidrome_album(&conn, "al-2", "C", "ar-2");
+        add_navidrome(&conn, "n2", "C", "al-2", Some("Rock"));
+        add_navidrome(&conn, "n3", "B", "al-2", Some("Rock"));
+        favorite(&conn, "track", "l1");
+        favorite(&conn, "track", "navidrome:n2");
+        favorite(&conn, "artist", "navidrome:ar-1");
+        let rock = FlowVariant::Genre {
+            genre: "ROCK".into(),
+        };
+        let everything = vec!["l1", "l2", "navidrome:n1", "navidrome:n2", "navidrome:n3"];
+        // Online: the favorites are l1, n2 and n1 (by the server artist); the genre padding
+        // adds l2 and n3.
+        for variant in [FlowVariant::Favorites, FlowVariant::Library, rock.clone()] {
+            let online = pool(&conn, &variant, true).unwrap();
+            assert_eq!(ids(&online), everything, "{variant:?} online");
+        }
+        // Offline: neither the variants nor the padding deal a Navidrome track, although the
+        // favorites name some and the padding would match others.
+        for variant in [FlowVariant::Favorites, FlowVariant::Library, rock] {
+            let offline = pool(&conn, &variant, false).unwrap();
+            assert_eq!(ids(&offline), vec!["l1", "l2"], "{variant:?} offline");
+        }
+        // Only Navidrome favorites: offline the favorites pool is empty (start falls back).
+        conn.execute("DELETE FROM favorites WHERE item_id = 'l1'", [])
+            .unwrap();
+        assert!(pool(&conn, &FlowVariant::Favorites, false)
+            .unwrap()
+            .is_empty());
+        let (variant, fallback) = deal_pool(&conn, &FlowVariant::Favorites, false).unwrap();
+        assert_eq!(variant, FlowVariant::Library);
+        assert_eq!(ids(&fallback), vec!["l1", "l2"]);
+    }
+
     #[test]
     fn favorite_album_contributes_all_tracks() {
         let db = Db::open_in_memory().unwrap();
@@ -362,7 +553,7 @@ mod tests {
         favorite(&conn, "album", "album-fav");
         // A track that is also a favorite on its own is listed once.
         favorite(&conn, "track", "fav-1");
-        let pool = pool(&conn, &FlowVariant::Favorites).unwrap();
+        let pool = pool(&conn, &FlowVariant::Favorites, true).unwrap();
         assert_eq!(ids(&pool), vec!["fav-0", "fav-1", "fav-2"]);
     }
 
@@ -397,7 +588,7 @@ mod tests {
         );
         add(&conn, "stranger", "Tricky", "Tricky", "maxinquaye", None);
         favorite(&conn, "artist", "Portishead");
-        let pool = pool(&conn, &FlowVariant::Favorites).unwrap();
+        let pool = pool(&conn, &FlowVariant::Favorites, true).unwrap();
         assert_eq!(ids(&pool), vec!["by-artist", "featured", "on-compilation"]);
     }
 
@@ -422,7 +613,7 @@ mod tests {
             [],
         )
         .unwrap();
-        let pool = pool(&conn, &FlowVariant::Favorites).unwrap();
+        let pool = pool(&conn, &FlowVariant::Favorites, true).unwrap();
         assert_eq!(pool.len(), PAD_TARGET);
         assert_eq!(pool[0].id, "t007");
         assert!(
@@ -454,6 +645,7 @@ mod tests {
             &FlowVariant::Genre {
                 genre: "Rock".into(),
             },
+            true,
         )
         .unwrap();
         assert_eq!(ids(&pool), vec!["r1", "r2", "r3"]);
@@ -480,6 +672,7 @@ mod tests {
             &FlowVariant::Genre {
                 genre: "folk".into(),
             },
+            true,
         )
         .unwrap();
         let expected: Vec<String> = (0..12).map(|i| format!("t{i:03}")).collect();
@@ -507,6 +700,7 @@ mod tests {
             Session {
                 variant: FlowVariant::Library,
                 deck: Deck::new(pool, 0, StdRng::seed_from_u64(3)),
+                with_navidrome: true,
                 after_version: 4,
                 awaiting: None,
                 seen: false,
@@ -529,14 +723,87 @@ mod tests {
             }
         }
 
-        /// Runs `refill` and returns (still the session, how many ids were appended).
+        /// Runs `refill` online and returns (still the session, how many ids were appended).
         fn step(session: &mut Session, state: &PlayerState) -> (bool, usize) {
-            let mut appended = 0;
-            let alive = refill(session, state, |ids| {
-                appended = ids.len();
+            let (alive, appended) = step_with(session, state, true, |_| {
+                panic!("the online flag did not change")
+            });
+            (alive, appended.len())
+        }
+
+        /// Runs `refill` with the online flag `online`; returns (still the session, the ids
+        /// appended).
+        fn step_with(
+            session: &mut Session,
+            state: &PlayerState,
+            online: bool,
+            repool: impl FnOnce(bool) -> anyhow::Result<Vec<Candidate>>,
+        ) -> (bool, Vec<String>) {
+            let mut appended = Vec::new();
+            let alive = refill(session, state, online, repool, |ids| {
+                appended = ids;
                 Ok(())
             });
             (alive, appended)
+        }
+
+        #[test]
+        fn refill_follows_the_online_flag() {
+            let db = Db::open_in_memory().unwrap();
+            let conn = db.0.lock().unwrap();
+            for i in 0..20 {
+                let artist = format!("Artist {}", i % 4);
+                conn.execute(
+                    "INSERT INTO tracks (id, source, title, artist, album_artist, album,
+                        album_id, duration_ms, format)
+                     VALUES (?1, ?2, ?1, ?3, ?3, 'Album', ?3, 1000, 'flac')",
+                    rusqlite::params![
+                        if i < 10 {
+                            format!("l{i}")
+                        } else {
+                            format!("navidrome:n{i}")
+                        },
+                        if i < 10 { "local" } else { "navidrome" },
+                        artist
+                    ],
+                )
+                .unwrap();
+            }
+            let navidrome =
+                |ids: &[String]| ids.iter().filter(|id| id.starts_with("navidrome:")).count();
+            let mut s = session();
+            s.deck = Deck::new(
+                pool(&conn, &FlowVariant::Library, true).unwrap(),
+                0,
+                StdRng::seed_from_u64(5),
+            );
+            let mut repooled = Vec::new();
+            let mut repool = |include: bool| {
+                repooled.push(include);
+                pool(&conn, &FlowVariant::Library, include)
+            };
+            assert_eq!(step(&mut s, &state(5, 0, 50)).1, 0);
+            // The server went away: the refill deals local tracks only.
+            let (alive, batch) = step_with(&mut s, &state(5, 45, 50), false, &mut repool);
+            assert!(alive);
+            assert_eq!(batch.len(), FLOW_BATCH);
+            assert_eq!(navidrome(&batch), 0, "{batch:?}");
+            // Still offline: the same reduced pool, read once.
+            let (_, batch) = step_with(&mut s, &state(6, 95, 100), false, &mut repool);
+            assert_eq!(navidrome(&batch), 0, "{batch:?}");
+            // Back online: Navidrome tracks are dealt again.
+            let (_, batch) = step_with(&mut s, &state(7, 145, 150), true, &mut repool);
+            assert_eq!(batch.len(), FLOW_BATCH);
+            assert!(navidrome(&batch) > 0, "{batch:?}");
+            assert_eq!(repooled, vec![false, true]);
+            // A read failure keeps the old deck and tries again at the next refill; offline it
+            // still deals no Navidrome track.
+            let (_, batch) = step_with(&mut s, &state(8, 195, 200), false, |_| {
+                Err(anyhow::anyhow!("database is locked"))
+            });
+            assert!(!batch.is_empty());
+            assert_eq!(navidrome(&batch), 0, "{batch:?}");
+            assert!(s.with_navidrome);
         }
 
         #[test]
@@ -610,7 +877,7 @@ mod tests {
         let conn = db.0.lock().unwrap();
         add(&conn, "a", "A", "A", "x", None);
         add(&conn, "b", "B", "B", "y", Some("Jazz"));
-        let pool = pool(&conn, &FlowVariant::Library).unwrap();
+        let pool = pool(&conn, &FlowVariant::Library, true).unwrap();
         assert_eq!(ids(&pool), vec!["a", "b"]);
     }
 
@@ -735,6 +1002,10 @@ mod tests {
         }
 
         fn rig(db: Arc<Db>) -> Rig {
+            rig_with(db, Arc::new(AtomicBool::new(true)))
+        }
+
+        fn rig_with(db: Arc<Db>, navidrome_online: Arc<AtomicBool>) -> Rig {
             let resolver_db = Arc::clone(&db);
             let resolver: Resolver = Arc::new(move |id: &str| -> Option<Track> {
                 let conn = lock(&resolver_db).ok()?;
@@ -764,7 +1035,7 @@ mod tests {
                 opener,
                 PlayerOptions::default(),
             );
-            let (flow, sink) = FlowService::spawn(db, player.handle());
+            let (flow, sink) = FlowService::spawn(db, player.handle(), navidrome_online);
             assert!(late.set(sink).is_ok());
             Rig {
                 flow,
@@ -866,6 +1137,74 @@ mod tests {
             let state = rig.player.state();
             assert_eq!(state.queue_length, 2, "no more appends: {state:#?}");
             assert_eq!(rig.player.queue_ids(), vec!["t000", "t001"]);
+        }
+
+        #[test]
+        fn a_flow_drops_navidrome_while_offline_and_takes_it_back() {
+            // 60 local tracks and 60 Navidrome tracks, the Navidrome ones all favorites.
+            let db = library(60);
+            {
+                let conn = db.0.lock().unwrap();
+                for i in 0..60 {
+                    conn.execute(
+                        "INSERT INTO tracks (id, source, title, artist, album_artist, album,
+                            album_id, duration_ms, format)
+                         VALUES (?1, 'navidrome', ?1, ?2, ?2, 'Album', 'navidrome:al', ?3,
+                            'mp3')",
+                        params![
+                            format!("navidrome:n{i:03}"),
+                            format!("Server {}", i % 12),
+                            TONE_MS as i64
+                        ],
+                    )
+                    .unwrap();
+                }
+                conn.execute(
+                    "INSERT INTO favorites (kind, item_id, source, added_at)
+                     VALUES ('album', 'navidrome:al', 'navidrome', 1)",
+                    [],
+                )
+                .unwrap();
+            }
+            let online = Arc::new(AtomicBool::new(false));
+            let rig = rig_with(db, Arc::clone(&online));
+            let is_navidrome = |id: &String| id.starts_with("navidrome:");
+            // Offline, the Navidrome-only favorites are empty: the library without them plays.
+            let outcome = rig.flow.start(FlowVariant::Favorites).unwrap();
+            assert_eq!(
+                outcome,
+                FlowOutcome::Started {
+                    variant: FlowVariant::Library
+                }
+            );
+            // Paused while the flag changes, so the next refill is the one it is meant for;
+            // playback then reaches the refill point on its own.
+            let pause = || {
+                wait_state(&rig.player, |s| s.status == PlayerStatus::Playing);
+                rig.player.toggle().unwrap();
+                wait_state(&rig.player, |s| s.status == PlayerStatus::Paused)
+            };
+            let paused = pause();
+            assert_eq!(paused.queue_length as usize, FLOW_BATCH, "{paused:#?}");
+            assert!(!rig.player.queue_ids().iter().any(is_navidrome));
+            // The server is back: the next refill deals Navidrome tracks again.
+            online.store(true, Ordering::SeqCst);
+            rig.player.toggle().unwrap();
+            wait_state(&rig.player, |s| s.queue_length as usize >= 2 * FLOW_BATCH);
+            let queue = rig.player.queue_ids();
+            assert!(!queue[..FLOW_BATCH].iter().any(is_navidrome));
+            assert!(queue[FLOW_BATCH..].iter().any(is_navidrome), "{queue:?}");
+            // Gone again: the batch after that is local only.
+            let paused = pause();
+            let dealt = paused.queue_length as usize;
+            assert_eq!(dealt, 2 * FLOW_BATCH, "{paused:#?}");
+            online.store(false, Ordering::SeqCst);
+            rig.player.toggle().unwrap();
+            wait_state(&rig.player, |s| s.queue_length as usize > dealt);
+            let queue = rig.player.queue_ids();
+            assert!(!queue[dealt..].iter().any(is_navidrome), "{queue:?}");
+            // The Flow is still that Flow.
+            assert_eq!(rig.player.state().flow, Some(FlowVariant::Library));
         }
 
         #[test]
