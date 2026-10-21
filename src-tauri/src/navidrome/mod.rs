@@ -2,6 +2,7 @@
 
 pub mod client;
 pub mod keychain;
+pub mod sync;
 
 #[cfg(test)]
 pub(crate) mod testserver;
