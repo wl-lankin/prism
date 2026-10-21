@@ -261,7 +261,7 @@
     <!-- A station is not a track: no queue, playlist, album or artist items. -->
     <button type="button" role="menuitem" tabindex="-1" class="item" class:fav={stationFavorite} onclick={toggleStation}>
       <Icon name="heart" size={16} filled={stationFavorite} />
-      <span class="label">{stationFavorite ? t('favorites.remove') : t('radio.menu.favorite')}</span>
+      <span class="label">{stationFavorite ? t('radio.menu.unfavorite') : t('radio.menu.favorite')}</span>
     </button>
     {#if homepage}
       <button type="button" role="menuitem" tabindex="-1" class="item" onclick={openHomepage}>

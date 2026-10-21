@@ -44,8 +44,11 @@
   const live = $derived(!idle && isLive(track));
   const lines = $derived(track ? liveLines(track, live ? currentTitle(track) : null) : null);
   // A station without a logo tints the view with a plain radio-blue tile.
-  const BLUE_TILE = `data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"><rect width="4" height="4" fill="#4da6ff"/></svg>')}`;
-  const backdrop = $derived(coverUrl(track?.coverId ?? null, 96) ?? (live ? BLUE_TILE : null));
+  function blueTile(): string {
+    const fill = getComputedStyle(document.documentElement).getPropertyValue('--src-radio').trim() || '#4da6ff';
+    return `data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"><rect width="4" height="4" fill="${fill}"/></svg>`)}`;
+  }
+  const backdrop = $derived(coverUrl(track?.coverId ?? null, 96) ?? (live ? blueTile() : null));
 
   const flow = $derived((player.flow ?? null) as FlowVariant | null);
   const heading = $derived(flow ? t('nowPlaying.flow', { variant: variantName(flow) }) : t('nowPlaying.queue'));

@@ -217,6 +217,10 @@ describe('player errors', () => {
     notice.text = null;
     showPlayerError({ trackId: 'navidrome:s1', message: 'x', kind: 'offline', source: 'navidrome' });
     expect(notice.text).toBe('Navidrome is not reachable. Press Play once it is back.');
+    // An error without `source` is a Navidrome one.
+    notice.text = null;
+    showPlayerError({ trackId: 'navidrome:s1', message: 'x', kind: 'offline' } as never);
+    expect(notice.text).toBe('Navidrome is not reachable. Press Play once it is back.');
     setLang('de');
     notice.text = null;
     showPlayerError({ trackId: ID, message: 'x', kind: 'offline', source: 'radio' });
