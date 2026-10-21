@@ -273,5 +273,5 @@ export const onYtmState = (cb: (state: YtmState) => void): Promise<UnlistenFn> =
   listen<YtmState>('ytm://state', (event) => cb(event.payload));
 export const onActivePlayer = (cb: (active: ActivePlayer) => void): Promise<UnlistenFn> =>
   listen<ActivePlayer>('transport://active', (event) => cb(event.payload));
-export const onScanProgress =(cb: (progress: ScanProgress) => void): Promise<UnlistenFn> =>
+export const onScanProgress = (cb: (progress: ScanProgress) => void): Promise<UnlistenFn> =>
   listen<ScanProgress>('library://scan-progress', (event) => cb(event.payload));

@@ -1,5 +1,5 @@
-import { onActivePlayer, onYtmState, ytmControl, ytmHide, ytmShow, ytmSignIn, ytmSignOut, ytmState } from '../ipc';
-import type { ActivePlayer, YtmRect, YtmState } from '../types';
+import { onYtmState, ytmControl, ytmHide, ytmShow, ytmSignIn, ytmSignOut, ytmState } from '../ipc';
+import type { YtmRect, YtmState } from '../types';
 
 const IDLE: YtmState = {
   status: 'idle',
@@ -17,7 +17,6 @@ const IDLE: YtmState = {
  *  per window. */
 export const ytm = $state({
   state: { ...IDLE } as YtmState,
-  active: 'prism' as ActivePlayer,
   shown: false,
   hiddenForOverlay: false,
 });
@@ -63,12 +62,12 @@ export function reportRect(rect: YtmRect): void {
 /** The view is left: the child is hidden (not destroyed) and the next rect shows it again. */
 export function hideView(): void {
   if (!ytm.shown) return;
-  const alreadyHidden = ytm.hiddenForOverlay;
+  const visible = sent !== null;
   ytm.shown = false;
   ytm.hiddenForOverlay = false;
   wanted = null;
   sent = null;
-  if (!alreadyHidden) ytmHide().catch((err) => console.error('hiding the YouTube Music view failed', err));
+  if (visible) ytmHide().catch((err) => console.error('hiding the YouTube Music view failed', err));
 }
 
 /** Called by the overlay registry when the first overlay opens and the last one closes. */
@@ -77,6 +76,8 @@ export function setOverlayOpen(open: boolean): void {
   if (open) {
     if (!ytm.shown || ytm.hiddenForOverlay) return;
     ytm.hiddenForOverlay = true;
+    // Nothing to hide before the first show went out; the pending rect waits for the close.
+    if (sent === null) return;
     sent = null;
     ytmHide().catch((err) => console.error('hiding the YouTube Music view failed', err));
   } else if (ytm.hiddenForOverlay) {
@@ -113,7 +114,7 @@ export async function signOut(): Promise<void> {
 
 let stopCurrent: (() => void) | null = null;
 
-/** Follows `ytm://state` and `transport://active` and loads the current state. An event
+/** Follows `ytm://state` and loads the current state. An event
  *  that arrives while the initial answer is in flight is newer and wins. Resolves with the
  *  cleanup; a second call replaces the first one's listeners. */
 export async function initYtm(): Promise<() => void> {
@@ -139,11 +140,6 @@ export async function initYtm(): Promise<() => void> {
     );
   } catch (err) {
     console.error('following YouTube Music failed', err);
-  }
-  try {
-    keep(await onActivePlayer((active) => (ytm.active = active)));
-  } catch (err) {
-    console.error('following the active player failed', err);
   }
   try {
     const state = await ytmState();

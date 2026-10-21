@@ -68,7 +68,7 @@ afterEach(async () => {
   for (const id of ['palette', 'menu', 'about']) closeOverlay(id);
   flushFrames();
   ytm.state = idle;
-  ytm.active = 'prism';
+  player.active = 'prism';
   vi.unstubAllGlobals();
 });
 
@@ -149,6 +149,23 @@ it('reopening after the overlay shows the rect that arrived meanwhile', () => {
   expect(invoke).toHaveBeenLastCalledWith('ytm_show', { rect: { ...rect, width: 700 } });
 });
 
+it('an overlay before the first show sends no hide and keeps the rect for the close', () => {
+  reportRect(rect);
+  openOverlay('palette');
+  flushFrames();
+  expect(ytm.hiddenForOverlay).toBe(true);
+  expect(invoke).not.toHaveBeenCalled();
+  closeOverlay('palette');
+  expect(invoke).toHaveBeenCalledTimes(1);
+  expect(invoke).toHaveBeenLastCalledWith('ytm_show', { rect });
+});
+
+it('leaving a view that was never shown sends no hide', () => {
+  reportRect(rect);
+  hideView();
+  expect(invoke).not.toHaveBeenCalled();
+});
+
 it('an overlay does nothing while the view is not shown', () => {
   openOverlay('palette');
   expect(ytm.hiddenForOverlay).toBe(false);
@@ -207,17 +224,14 @@ it('control, signIn and signOut use the pinned argument names', async () => {
 });
 
 it('active_player_mirrors_the_backend', async () => {
-  const stop = await initYtm();
   const stopPlayer = await initPlayer();
-  expect(ytm.active).toBe('prism');
+  expect(player.active).toBe('prism');
   emit('transport://active', 'ytm');
-  expect(ytm.active).toBe('ytm');
   expect(player.active).toBe('ytm');
   emit('transport://active', 'prism');
-  expect(ytm.active).toBe('prism');
   expect(player.active).toBe('prism');
-  stop();
   stopPlayer();
+  expect(count('transport://active')).toBe(0);
 });
 
 it('follows ytm://state and loads the initial state', async () => {
@@ -257,9 +271,9 @@ it('a second init replaces the first one instead of doubling the listeners', asy
 it('cleanup removes the listeners', async () => {
   const stop = await initYtm();
   expect(count('ytm://state')).toBe(1);
-  expect(count('transport://active')).toBe(1);
+  expect(count('transport://active')).toBe(0);
   stop();
   expect(listeners).toHaveLength(0);
   stop();
-  expect(unlisten).toHaveBeenCalledTimes(2);
+  expect(unlisten).toHaveBeenCalledTimes(1);
 });
