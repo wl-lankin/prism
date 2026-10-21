@@ -811,6 +811,48 @@ describe('Row play button', () => {
     unmount(app);
   });
 
+  it('leaves focus on the list when the row play button or heart is clicked', async () => {
+    const { default: AlbumView } = await import('./AlbumView.svelte');
+    const app = mount(AlbumView, { target, props: { albumId: 'a1' } });
+    await settle();
+    const list = target.querySelector<HTMLElement>('[role="listbox"]')!;
+    list.focus();
+    const row = rowAt(1);
+    hover(row);
+    for (const button of [playIn(row), row.querySelector<HTMLElement>('.heart')!]) {
+      const down = new MouseEvent('mousedown', { bubbles: true, cancelable: true });
+      button.dispatchEvent(down);
+      // A cancelled mousedown is what keeps the browser from focusing the button.
+      expect(down.defaultPrevented).toBe(true);
+      await click(button);
+      expect(document.activeElement).toBe(list);
+      expect(document.activeElement).not.toBe(button);
+    }
+    unmount(app);
+  });
+
+  it('hides the playlist row play button while a row is dragged', async () => {
+    const { default: PlaylistView } = await import('./PlaylistView.svelte');
+    const { reloadPlaylists } = await import('../stores/playlists.svelte');
+    await reloadPlaylists();
+    const app = mount(PlaylistView, { target, props: { playlistId: 1 } });
+    await settle();
+    const list = target.querySelector<HTMLElement>('[role="listbox"]')!;
+    const row = rowAt(2);
+    hover(row);
+    expect(row.querySelector('.rowplay')!.classList.contains('shown')).toBe(true);
+    const at = { bubbles: true, button: 0, pointerId: 1, clientY: 100 };
+    row.querySelector('.name')!.dispatchEvent(new PointerEvent('pointerdown', at));
+    list.dispatchEvent(new PointerEvent('pointermove', { ...at, clientY: 140 }));
+    flushSync();
+    expect(list.classList.contains('dragging')).toBe(true);
+    expect(row.querySelector('.rowplay')!.classList.contains('shown')).toBe(false);
+    list.dispatchEvent(new PointerEvent('pointercancel', at));
+    flushSync();
+    expect(row.querySelector('.rowplay')!.classList.contains('shown')).toBe(true);
+    unmount(app);
+  });
+
   it('plays the Songs list around the clicked row', async () => {
     library.trackCount = 500;
     library.version++;

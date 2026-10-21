@@ -68,6 +68,11 @@
   onfocus={() => (focused = true)}
   onblur={() => (focused = false)}
   ondblclick={(event) => event.stopPropagation()}
+  onmousedown={(event) => {
+    // In a list row (out of the tab order) a click leaves focus on the list, so a later
+    // Enter acts once, on the list's selection, not also on this heart.
+    if (tabindex === -1) event.preventDefault();
+  }}
   style="--size:{size}px"
 >
   {#key bursts}

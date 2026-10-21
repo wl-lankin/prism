@@ -10,12 +10,15 @@
    *  that plays. While the pointer is over the row (or the row is selected), the number turns
    *  into a play button; on the playing row, the equalizer turns into pause or play only while
    *  the pointer is over it, so the marker stays visible on a selected row. The button is out
-   *  of the tab order like the row's heart: the list's own Enter key plays the selected row. */
+   *  of the tab order like the row's heart: the list's own Enter key plays the selected row.
+   *  A click does not focus it either (mousedown is cancelled), so focus stays on the list and
+   *  a later Enter acts once, on the list's selection. */
   let {
     number,
     name,
     current = false,
     revealed = false,
+    suppressed = false,
     onplay,
   }: {
     number: number | string;
@@ -25,6 +28,8 @@
     current?: boolean;
     /** The row is selected. */
     revealed?: boolean;
+    /** Keeps the button hidden, for example while rows are dragged. */
+    suppressed?: boolean;
     /** Plays this row, as a double-click would. */
     onplay: () => void;
   } = $props();
@@ -32,7 +37,7 @@
   let hovered = $state(false);
 
   const playing = $derived(player.status === 'playing');
-  const shown = $derived(current ? hovered : hovered || revealed);
+  const shown = $derived(!suppressed && (current ? hovered : hovered || revealed));
   const pauses = $derived(current && playing);
   const label = $derived(
     pauses ? t('row.pause', { name }) : current ? t('row.resume', { name }) : t('row.play', { name }),
@@ -80,6 +85,7 @@
     {onclick}
     ondblclick={(event) => event.stopPropagation()}
     onpointerdown={(event) => event.stopPropagation()}
+    onmousedown={(event) => event.preventDefault()}
   >
     <Icon name={pauses ? 'pause' : 'play'} size={15} filled />
   </button>

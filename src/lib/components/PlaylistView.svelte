@@ -498,6 +498,7 @@
                     name={track.title}
                     current={playing}
                     revealed={selected === row.i}
+                    suppressed={!!drag}
                     onplay={() => play(row.i)}
                   />
                 {:else}
