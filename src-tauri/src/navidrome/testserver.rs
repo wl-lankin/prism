@@ -519,6 +519,9 @@ struct Reply {
     content_type: String,
     headers: Vec<(String, String)>,
     body: Vec<u8>,
+    /// Sends `Content-Length`; without it the body ends when the connection closes (a live
+    /// transcode).
+    length: bool,
 }
 
 impl Reply {
@@ -528,6 +531,7 @@ impl Reply {
             content_type: content_type.to_owned(),
             headers: Vec::new(),
             body,
+            length: true,
         }
     }
 
@@ -985,22 +989,34 @@ fn answer(
                 .clone()
                 .unwrap_or_else(|| "application/octet-stream".into());
             let offset = param(params, "timeOffset").and_then(|t| t.parse::<u32>().ok());
-            let (bytes, seekable) = match (lib.audio.get(id), offset) {
+            // A transcode request (`format=mp3`) of a WAV song is a live transcode, as Navidrome
+            // serves one: it honors `timeOffset`, has no length and no byte ranges. Plain bytes
+            // are served as a file even then (Navidrome plays a file directly when it already
+            // fits the request) and ignore `timeOffset`, as Navidrome's raw streams do.
+            let transcode = param(params, "format").is_some_and(|f| f != "raw");
+            let (bytes, seekable, length) = match (lib.audio.get(id), offset) {
                 (None, _) => return not_found(),
-                (Some(Audio::Bytes(bytes)), _) => (bytes.clone(), true),
-                (Some(Audio::Wav { seconds }), None) => (wav_bytes(*seconds, 0), true),
+                (Some(Audio::Bytes(bytes)), _) => (bytes.clone(), true, true),
+                (Some(Audio::Wav { seconds }), _) if transcode => (
+                    wav_bytes(*seconds, offset.unwrap_or(0).min(*seconds)),
+                    false,
+                    false,
+                ),
+                (Some(Audio::Wav { seconds }), None) => (wav_bytes(*seconds, 0), true, true),
                 // A transcoded start: a fresh stream, not byte-seekable.
                 (Some(Audio::Wav { seconds }), Some(offset)) => {
-                    (wav_bytes(*seconds, offset.min(*seconds)), false)
+                    (wav_bytes(*seconds, offset.min(*seconds)), false, true)
                 }
             };
             let ranges = seekable && !matches!(fault, Fault::NoRanges);
-            stream_reply(
+            let mut reply = stream_reply(
                 bytes,
                 &content_type,
                 if ranges { range } else { None },
                 ranges,
-            )
+            );
+            reply.length = length;
+            reply
         }
         _ => Reply::new(404, "text/plain", b"404 page not found".to_vec()),
     }
@@ -1088,12 +1104,14 @@ fn wav_bytes(seconds: u32, offset: u32) -> Vec<u8> {
 
 fn write_reply(stream: &mut TcpStream, reply: &Reply, delivery: Delivery) {
     let mut head = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n",
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nConnection: close\r\n",
         reply.status,
         reason(reply.status),
         reply.content_type,
-        reply.body.len()
     );
+    if reply.length {
+        head.push_str(&format!("Content-Length: {}\r\n", reply.body.len()));
+    }
     for (name, value) in &reply.headers {
         head.push_str(&format!("{name}: {value}\r\n"));
     }

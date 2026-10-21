@@ -15,6 +15,7 @@
 
 pub mod client;
 pub mod keychain;
+pub mod stream;
 pub mod sync;
 
 #[cfg(test)]

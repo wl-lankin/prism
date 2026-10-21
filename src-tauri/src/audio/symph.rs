@@ -14,7 +14,25 @@ use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::units::{Time, TimeBase, Timestamp};
 
+use symphonia::core::io::MediaSource;
+
+use super::http::HttpStream;
 use super::source::{describe, guarded, AudioSource, DecoderPanic, Input, StreamSpec};
+
+/// symphonia's error, with an IO error passed on as itself: symphonia's `Error` names its IO
+/// error only through the deprecated `cause`, so `is_offline` would not find an `Offline` in it.
+fn symphonia_error(err: SymphoniaError) -> anyhow::Error {
+    match err {
+        SymphoniaError::IoError(err) => anyhow::Error::new(err),
+        other => anyhow::Error::new(other),
+    }
+}
+
+/// An IO error that is a failed read, not the end of the data (which a probe of an unknown
+/// format runs into).
+fn read_failed(err: &std::io::Error) -> bool {
+    err.kind() != ErrorKind::UnexpectedEof
+}
 
 /// Consecutive undecodable packets after which a stream is considered broken.
 const MAX_CONSECUTIVE_ERRORS: u32 = 32;
@@ -49,18 +67,41 @@ impl SymphoniaSource {
 
     /// `Ok(None)` when the probe fails or no decoder exists (the caller falls back to FFmpeg);
     /// `Err` when symphonia should handle the file but it does not decode.
+    ///
+    /// A stream (`Input::Http`) is opened here over its own download; [`open_http`] keeps the
+    /// download for an FFmpeg fallback instead.
+    ///
+    /// [`open_http`]: super::source::open_http
     pub fn open_if_supported(input: &Input) -> anyhow::Result<Option<Self>> {
-        let path = match input {
-            Input::File(path) => path,
-            Input::Http(_) => bail!(
-                "{} is a stream; streams are not playable yet",
-                describe(input)
-            ),
-        };
-        let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
-        let stream = MediaSourceStream::new(Box::new(file), MediaSourceStreamOptions::default());
+        match input {
+            Input::File(path) => {
+                let file =
+                    File::open(path).with_context(|| format!("opening {}", path.display()))?;
+                let extension = path.extension().and_then(|ext| ext.to_str());
+                Self::open_media(Box::new(file), extension, &path.display().to_string())
+            }
+            Input::Http(http) => {
+                let stream = HttpStream::open(http)?;
+                Self::open_media(
+                    Box::new(stream),
+                    http.extension.as_deref(),
+                    &describe(input),
+                )
+            }
+        }
+    }
+
+    /// Opens any media source (a file, an HTTP stream). `extension` is the container hint and
+    /// `label` names the source in errors. `Ok(None)` when the probe finds nothing symphonia
+    /// decodes; a read error of the source (a stream gone offline) is an `Err`.
+    pub fn open_media(
+        source: Box<dyn MediaSource>,
+        extension: Option<&str>,
+        label: &str,
+    ) -> anyhow::Result<Option<Self>> {
+        let stream = MediaSourceStream::new(source, MediaSourceStreamOptions::default());
         let mut hint = Hint::new();
-        if let Some(extension) = path.extension().and_then(|ext| ext.to_str()) {
+        if let Some(extension) = extension {
             hint.with_extension(extension);
         }
 
@@ -72,8 +113,13 @@ impl SymphoniaSource {
                 MetadataOptions::default(),
             ))
         })?;
-        let Ok(reader) = probed else {
-            return Ok(None);
+        let reader = match probed {
+            Ok(reader) => reader,
+            // The source failed (not just "no format found"): FFmpeg would read the same bytes.
+            Err(SymphoniaError::IoError(err)) if read_failed(&err) => {
+                return Err(anyhow::Error::new(err).context(format!("reading {label}")));
+            }
+            Err(_) => return Ok(None),
         };
         let Some(track) = reader.default_track(TrackType::Audio) else {
             return Ok(None);
@@ -88,7 +134,7 @@ impl SymphoniaSource {
         let decoder = guarded("symphonia decoder", || {
             Ok(codecs.make_audio_decoder(params, &AudioDecoderOptions::default())?)
         })
-        .with_context(|| format!("creating a decoder for {}", path.display()))?;
+        .with_context(|| format!("creating a decoder for {label}"))?;
 
         // symphonia does not read MP4 edit lists yet, so AAC keeps its encoder delay. Drop the
         // 1024 frames that ffmpeg and fdk-aac encoders prime with.
@@ -130,9 +176,9 @@ impl SymphoniaSource {
         let mut first = Vec::new();
         let frames = source
             .decode_next(&mut first)
-            .with_context(|| format!("decoding {}", path.display()))?;
+            .with_context(|| format!("decoding {label}"))?;
         if frames == 0 {
-            bail!("{} contains no decodable audio", path.display());
+            bail!("{label} contains no decodable audio");
         }
         source.pending = first;
         Ok(Some(source))
@@ -172,7 +218,7 @@ impl SymphoniaSource {
                     }
                     continue;
                 }
-                Err(err) => return Err(err.into()),
+                Err(err) => return Err(symphonia_error(err)),
             };
             if packet.track_id != self.track_id {
                 continue;
@@ -190,7 +236,7 @@ impl SymphoniaSource {
                     self.decoder.reset();
                     continue;
                 }
-                Err(err) => return Err(err.into()),
+                Err(err) => return Err(symphonia_error(err)),
             };
             errors = 0;
             let frames = buffer.frames();
@@ -285,7 +331,7 @@ impl AudioSource for SymphoniaSource {
                 self.ended = true;
                 Ok(())
             }
-            Err(err) => Err(anyhow!(err).context(format!("seeking to {ms} ms"))),
+            Err(err) => Err(symphonia_error(err).context(format!("seeking to {ms} ms"))),
         }
     }
 

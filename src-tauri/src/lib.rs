@@ -27,6 +27,7 @@ use library::scan::lock;
 use library::{query, tauri_emitter, watch, Library, LibraryOptions};
 use media_controls::MediaBridge;
 use navidrome::keychain::{CredentialStore, KeyringStore};
+use navidrome::stream::navidrome_opener;
 use navidrome::{NavidromeEmit, NavidromeEvent, NavidromeService};
 use player::{
     default_opener, fan_out, tauri_sink, with_dropped, DroppedFiles, EventSink, Player,
@@ -188,6 +189,14 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
     // the sink is plugged in once both exist.
     let flow_sink: Arc<OnceLock<EventSink>> = Arc::default();
     let to_flow = Arc::clone(&flow_sink);
+    // Keychain entries are keyed by the app identifier: a dev run never sees the real password.
+    // Created before the player, whose opener streams Navidrome tracks through it.
+    let navidrome = NavidromeService::spawn(
+        Arc::clone(&library.db),
+        Arc::clone(&settings),
+        Arc::new(KeyringStore::new(&app.config().identifier)) as Arc<dyn CredentialStore>,
+        navidrome_emit(handle.clone()),
+    );
     let player = Player::spawn_with_options(
         Arc::new(CpalOutputFactory),
         with_dropped(Arc::clone(&dropped), library_resolver(&library)),
@@ -202,7 +211,12 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
                 }
             }),
         ]),
-        default_opener(),
+        navidrome_opener(
+            Arc::clone(&navidrome),
+            Arc::clone(&settings),
+            audio::http::spill_dir(&dirs.cache),
+            default_opener(),
+        ),
         PlayerOptions {
             volume: initial.volume,
             device: initial.output_device,
@@ -247,13 +261,6 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
     );
     let (flow, sink) = FlowService::spawn(Arc::clone(&library.db), player.handle());
     let _ = flow_sink.set(sink);
-    // Keychain entries are keyed by the app identifier: a dev run never sees the real password.
-    let navidrome = NavidromeService::spawn(
-        Arc::clone(&library.db),
-        Arc::clone(&settings),
-        Arc::new(KeyringStore::new(&app.config().identifier)) as Arc<dyn CredentialStore>,
-        navidrome_emit(handle.clone()),
-    );
     app.manage(AppState {
         navidrome,
         lookup,
