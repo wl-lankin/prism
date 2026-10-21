@@ -146,7 +146,7 @@
       <div class="empty">
         <span class="emblem" aria-hidden="true"><Icon name="radio" size={26} /></span>
         <p class="lead">{radio.near.error ? t('radio.error.unreachable') : t('radio.near.empty')}</p>
-        <button type="button" class="btn ghost" onclick={() => go('settings')}>{t('sourceEmpty.openSettings')}</button>
+        <button type="button" class="btn ghost" onclick={() => go('settings', 'radio')}>{t('sourceEmpty.openSettings')}</button>
       </div>
     {/if}
   {:else if tab === 'search'}

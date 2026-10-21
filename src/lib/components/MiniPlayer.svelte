@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { isLive, liveLines, sourceQualityLabel, stationInitials, streamedFrom } from '../format';
+  import { isLive, liveLines, sourceQualityLabel, streamedFrom } from '../format';
   import { holdToOpen } from '../flow';
   import { t } from '../i18n';
   import {
@@ -32,6 +32,7 @@
   import LivePill from './LivePill.svelte';
   import PlayModes from './PlayModes.svelte';
   import Slider from './Slider.svelte';
+  import StationTile from './StationTile.svelte';
 
   /** The mini player, the whole page of the `mini` window. A card with the Flow ring hanging
    *  half out of its left edge, the ring's light washing into the card. The window never
@@ -279,7 +280,11 @@
           title={t('mini.openNowPlaying')}
           onclick={openNowPlaying}
         >
-          <Cover coverId={track.coverId} size={COVER} alt="" initials={live ? stationInitials(track.title) : undefined} />
+          {#if live}
+            <StationTile name={track.title} coverId={track.coverId} size={COVER} radius="var(--radius-s)" />
+          {:else}
+            <Cover coverId={track.coverId} size={COVER} alt="" />
+          {/if}
         </button>
       {/if}
       <div class="meta" class:noticed={notice.text}>

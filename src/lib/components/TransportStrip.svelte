@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { formatDuration, isLive, liveLines, qualityLabel, stationInitials, streamedFrom } from '../format';
+  import { formatDuration, isLive, liveLines, qualityLabel, streamedFrom } from '../format';
   import { t } from '../i18n';
   import { playerNext, playerPrev, playerSeek, playerSetVolume } from '../ipc';
   import { back, go, nav } from '../stores/nav.svelte';
@@ -14,6 +14,7 @@
   import LivePill from './LivePill.svelte';
   import PlayModes from './PlayModes.svelte';
   import Slider from './Slider.svelte';
+  import StationTile from './StationTile.svelte';
 
   /** The bottom strip of the content card. The centre keeps `ringGap` px free for the Flow
    *  ring, which the window places over it. `ringInside` is set when the ring sits centred
@@ -98,7 +99,11 @@
     {:else}
       <!-- The title below is the keyboard stop; the cover is the same target for the pointer. -->
       <button type="button" class="open cover" tabindex="-1" aria-label={openLabel} title={openLabel} onclick={toggleNowPlaying}>
-        <Cover coverId={track?.coverId ?? null} size={48} alt="" initials={live && track ? stationInitials(track.title) : undefined} />
+        {#if live && track}
+          <StationTile name={track.title} coverId={track.coverId} size={48} radius="var(--radius-s)" />
+        {:else}
+          <Cover coverId={track?.coverId ?? null} size={48} alt="" />
+        {/if}
       </button>
     {/if}
     <div class="meta">

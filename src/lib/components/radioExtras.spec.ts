@@ -183,7 +183,9 @@ it('favorites_lists_stations_and_radio_chip', async () => {
   await settle();
   expect(chip('Radio')).toBeTruthy();
   expect(target.querySelector('#fav-stations h2')?.textContent).toContain('Stations');
-  expect([...target.querySelectorAll('#fav-stations .station .name')].map((x) => x.textContent)).toEqual([
+  // The radio view's station rows, all of them in the DOM (no virtualization this short).
+  expect(target.querySelector('#fav-stations [role="listbox"]')?.getAttribute('style') ?? '').not.toContain('height');
+  expect([...target.querySelectorAll('#fav-stations .row .name')].map((x) => x.textContent)).toEqual([
     'Test FM 1',
     'Test FM 2',
   ]);
@@ -191,25 +193,28 @@ it('favorites_lists_stations_and_radio_chip', async () => {
   // The Radio chip leaves only the stations; another source hides them.
   chip('Radio')!.click();
   await settle();
-  expect(target.querySelectorAll('#fav-stations .station')).toHaveLength(2);
+  expect(target.querySelectorAll('#fav-stations .row')).toHaveLength(2);
   chip('Local files')!.click();
   await settle();
   expect(target.querySelector('#fav-stations')).toBeNull();
 
-  // A station un-hearted here leaves the list at once.
+  // A station un-hearted here leaves the list at once, through the shared heart.
   chip('All')!.click();
   await settle();
-  target.querySelector<HTMLButtonElement>('#fav-stations .station .heart')!.click();
+  const heart = target.querySelector<HTMLButtonElement>('#fav-stations .row .heart')!;
+  expect(heart.getAttribute('aria-pressed')).toBe('true');
+  expect(heart.getAttribute('aria-label')).toBe('Favorite: Test FM 1');
+  heart.click();
   await settle();
   expect(invoke).toHaveBeenCalledWith('radio_favorite', { station: station(1), on: false });
-  expect(target.querySelectorAll('#fav-stations .station')).toHaveLength(1);
+  expect(target.querySelectorAll('#fav-stations .row')).toHaveLength(1);
 
   // A row plays its station and a failure names it.
   playResult = 'The station is not reachable';
-  target.querySelector<HTMLButtonElement>('#fav-stations .station .open')!.click();
+  target.querySelector<HTMLButtonElement>('#fav-stations .row [aria-label="Play Test FM 2"]')!.click();
   await settle();
   expect(invoke).toHaveBeenCalledWith('radio_play', { station: station(2) });
-  expect(notice.text).toBe('Could not play Test FM 2: The station is not reachable');
+  expect(notice.text).toBe('Test FM 2 could not be played: The station is not reachable');
   unmount(view);
 });
 
@@ -223,13 +228,21 @@ it('home_row_only_with_station_favorites', async () => {
   const row = mount(HomeStations, { target });
   await settle();
   expect(target.querySelector('h2')?.textContent).toBe('Your stations');
-  const tiles = [...target.querySelectorAll<HTMLButtonElement>('.tile')];
+  const tiles = [...target.querySelectorAll<HTMLButtonElement>('button.station')];
   expect(tiles).toHaveLength(12);
   expect(tiles[0].textContent).toContain('Test FM 1');
+  // The shared station tile: no logo, so the initials in radio blue.
+  expect(tiles[0].querySelector('.tile .initials')?.textContent).toBe('TF');
 
   tiles[2].click();
   await settle();
   expect(invoke).toHaveBeenCalledWith('radio_play', { station: station(3) });
+
+  // A failure names the station, with the radio view's notice.
+  playResult = 'This station is not sending audio';
+  tiles[3].click();
+  await settle();
+  expect(notice.text).toBe('Test FM 4 could not be played: This station is not sending audio');
 
   // Taking every heart off removes the row.
   favorites.stations.clear();
@@ -293,6 +306,23 @@ it('palette_enter_plays_a_station', async () => {
   await settle();
   expect(invoke).toHaveBeenCalledWith('radio_play', { station: saved.favorites[0] });
   expect(state.open).toBe(false);
+  unmount(app);
+});
+
+it('palette_station_failure_names_the_station', async () => {
+  vi.useFakeTimers();
+  playResult = 'The station is not reachable';
+  saved = { favorites: [station(1, 'zz Radio')], recent: [] };
+  await loadSaved();
+  const { app, input } = palette();
+  type(input, 'zz');
+  vi.advanceTimersByTime(120);
+  await settle();
+  // The row shows the shared tile.
+  expect(target.querySelector('[aria-selected="true"] .tile .initials')?.textContent).toBe('ZR');
+  key(input, 'Enter');
+  await settle();
+  expect(notice.text).toBe('zz Radio could not be played: The station is not reachable');
   unmount(app);
 });
 

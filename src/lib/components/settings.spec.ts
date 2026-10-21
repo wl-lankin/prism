@@ -870,6 +870,44 @@ describe('Radio settings (M4 Task 11)', () => {
     await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('radio_near', { refresh: false }));
   });
 
+  it('radio_deep_link_scrolls_the_section_into_view', async () => {
+    const { nav } = await import('../stores/nav.svelte');
+    const scroll = Element.prototype.scrollIntoView as ReturnType<typeof vi.fn>;
+    const media = globalThis.matchMedia;
+    try {
+      Object.assign(nav, { view: 'settings', param: 'radio' });
+      mountSettings();
+      await vi.waitFor(() => expect(scroll.mock.contexts).toContain(radioSection()));
+      expect(radioSection().id).toBe('settings-section-radio');
+      expect(scroll.mock.calls.at(-1)?.[0]).toEqual({ block: 'start', behavior: 'smooth' });
+      for (const app of mounted.splice(0)) unmount(app);
+
+      // Reduced motion jumps instead of gliding.
+      globalThis.matchMedia = ((query: string) => ({ matches: query.includes('reduce') })) as typeof matchMedia;
+      scroll.mockClear();
+      mountSettings();
+      await vi.waitFor(() => expect(scroll.mock.contexts).toContain(radioSection()));
+      expect(scroll.mock.calls.at(-1)?.[0]).toEqual({ block: 'start', behavior: 'auto' });
+    } finally {
+      globalThis.matchMedia = media;
+      Object.assign(nav, { view: 'home', param: undefined });
+    }
+  });
+
+  it('settings_without_a_section_do_not_scroll', async () => {
+    const { nav } = await import('../stores/nav.svelte');
+    const scroll = Element.prototype.scrollIntoView as ReturnType<typeof vi.fn>;
+    Object.assign(nav, { view: 'settings', param: undefined });
+    try {
+      mountSettings();
+      await tick();
+      await tick();
+      expect(scroll.mock.contexts).not.toContain(radioSection());
+    } finally {
+      Object.assign(nav, { view: 'home', param: undefined });
+    }
+  });
+
   it('region_resets_when_country_changes', async () => {
     settings.radioLocation = { mode: 'manual', countryCode: 'DE', region: 'Testland' };
     mountSettings();

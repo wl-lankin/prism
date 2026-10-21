@@ -66,7 +66,8 @@ vi.mock('@tauri-apps/api/core', () => ({
   invoke: (cmd: string, args?: Record<string, unknown>) => invoke(cmd, args),
 }));
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(async () => () => {}) }));
-vi.mock('@tauri-apps/plugin-opener', () => ({ openUrl: vi.fn(async () => {}) }));
+const openUrl = vi.fn(async (_url: string) => {});
+vi.mock('@tauri-apps/plugin-opener', () => ({ openUrl: (url: string) => openUrl(url) }));
 
 globalThis.ResizeObserver ??= class {
   observe() {}
@@ -87,6 +88,7 @@ let target: HTMLElement;
 beforeEach(() => {
   setLang('en');
   invoke.mockClear();
+  openUrl.mockClear();
   notice.text = null;
   radio.nowPlaying = null;
   radio.saved = { favorites: [], recent: [] };
@@ -135,7 +137,25 @@ describe('transport strip in live mode', () => {
     await settle();
     expect(target.querySelector('.pill')).toBeNull();
     expect(target.querySelector('[role="slider"][aria-label="Position"]')).not.toBeNull();
+    // A track keeps its cover; the station tile is only for stations.
+    expect(target.querySelector('.now div.cover')).not.toBeNull();
+    expect(target.querySelector('.tile')).toBeNull();
     unmount(app);
+  });
+
+  it('a_station_shows_the_station_tile', async () => {
+    const app = mount(TransportStrip, { target });
+    await settle();
+    expect(target.querySelector('.now .tile .initials')?.textContent).toBe('RT');
+    expect(target.querySelector('.now div.cover')).toBeNull();
+    unmount(app);
+
+    // With a logo the tile loads it from the cover cache.
+    Object.assign(player, { track: live({ coverId: 'rb-0123456789abcdef0123' }) });
+    const withLogo = mount(TransportStrip, { target });
+    await settle();
+    expect(target.querySelector('.now .tile img')?.getAttribute('src')).toContain('/cover/rb-0123456789abcdef0123/96');
+    unmount(withLogo);
   });
 
   it('live_disables_next_and_prev', async () => {
@@ -186,6 +206,42 @@ describe('transport strip in live mode', () => {
   });
 });
 
+describe('station tile on the other surfaces', () => {
+  async function frames() {
+    for (let i = 0; i < 4; i++) {
+      await new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
+      await settle();
+    }
+  }
+
+  it('now_playing_shows_the_station_tile', async () => {
+    const { default: NowPlaying } = await import('./NowPlaying.svelte');
+    const app = mount(NowPlaying, { target });
+    await frames();
+    expect(target.querySelector('.art .tile.fluid .initials')?.textContent).toBe('RT');
+    expect(target.querySelector('.art .cover')).toBeNull();
+    await vi.waitFor(async () => {
+      await frames();
+      expect(target.querySelector('.qrow .tile .initials')?.textContent).toBe('RT');
+    });
+    unmount(app);
+  });
+
+  it('queue_panel_shows_the_station_tile', async () => {
+    const { default: QueuePanel } = await import('./QueuePanel.svelte');
+    const { queuePanel } = await import('../stores/queue.svelte');
+    queuePanel.open = true;
+    const app = mount(QueuePanel, { target });
+    await vi.waitFor(async () => {
+      await frames();
+      expect(target.querySelector('.row .tile .initials')?.textContent).toBe('RT');
+    });
+    expect(target.querySelector('.row .cover')).toBeNull();
+    unmount(app);
+    queuePanel.open = false;
+  });
+});
+
 describe('station menu', () => {
   it('station_menu_has_no_queue_items', async () => {
     const onclose = vi.fn();
@@ -194,6 +250,22 @@ describe('station menu', () => {
     const labels = [...target.querySelectorAll('[role="menuitem"] .label')].map((el) => el.textContent?.trim());
     expect(labels).toEqual(['Save station', 'Open homepage']);
     expect(target.querySelector('.has-sub')).toBeNull();
+    unmount(app);
+  });
+
+  it('homepage_opens_through_the_backend', async () => {
+    const onclose = vi.fn();
+    const app = mount(TrackMenu, { target, props: { trackIds: [ID], x: 10, y: 10, station: station(), onclose } });
+    flushSync();
+    const item = [...target.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].find(
+      (el) => el.textContent?.trim() === 'Open homepage',
+    )!;
+    item.click();
+    await settle();
+    expect(onclose).toHaveBeenCalled();
+    expect(invoke).toHaveBeenCalledWith('radio_open_homepage', { stationId: ID });
+    // The webview never opens a station's link itself.
+    expect(openUrl).not.toHaveBeenCalled();
     unmount(app);
   });
 

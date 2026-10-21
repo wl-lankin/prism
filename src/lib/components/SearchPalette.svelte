@@ -6,13 +6,12 @@
   import { playAlbum } from '../play';
   import { hasMixedSources } from '../stores/library.svelte';
   import { go } from '../stores/nav.svelte';
-  import { findStations, radio } from '../stores/radio.svelte';
+  import { countryName, findStations, radio, startStation } from '../stores/radio.svelte';
   import type { Album, Artist, SearchResult, Station, Track } from '../types';
   import Cover from './Cover.svelte';
   import Icon from './Icon.svelte';
   import SourceBadge from './SourceBadge.svelte';
-  import StationArt from './StationArt.svelte';
-  import { playStationNotified, stationSub } from './stationUi';
+  import StationTile from './StationTile.svelte';
 
   /** Ctrl+K / Cmd+K: search the whole library. Results come in four groups (albums, artists,
    *  songs, stations); arrows move through all of them, Enter opens an album or artist, plays a
@@ -158,11 +157,17 @@
     open = false;
   }
 
+  /** A station's quiet second line: where it is from, else its first genre. */
+  function stationSub(station: Station): string {
+    const place = [station.region, station.countryCode ? countryName(station.countryCode) : null].filter(Boolean).join(', ');
+    return place || station.tags[0] || '';
+  }
+
   function choose(item: Item) {
     close();
     if (item.kind === 'album') go('album', item.album.id);
     else if (item.kind === 'artist') go('artist', item.artist.name);
-    else if (item.kind === 'station') void playStationNotified(item.station);
+    else if (item.kind === 'station') void startStation(item.station);
     else void playAlbum(item.track.albumId, { trackId: item.track.id });
   }
 
@@ -279,7 +284,7 @@
                   </span>
                 {:else if item.kind === 'station'}
                   <span class="art">
-                    <StationArt station={item.station} size={40} radius="6px" />
+                    <StationTile name={item.station.name} coverId={item.station.coverId} size={40} radius="6px" />
                   </span>
                   <span class="text">
                     <span class="main">{item.station.name}</span>

@@ -230,6 +230,7 @@ it('near_empty_state_explains_and_opens_settings', async () => {
   expect(target.querySelector('.empty .lead')?.textContent).toContain('Settings > Radio');
   click(target.querySelector('.empty button')!);
   expect(nav.view).toBe('settings');
+  expect(nav.param).toBe('radio');
   unmount(app);
 });
 
@@ -427,7 +428,8 @@ describe('station list', () => {
 
     rows()[0].dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 40, clientY: 40 }));
     await settle();
-    expect(menuItems()).toEqual(['Play', 'Add to favorites', 'Open homepage']);
+    // The same wording as the player's station menu.
+    expect(menuItems()).toEqual(['Play', 'Save station', 'Open homepage']);
     click([...document.querySelectorAll<HTMLElement>('[role="menuitem"]')][2]);
     expect(calls('radio_open_homepage')).toEqual([['radio_open_homepage', { stationId: station(1).id }]]);
     await settle();
@@ -436,7 +438,7 @@ describe('station list', () => {
     for (const index of [1, 2, 3]) {
       rows()[index].dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 40, clientY: 40 }));
       await settle();
-      expect(menuItems()).toEqual(['Play', 'Add to favorites']);
+      expect(menuItems()).toEqual(['Play', 'Save station']);
       document.querySelector('[role="menu"]')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
       await settle();
     }

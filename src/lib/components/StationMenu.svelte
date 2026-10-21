@@ -146,7 +146,7 @@
   </button>
   <button type="button" role="menuitem" tabindex="-1" class="item" class:fav={favorite} onclick={toggle}>
     <Icon name="heart" size={16} filled={favorite} />
-    <span class="label">{favorite ? t('favorites.remove') : t('favorites.add')}</span>
+    <span class="label">{favorite ? t('radio.menu.unfavorite') : t('radio.menu.favorite')}</span>
   </button>
   {#if homepage}
     <div class="sep" role="separator"></div>
