@@ -138,7 +138,14 @@ pub struct NavidromeSource {
     /// Frames still to drop before audio is handed out (the fraction of a second a `timeOffset`
     /// reopen cannot express).
     skip: usize,
+    /// A seek went to (or past) the end of a transcode: reads report the end until the next
+    /// seek. Requesting a `timeOffset` there fails, which must not read as a broken track.
+    ended: bool,
 }
+
+/// Subsonic durations are whole seconds, so a stream can end up to a second before the
+/// library's duration says.
+const DURATION_SLACK_MS: u64 = 1_000;
 
 impl NavidromeSource {
     /// Requests the stream and opens a decoder on it (symphonia, or FFmpeg through stdin at the
@@ -158,6 +165,7 @@ impl NavidromeSource {
             duration_ms,
             base_ms: 0,
             skip: 0,
+            ended: false,
         })
     }
 
@@ -213,11 +221,31 @@ impl NavidromeSource {
     }
 
     /// Requests the transcode again from `ms / 1000` s and drops the remaining `ms % 1000` worth
-    /// of frames.
+    /// of frames. At or past the known end, the track just ends: nothing is requested, and a
+    /// request in the last [`DURATION_SLACK_MS`] that finds no audio (other than offline) ends
+    /// it too.
     fn reopen_at_offset(&mut self, ms: u64) -> anyhow::Result<()> {
+        if self.duration_ms.is_some_and(|duration| ms >= duration) {
+            self.ended = true;
+            return Ok(());
+        }
         let seconds = u32::try_from(ms / 1000).unwrap_or(u32::MAX);
         let input = self.request.input((seconds > 0).then_some(seconds));
-        let opened = open_http(&input, self.device)?;
+        let opened = match open_http(&input, self.device) {
+            Ok(opened) => opened,
+            // Deliberate slack: in the last second by the library's whole-second duration, a
+            // request that finds no audio is the end of the track, not a broken track.
+            Err(err)
+                if !is_offline(&err)
+                    && self
+                        .duration_ms
+                        .is_some_and(|duration| ms + DURATION_SLACK_MS >= duration) =>
+            {
+                self.ended = true;
+                return Ok(());
+            }
+            Err(err) => return Err(err),
+        };
         if opened.source.spec() != self.spec {
             bail!(
                 "{} changed its format after seeking ({:?} to {:?})",
@@ -242,6 +270,9 @@ impl AudioSource for NavidromeSource {
     }
 
     fn read(&mut self, out: &mut Vec<f32>) -> anyhow::Result<usize> {
+        if self.ended {
+            return Ok(0);
+        }
         let channels = usize::from(self.spec.channels);
         loop {
             let start = out.len();
@@ -259,6 +290,7 @@ impl AudioSource for NavidromeSource {
     }
 
     fn seek(&mut self, ms: u64) -> anyhow::Result<()> {
+        self.ended = false;
         match self.seek_by() {
             SeekBy::Range if ms >= self.base_ms => {
                 self.skip = 0;

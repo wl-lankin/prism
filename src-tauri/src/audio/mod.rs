@@ -390,6 +390,16 @@ impl Playback {
     /// Replaces the current source immediately (drops anything queued in the sink and the
     /// pre-opened next source) and starts decoding it ahead.
     pub fn set_source(&mut self, source: Box<dyn AudioSource>) -> anyhow::Result<()> {
+        self.set_source_at(source, 0)
+    }
+
+    /// Like [`set_source`](Self::set_source) for a source already moved to `start_ms` (a
+    /// track resumed where it stopped): the position counts from there.
+    pub fn set_source_at(
+        &mut self,
+        source: Box<dyn AudioSource>,
+        start_ms: u64,
+    ) -> anyhow::Result<()> {
         self.resampler = Some(Resampler::new(source.spec(), self.sink.spec())?);
         self.current = Some(ReadAhead::spawn(source, self.read_ahead_ms));
         self.next = None;
@@ -398,7 +408,7 @@ impl Playback {
         self.next_fade_ms = 0;
         self.deferred_error = None;
         self.clear_buffers();
-        self.base_ms = 0;
+        self.base_ms = start_ms;
         Ok(())
     }
 
@@ -495,6 +505,18 @@ impl Playback {
     /// left, so this is the moment to queue the next source for a gapless hand-over.
     pub fn current_exhausted(&self) -> bool {
         self.current.as_ref().is_some_and(ReadAhead::exhausted)
+    }
+
+    /// The current source's decoder stopped on an error that a later `pump` reports (or a
+    /// source error is waiting from a hand-over): nothing should be queued behind it.
+    pub fn current_failed(&self) -> bool {
+        self.deferred_error.is_some() || self.current.as_ref().is_some_and(ReadAhead::failed)
+    }
+
+    /// A source error from a hand-over waits for the next `pump`: the source that took over
+    /// has not been heard and never will be.
+    pub fn has_deferred_error(&self) -> bool {
+        self.deferred_error.is_some()
     }
 
     pub fn set_volume(&mut self, volume: f32) {
