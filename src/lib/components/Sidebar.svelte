@@ -11,6 +11,8 @@
     icon?: IconName;
     dot?: string;
     view?: View;
+    /** The view's parameter, e.g. the radio tab. */
+    param?: string;
     /** Views that keep this item highlighted (while no source is chosen). */
     match?: View[];
     /** A source entry: opens the source's albums, and is lit wherever that source is. */
@@ -34,7 +36,7 @@
   const sources: Item[] = [
     { label: 'source.local', dot: 'var(--src-local)', view: 'albums', source: 'local' },
     { label: 'source.navidrome', dot: 'var(--src-navidrome)', view: 'albums', source: 'navidrome' },
-    { label: 'source.radio', dot: 'var(--src-radio)', soon: true },
+    { label: 'source.radio', dot: 'var(--src-radio)', view: 'radio', param: 'near', match: ['radio'] },
   ];
 
   /** The Navidrome dot: hollow while the server is away or the sync needs the user, faint
@@ -77,7 +79,7 @@
       aria-current={active ? 'page' : undefined}
       aria-disabled={item.soon ? 'true' : undefined}
       aria-label={linked?.label ? t(linked.label) : undefined}
-      onclick={() => item.view && !item.soon && go(item.view, undefined, item.source)}
+      onclick={() => item.view && !item.soon && go(item.view, item.param, item.source)}
       onpointerenter={item.soon ? (event) => showPill(event, true) : undefined}
       onpointerleave={item.soon ? hidePill : undefined}
       onfocus={item.soon

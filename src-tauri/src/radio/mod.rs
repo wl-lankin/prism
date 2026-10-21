@@ -342,9 +342,39 @@ pub struct RadioService {
     regions: Mutex<HashMap<String, Vec<Region>>>,
     tags: Mutex<Option<Vec<TagCount>>>,
     current: Mutex<Option<NowPlaying>>,
+    /// Homepages of the stations the UI was handed (near and search), so "Open homepage"
+    /// works for a station that is not stored.
+    homepages: Mutex<Homepages>,
     mirrors_checked: AtomicBool,
     /// True once [`RadioService::shutdown`] ran; wakes the refresh thread.
     stop: Arc<(Mutex<bool>, Condvar)>,
+}
+
+/// How many homepages the service remembers.
+const HOMEPAGES_KEPT: usize = 2000;
+
+/// Station id -> homepage, the oldest dropped first.
+#[derive(Default)]
+struct Homepages {
+    map: HashMap<String, String>,
+    order: std::collections::VecDeque<String>,
+}
+
+impl Homepages {
+    fn remember(&mut self, id: &str, homepage: &str) {
+        if self
+            .map
+            .insert(id.to_owned(), homepage.to_owned())
+            .is_none()
+        {
+            self.order.push_back(id.to_owned());
+            if self.order.len() > HOMEPAGES_KEPT {
+                if let Some(old) = self.order.pop_front() {
+                    self.map.remove(&old);
+                }
+            }
+        }
+    }
 }
 
 impl Drop for RadioService {
@@ -402,6 +432,7 @@ impl RadioService {
             regions: Mutex::new(HashMap::new()),
             tags: Mutex::new(None),
             current: Mutex::new(None),
+            homepages: Mutex::new(Homepages::default()),
             mirrors_checked: AtomicBool::new(false),
             stop: Arc::new((Mutex::new(false), Condvar::new())),
         });
@@ -480,6 +511,12 @@ impl RadioService {
     /// `refresh`; when the directory cannot be asked, the cached list (of any age) comes back
     /// with the error.
     pub fn near(&self, refresh: bool) -> NearResult {
+        let result = self.near_list(refresh);
+        self.remember_homepages(&result.stations);
+        result
+    }
+
+    fn near_list(&self, refresh: bool) -> NearResult {
         let place = self.place();
         let key = format!("{STATE_NEAR}{}", place_key(&place));
         let cached = lock(&self.db)
@@ -588,7 +625,38 @@ impl RadioService {
         if let Err(err) = written {
             eprintln!("remembering station logos failed: {err:#}");
         }
+        self.remember_homepages(&stations);
         Ok(stations)
+    }
+
+    fn remember_homepages(&self, stations: &[Station]) {
+        let mut seen = guard(&self.homepages);
+        for station in stations {
+            if let Some(homepage) = station.homepage.as_deref().filter(|h| !h.is_empty()) {
+                seen.remember(&station.id, homepage);
+            }
+        }
+    }
+
+    /// The http(s) homepage of a station the UI got from near or search, or one that is
+    /// stored. Anything else (an unknown id, no homepage, another scheme) is an error, so
+    /// nothing a directory entry says can open a file or an app.
+    pub fn homepage_url(&self, id: &str) -> anyhow::Result<reqwest::Url> {
+        let remembered = guard(&self.homepages).map.get(id).cloned();
+        let homepage = match remembered {
+            Some(homepage) => Some(homepage),
+            None => {
+                let conn = lock(&self.db)?;
+                store::station(&conn, id)?.and_then(|station| station.homepage)
+            }
+        };
+        let homepage = homepage.context("this station has no homepage")?;
+        let url = reqwest::Url::parse(&homepage).context("the homepage is not a valid link")?;
+        anyhow::ensure!(
+            matches!(url.scheme(), "http" | "https"),
+            "the homepage is not a web link"
+        );
+        Ok(url)
     }
 
     /// Countries with stations, asked once per session.

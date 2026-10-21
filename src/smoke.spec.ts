@@ -45,8 +45,8 @@ it('puts the ring first in the tab order and names disabled entries', () => {
   expect(target.querySelector('button')?.classList.contains('ring')).toBe(true);
   const items = [...target.querySelectorAll('.item')];
   const radio = items.find((b) => b.textContent?.includes('Radio'));
-  expect(radio?.getAttribute('aria-disabled')).toBe('true');
-  expect(radio?.textContent).toContain('Coming soon');
+  expect(radio?.getAttribute('aria-disabled')).toBeNull();
+  expect(radio?.textContent).not.toContain('Coming soon');
   const navidrome = items.find((b) => b.textContent?.includes('Navidrome'));
   expect(navidrome?.getAttribute('aria-disabled')).toBeNull();
   expect(navidrome?.textContent).not.toContain('Coming soon');
@@ -61,24 +61,19 @@ it('puts the ring first in the tab order and names disabled entries', () => {
   unmount(app);
 });
 
-it('shows the coming-soon pill outside the clipping sidebar list on hover', () => {
+// No sidebar entry is "coming soon" any more (Radio is live), so the pill's hover behavior has
+// no entry to test until the next one; this keeps its place in the DOM covered.
+it('keeps the coming-soon pill outside the clipping sidebar list and hidden', () => {
   setLang('de');
   const target = document.createElement('div');
   const app = mount(App, { target });
   flushSync();
   const radio = [...target.querySelectorAll<HTMLElement>('.item')].find((b) => b.textContent?.includes('Radio'));
-  expect(radio?.textContent).toContain('Kommt bald');
+  expect(radio?.textContent).not.toContain('Kommt bald');
   const pill = target.querySelector('.soon-tip');
   expect(pill).not.toBeNull();
   expect(pill?.closest('.scroll')).toBeNull();
   expect(pill?.getAttribute('aria-hidden')).toBe('true');
-  expect(pill?.classList.contains('shown')).toBe(false);
-  radio?.dispatchEvent(new PointerEvent('pointerenter'));
-  flushSync();
-  expect(pill?.classList.contains('shown')).toBe(true);
-  expect(pill?.textContent).toBe('Kommt bald');
-  radio?.dispatchEvent(new PointerEvent('pointerleave'));
-  flushSync();
   expect(pill?.classList.contains('shown')).toBe(false);
   unmount(app);
   setLang('en');

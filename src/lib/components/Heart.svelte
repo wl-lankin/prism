@@ -3,7 +3,7 @@
   import { favorites, heartable, isFavorite, setFavorite } from '../stores/favorites.svelte';
   import { notify } from '../stores/notice.svelte';
   import { ensureStation, findStation, toggleStationFavorite } from '../stores/radio.svelte';
-  import type { FavKind } from '../types';
+  import type { FavKind, Station } from '../types';
   import Icon from './Icon.svelte';
 
   /** The favorite toggle. Off it is an outline; on it fills with the first spectrum color, and
@@ -23,6 +23,7 @@
     tabindex,
     ghost = false,
     revealed = false,
+    station: given,
   }: {
     kind: FavKind;
     id: string | readonly string[];
@@ -37,6 +38,9 @@
      *  hovered or `revealed` (selected). Rows toggle it with the "f" key instead. */
     ghost?: boolean;
     revealed?: boolean;
+    /** For `kind="station"`: the station itself, when the caller holds it (a station's
+     *  favorite is saved with all its fields). Without it the heart looks the station up. */
+    station?: Station;
   } = $props();
 
   let focused = $state(false);
@@ -45,11 +49,11 @@
   /** The ids a click may change now. */
   const usable = $derived(ids.filter((x) => heartable(x)));
   /** A station is saved with all its fields, so its heart needs the station itself. */
-  const station = $derived(kind === 'station' ? findStation(ids[0]) : null);
+  const station = $derived(kind === 'station' ? (given ?? findStation(ids[0])) : null);
   const disabled = $derived(kind === 'station' ? !station : usable.length === 0);
 
   $effect(() => {
-    if (kind === 'station') ensureStation(ids[0]);
+    if (kind === 'station' && !given) ensureStation(ids[0]);
   });
 
   const on = $derived.by(() => {

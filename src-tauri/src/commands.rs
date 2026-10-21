@@ -7,6 +7,7 @@ use std::sync::Arc;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_opener::OpenerExt;
 
 use crate::audio::list_devices;
 use crate::flow::{FlowOutcome, FlowVariant};
@@ -780,6 +781,19 @@ pub async fn radio_favorite(app: AppHandle, station: Station, on: bool) -> Resul
         .map_err(message)
 }
 
+/// Opens a station's homepage in the browser. The link comes from the service's own data
+/// (never from the caller) and only http(s) is opened.
+#[tauri::command]
+pub async fn radio_open_homepage(app: AppHandle, station_id: String) -> Result<(), String> {
+    let service = radio(&app)?;
+    let url = radio_blocking(move || service.homepage_url(&station_id))
+        .await?
+        .map_err(message)?;
+    app.opener()
+        .open_url(url.as_str(), None::<&str>)
+        .map_err(|err| err.to_string())
+}
+
 /// The station that is current and its stream title, for windows that load later.
 #[tauri::command]
 pub fn radio_now_playing(state: State<'_, AppState>) -> Option<NowPlaying> {
@@ -846,6 +860,7 @@ mod tests {
             "radio_play",
             "radio_favorite",
             "radio_now_playing",
+            "radio_open_homepage",
             "radio_redetect",
         ] {
             assert!(

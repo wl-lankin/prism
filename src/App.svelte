@@ -12,6 +12,7 @@
   import FlowRing, { type RingMode } from './lib/components/FlowRing.svelte';
   import Icon from './lib/components/Icon.svelte';
   import NowPlaying from './lib/components/NowPlaying.svelte';
+  import RadioView from './lib/components/RadioView.svelte';
   import PlaylistsView from './lib/components/PlaylistsView.svelte';
   import PlaylistView from './lib/components/PlaylistView.svelte';
   import QueuePanel from './lib/components/QueuePanel.svelte';
@@ -382,6 +383,7 @@
     album: 'nav.albums',
     artist: 'nav.artists',
     nowplaying: 'nowPlaying.title',
+    radio: 'radio.title',
     settings: 'nav.settings',
   };
 </script>
@@ -509,6 +511,8 @@
               <Settings />
             {:else if nav.view === 'favorites'}
               <FavoritesView />
+            {:else if nav.view === 'radio'}
+              <RadioView />
             {:else if nav.view === 'nowplaying'}
               <NowPlaying />
             {:else if nav.view === 'playlists'}

@@ -1,4 +1,4 @@
-import { t } from '../i18n';
+import { lang, t } from '../i18n';
 import {
   onFavoritesChanged,
   onRadioNowPlaying,
@@ -6,12 +6,14 @@ import {
   radioNear,
   radioCountries,
   radioNowPlaying,
+  radioOpenHomepage,
   radioPlace,
-  radioRegions,
   radioPlay,
   radioRedetect,
+  radioRegions,
   radioSaved,
   radioSearch,
+  radioTags,
 } from '../ipc';
 import type {
   NowPlaying,
@@ -19,6 +21,7 @@ import type {
   RadioCountry,
   RadioErrorCode,
   RadioRegion,
+  RadioTag,
   Station,
   StationQueryArgs,
 } from '../types';
@@ -237,6 +240,76 @@ export async function listCountries(): Promise<RadioCountry[]> {
 export async function listRegions(countryCode: string): Promise<RadioRegion[]> {
   const regions = await radioRegions(countryCode);
   return [...(regions ?? [])].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/** The country's name in the UI language ("DE" -> "Germany"); the code when it is unknown. */
+export function countryName(code: string): string {
+  try {
+    return new Intl.DisplayNames([lang()], { type: 'region' }).of(code.toUpperCase()) ?? code;
+  } catch {
+    return code;
+  }
+}
+
+/** Plays a station and, when the backend refuses, says so in a notice. */
+export async function startStation(station: Station): Promise<void> {
+  try {
+    await playStation(station);
+  } catch (err) {
+    notify(t('radio.play.failed', { name: station.name, message: errorText(err) }));
+  }
+}
+
+/** Opens the station's homepage through the backend, which only opens http(s) links. */
+export async function openHomepage(station: Station): Promise<void> {
+  try {
+    await radioOpenHomepage(station.id);
+  } catch (err) {
+    console.error('opening the homepage failed', err);
+  }
+}
+
+/** The lists behind the search filters. Each loads once and is kept; `null` is not loaded. */
+export const facets = $state({
+  countries: null as RadioCountry[] | null,
+  regions: [] as RadioRegion[],
+  regionsFor: null as string | null,
+  tags: null as RadioTag[] | null,
+});
+
+/** How many genres the filter offers. */
+export const TOP_TAGS = 40;
+
+export async function loadCountries(): Promise<void> {
+  if (facets.countries) return;
+  try {
+    facets.countries = await radioCountries();
+  } catch (err) {
+    console.error('loading the radio countries failed', err);
+  }
+}
+
+export async function loadTags(): Promise<void> {
+  if (facets.tags) return;
+  try {
+    const tags = await radioTags();
+    facets.tags = [...tags].sort((a, b) => b.stationCount - a.stationCount).slice(0, TOP_TAGS);
+  } catch (err) {
+    console.error('loading the radio genres failed', err);
+  }
+}
+
+/** Loads the regions of a country; none for an empty code. The latest country wins. */
+export async function loadRegions(countryCode: string): Promise<void> {
+  facets.regionsFor = countryCode || null;
+  facets.regions = [];
+  if (!countryCode) return;
+  try {
+    const regions = await radioRegions(countryCode);
+    if (facets.regionsFor === countryCode) facets.regions = regions;
+  } catch (err) {
+    console.error('loading the radio regions failed', err);
+  }
 }
 
 /** The stream title, only while `track` is the station it belongs to. */
