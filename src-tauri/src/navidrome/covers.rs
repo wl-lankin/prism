@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use super::client::NavidromeError;
 use super::NavidromeService;
+use crate::library::model::NAVIDROME_COVER_PREFIX;
 use crate::thumbs::{RemoteCovers, ResizeError, ResizeGate};
 
 /// `getCoverArt` through the service's current client.
@@ -37,11 +38,14 @@ impl RemoteCovers for ServerCovers {
 /// every wipe (server switch, disconnect) purges the cached server covers under `cache`.
 /// The purge holds the gate weakly, so the two do not keep each other alive.
 pub fn attach(gate: &Arc<ResizeGate>, service: &Arc<NavidromeService>, cache: PathBuf) {
-    gate.set_remote(Arc::new(ServerCovers(Arc::clone(service))));
+    gate.set_remote_for(
+        NAVIDROME_COVER_PREFIX,
+        Arc::new(ServerCovers(Arc::clone(service))),
+    );
     let weak = Arc::downgrade(gate);
     service.set_cover_purge(Arc::new(move || {
         if let Some(gate) = weak.upgrade() {
-            gate.purge_remote(&cache);
+            gate.purge_remote(&cache, NAVIDROME_COVER_PREFIX);
         }
     }));
 }

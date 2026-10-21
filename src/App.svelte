@@ -32,6 +32,7 @@
   import { initFavorites } from './lib/stores/favorites.svelte';
   import { albumsOf, artistsOf, countOf, hasMixedSources, initLibrary, library } from './lib/stores/library.svelte';
   import { failureText, initNavidrome, navidrome } from './lib/stores/navidrome.svelte';
+  import { initRadio } from './lib/stores/radio.svelte';
   import { go, nav, overlays, type View } from './lib/stores/nav.svelte';
   import { notice, notify } from './lib/stores/notice.svelte';
   import { followPlayerErrors, initPlayer, player } from './lib/stores/player.svelte';
@@ -111,6 +112,18 @@
     initPlaylists()
       .then((cleanup) => (gone ? cleanup() : (stop = cleanup)))
       .catch((err) => console.error('loading the playlists failed', err));
+    return () => {
+      gone = true;
+      stop?.();
+    };
+  });
+
+  $effect(() => {
+    let stop: (() => void) | undefined;
+    let gone = false;
+    initRadio()
+      .then((cleanup) => (gone ? cleanup() : (stop = cleanup)))
+      .catch((err) => console.error('loading the radio state failed', err));
     return () => {
       gone = true;
       stop?.();

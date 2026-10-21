@@ -12,6 +12,8 @@ class FavoritesStore {
   tracks = new SvelteSet<string>();
   albums = new SvelteSet<string>();
   artists = new SvelteSet<string>();
+  /** Station ids (`radio:<uuid>`). */
+  stations = new SvelteSet<string>();
   /** Bumped whenever the ids were reloaded, so views showing favorite lists refetch them. */
   version = $state(0);
 }
@@ -19,7 +21,9 @@ class FavoritesStore {
 export const favorites = new FavoritesStore();
 
 function setOf(kind: FavKind): SvelteSet<string> {
-  return kind === 'track' ? favorites.tracks : kind === 'album' ? favorites.albums : favorites.artists;
+  if (kind === 'track') return favorites.tracks;
+  if (kind === 'album') return favorites.albums;
+  return kind === 'station' ? favorites.stations : favorites.artists;
 }
 
 function replace(set: SvelteSet<string>, ids: string[]) {
@@ -36,6 +40,7 @@ function apply(ids: FavoriteIds) {
   replace(favorites.tracks, ids.tracks ?? []);
   replace(favorites.albums, ids.albums ?? []);
   replace(favorites.artists, ids.artists ?? []);
+  replace(favorites.stations, ids.stations ?? []);
   for (const [key, on] of pending) {
     const [kind, id] = key.split('\u0000') as [FavKind, string];
     if (on) setOf(kind).add(id);

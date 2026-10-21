@@ -1,5 +1,8 @@
 <script lang="ts" module>
-  import type { FavKind } from '../types';
+  import type { FavKind as AnyFavKind } from '../types';
+
+  /** The library tabs; stations have their own section (Task 11), not a tab. */
+  type FavKind = Exclude<AnyFavKind, 'station'>;
 
   /** The tab stays where it was left while the app runs. */
   let lastTab: FavKind = 'track';

@@ -172,7 +172,7 @@ pub(crate) struct RawStation {
 }
 
 /// Control characters removed, whitespace collapsed, at most `max` characters. `None` if empty.
-fn clean_text(raw: &str, max: usize) -> Option<String> {
+pub(crate) fn clean_text(raw: &str, max: usize) -> Option<String> {
     let spaced: String = raw
         .chars()
         .filter_map(|ch| {

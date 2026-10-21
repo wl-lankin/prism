@@ -34,6 +34,8 @@ use player::{
     default_opener, fan_out, tauri_sink, with_dropped, DroppedFiles, EventSink, Player,
     PlayerOptions, Resolver,
 };
+use radio::location::{IpLocator, Locator};
+use radio::{RadioEmit, RadioEvent, RadioOptions, RadioService};
 use settings::SettingsStore;
 use startup::{
     fail_with, open_or_quarantine, AppDirs, CannotCreateDataDir, DataDir, OpenOutcome,
@@ -55,6 +57,66 @@ pub struct AppState {
     pub lookup: library::lookup::LookupWorker,
     /// The Navidrome account, its status and the background sync.
     pub navidrome: Arc<NavidromeService>,
+    /// Stations: near you, search, saved, the stream title.
+    pub radio: Arc<RadioService>,
+}
+
+/// Sends the radio service's events to every window.
+fn radio_emit(handle: tauri::AppHandle) -> RadioEmit {
+    use tauri::Emitter;
+    Arc::new(move |event| {
+        let (name, sent) = match &event {
+            RadioEvent::NowPlaying(now) => (
+                radio::EVENT_NOW_PLAYING,
+                handle.emit(radio::EVENT_NOW_PLAYING, now),
+            ),
+            RadioEvent::FavoritesChanged => (
+                library::favorites::EVENT_CHANGED,
+                handle.emit(library::favorites::EVENT_CHANGED, ()),
+            ),
+        };
+        if let Err(err) = sent {
+            eprintln!("emitting {name} failed: {err}");
+        }
+    })
+}
+
+/// The radio directory and the location service. In debug builds `PRISM_RADIO_DIRECTORY`
+/// (a fake directory's base URL) and `PRISM_RADIO_GEO` (a fake GeoJS URL; its ipinfo
+/// stand-in answers `/json` on the same origin) point a dev run at fake servers.
+fn radio_service(
+    db: &Arc<db::Db>,
+    settings: &Arc<SettingsStore>,
+    handle: tauri::AppHandle,
+) -> Arc<RadioService> {
+    #[cfg(debug_assertions)]
+    let (fixed, geo) = (
+        std::env::var("PRISM_RADIO_DIRECTORY")
+            .ok()
+            .filter(|url| !url.is_empty()),
+        std::env::var("PRISM_RADIO_GEO").ok().and_then(|geojs| {
+            let ipinfo = reqwest::Url::parse(&geojs).ok()?.join("/json").ok()?;
+            Some(IpLocator::at(geojs, ipinfo.to_string()))
+        }),
+    );
+    #[cfg(not(debug_assertions))]
+    let (fixed, geo): (Option<String>, Option<IpLocator>) = (None, None);
+    let locator: Arc<dyn Locator> = Arc::new(geo.unwrap_or_else(IpLocator::public));
+    let (directory, discover_mirrors) = radio::open_directory(db, fixed);
+    RadioService::spawn_with_options(
+        Arc::clone(db),
+        Arc::clone(settings),
+        directory,
+        locator,
+        Arc::new(startup::system_locale),
+        radio_emit(handle),
+        // The media controls show the station name until they take live titles.
+        Arc::new(|_| {}),
+        RadioOptions {
+            discover_mirrors,
+            ..RadioOptions::default()
+        },
+    )
 }
 
 /// Sends the Navidrome service's events to every window.
@@ -198,9 +260,14 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
         Arc::new(KeyringStore::new(&app.config().identifier)) as Arc<dyn CredentialStore>,
         navidrome_emit(handle.clone()),
     );
+    // Before the player: its resolver reads stations from the radio store.
+    let radio = radio_service(&library.db, &settings, handle.clone());
     let player = Player::spawn_with_options(
         Arc::new(CpalOutputFactory),
-        with_dropped(Arc::clone(&dropped), library_resolver(&library)),
+        radio::resolver(
+            Arc::clone(&library.db),
+            with_dropped(Arc::clone(&dropped), library_resolver(&library)),
+        ),
         fan_out(vec![
             tauri_sink(handle.clone()),
             media.sink(),
@@ -270,8 +337,12 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
     let _ = flow_sink.set(sink);
     let thumbs = Arc::new(thumbs::ResizeGate::new(thumbs::ResizeGate::default_limit()));
     navidrome::covers::attach(&thumbs, &navidrome, cover_cache.clone());
+    if let Err(err) = radio::covers::attach(&thumbs, &library.db) {
+        eprintln!("station logos are off: {err:#}");
+    }
     app.manage(AppState {
         navidrome,
+        radio,
         lookup,
         library: Arc::clone(&library),
         player,
@@ -412,6 +483,17 @@ pub fn run() {
             commands::navidrome_sync,
             commands::navidrome_playlists,
             commands::navidrome_playlist_entries,
+            commands::radio_place,
+            commands::radio_near,
+            commands::radio_search,
+            commands::radio_countries,
+            commands::radio_regions,
+            commands::radio_tags,
+            commands::radio_saved,
+            commands::radio_play,
+            commands::radio_favorite,
+            commands::radio_now_playing,
+            commands::radio_redetect,
             commands::mini_toggle,
             commands::mini_layout,
             commands::mini_menu,
@@ -433,6 +515,7 @@ pub fn run() {
                 if let Some(state) = app.try_state::<AppState>() {
                     state.settings.flush();
                     state.navidrome.shutdown();
+                    state.radio.shutdown();
                 }
             }
             #[cfg(target_os = "macos")]
