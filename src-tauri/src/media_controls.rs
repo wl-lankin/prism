@@ -309,8 +309,43 @@ pub struct MediaBridge {
 /// What reaches the worker.
 enum Update {
     State(Box<PlayerState>),
-    /// The current station's stream title (`None`: none known, or a new station).
-    LiveTitle(Option<String>),
+    /// A station's stream title (`None`: none known, or the station was opened again).
+    LiveTitle(String, Option<String>),
+}
+
+/// The last stream title and the station it belongs to. It is shown only while that station
+/// is the shown track; showing another track drops it, so a title never moves to the next
+/// station. A title may arrive before the state that shows its station.
+#[derive(Default)]
+struct LiveTitle {
+    station_id: Option<String>,
+    title: Option<String>,
+    /// The shown track id last seen.
+    shown: Option<String>,
+}
+
+impl LiveTitle {
+    fn set(&mut self, station_id: String, title: Option<String>) {
+        self.station_id = Some(station_id);
+        self.title = title;
+    }
+
+    /// The title for the shown `track`, if it is the title's station.
+    fn for_shown(&mut self, track: Option<&Track>) -> Option<&str> {
+        let shown = track.map(|t| t.id.clone());
+        if shown != self.shown {
+            if self.station_id != shown {
+                self.station_id = None;
+                self.title = None;
+            }
+            self.shown = shown;
+        }
+        if self.station_id.is_some() && self.station_id == self.shown {
+            self.title.as_deref()
+        } else {
+            None
+        }
+    }
 }
 
 impl MediaBridge {
@@ -332,10 +367,10 @@ impl MediaBridge {
         })
     }
 
-    /// The stream title of the station that plays, shown in place of its name while the
-    /// player is on a station (ignored for tracks). Never blocks.
-    pub fn set_live_title(&self, title: Option<String>) {
-        let _ = self.updates.send(Update::LiveTitle(title));
+    /// The stream title of `station_id`, shown in place of its name while that station is the
+    /// shown track (ignored otherwise; another track drops it). Never blocks.
+    pub fn set_live_title(&self, station_id: String, title: Option<String>) {
+        let _ = self.updates.send(Update::LiveTitle(station_id, title));
     }
 
     /// Starts the worker. `hwnd` is the main window handle (Windows) or `None`. The worker
@@ -440,23 +475,18 @@ fn run(receiver: Receiver<Update>, app: AppHandle, hwnd: Option<usize>, cover_ca
     });
     let mut pushed = Pushed::default();
     let mut state: Option<Box<PlayerState>> = None;
-    let mut live_title: Option<String> = None;
+    let mut titles = LiveTitle::default();
     while let Ok(update) = receiver.recv() {
         // Only the newest state and title matter.
         for update in std::iter::once(update).chain(receiver.try_iter()) {
             match update {
                 Update::State(newer) => state = Some(newer),
-                Update::LiveTitle(title) => live_title = title,
+                Update::LiveTitle(station_id, title) => titles.set(station_id, title),
             }
         }
         if let (Some(controls), Some(state)) = (controls.as_mut(), state.as_ref()) {
-            push(
-                controls,
-                &mut pushed,
-                state,
-                live_title.as_deref(),
-                &cover_for,
-            );
+            let title = titles.for_shown(state.track.as_ref());
+            push(controls, &mut pushed, state, title, &cover_for);
         }
     }
 }
@@ -763,6 +793,32 @@ mod tests {
             playback_for(&station_state(PlayerStatus::Paused, 0)),
             MediaPlayback::Paused { progress: None }
         );
+    }
+
+    #[test]
+    fn a_stream_title_belongs_to_its_station() {
+        let one = station();
+        let two = crate::radio::model::tests::station(2).as_track();
+        let song = track();
+        let mut titles = LiveTitle::default();
+        assert_eq!(titles.for_shown(Some(&one)), None);
+        titles.set(one.id.clone(), Some("A".into()));
+        assert_eq!(titles.for_shown(Some(&one)), Some("A"));
+        // A late title of another station is not shown on this one.
+        titles.set(two.id.clone(), Some("B".into()));
+        assert_eq!(titles.for_shown(Some(&one)), None);
+        // It shows once its station is shown (the title came before the state).
+        assert_eq!(titles.for_shown(Some(&two)), Some("B"));
+        // A new track drops it, also when the station comes back.
+        assert_eq!(titles.for_shown(Some(&song)), None);
+        assert_eq!(titles.for_shown(Some(&two)), None);
+        titles.set(two.id.clone(), Some("C".into()));
+        assert_eq!(titles.for_shown(Some(&two)), Some("C"));
+        titles.set(two.id.clone(), None);
+        assert_eq!(titles.for_shown(Some(&two)), None, "reset on open");
+        titles.set(two.id.clone(), Some("D".into()));
+        assert_eq!(titles.for_shown(None), None, "idle drops it");
+        assert_eq!(titles.for_shown(Some(&two)), None);
     }
 
     #[test]

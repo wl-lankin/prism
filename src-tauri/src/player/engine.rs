@@ -1392,7 +1392,7 @@ impl Engine {
     /// Seeks are clamped to the track's duration. Held offline, a seek moves the position
     /// Play resumes at.
     fn seek(&mut self, ms: u64) {
-        if self.live_now() {
+        if self.live_now() || self.current.as_ref().is_some_and(is_live) {
             return;
         }
         if self.held.is_some() {
@@ -1557,8 +1557,9 @@ impl Engine {
                     }
                     Err(failure) => {
                         let track = failure.track.as_deref();
-                        let (source, live) =
-                            (source_of(track, &opened.id), track.is_some_and(is_live));
+                        // An unresolvable station is still a station.
+                        let live = track.map_or(opened.id.starts_with(RADIO_PREFIX), is_live);
+                        let source = source_of(track, &opened.id);
                         self.error(&opened.id, source, &failure.message);
                         self.skip(false, live);
                     }
@@ -1897,9 +1898,12 @@ impl Engine {
         self.hold_entry(track, 0, true);
     }
 
-    /// The current entry, or the one shown, is a station: next, prev and seek do nothing.
+    /// The queue stands on a station (playing, loading or held): next, prev and seek do
+    /// nothing. Decided by the entry's id, so a jump away from a station acts at once.
     fn live_now(&self) -> bool {
-        self.current.as_ref().is_some_and(is_live) || self.shown.as_ref().is_some_and(is_live)
+        self.queue
+            .current()
+            .is_some_and(|id| id.starts_with(RADIO_PREFIX))
     }
 
     fn current_id(&self) -> String {
@@ -5235,5 +5239,88 @@ mod tests {
         let mut navidrome = station;
         navidrome.source = Source::Navidrome;
         assert!(!is_live(&navidrome));
+    }
+
+    #[test]
+    fn next_acts_after_a_jump_away_from_a_station() {
+        let server = NetServer::new();
+        let (h, _) = play_live(
+            &server,
+            PlayerOptions::default(),
+            &[STATION, "n1", "n2"],
+            0,
+            None,
+        );
+        server.set(|c| c.open_delay = Duration::from_millis(300));
+        h.player.jump(1).unwrap();
+        // n1 is still loading; the station is still shown.
+        wait_state(&h.player, |s| s.status == PlayerStatus::Loading);
+        h.player.next().unwrap();
+        let events = collect_until(&h.events, Duration::from_secs(5), |seen| {
+            !changes(seen).is_empty()
+        });
+        assert_eq!(changes(&events), ids(&["n2"]), "{events:#?}");
+        let state = wait_state(&h.player, |s| playing_track(s, "n2"));
+        assert_eq!(state.queue_index, 2);
+    }
+
+    #[test]
+    fn next_while_a_station_loads_is_ignored() {
+        let server = NetServer::new();
+        let tones = [
+            ("n1", NET_A, SILENCE_MS),
+            (STATION, LIVE, 0),
+            ("n2", NET_B, 1_000),
+        ];
+        let h = net_harness(&tones, &server, 1.0, PlayerOptions::default());
+        h.player.play(ids(&["n1", STATION, "n2"]), 0).unwrap();
+        wait_state(&h.player, |s| playing_track(s, "n1"));
+        server.set(|c| c.open_delay = Duration::from_millis(300));
+        h.player.jump(1).unwrap();
+        wait_state(&h.player, |s| s.status == PlayerStatus::Loading);
+        h.player.next().unwrap();
+        h.player.prev().unwrap();
+        let state = wait_state(&h.player, |s| playing_track(s, STATION));
+        assert_eq!(state.queue_index, 1);
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(server.opens(), ids(&["n1", STATION]));
+        let events: Vec<PlayerEvent> = h.events.try_iter().collect();
+        assert_eq!(changes(&events), ids(&["n1", STATION]), "{events:#?}");
+    }
+
+    #[test]
+    fn an_unknown_station_with_repeat_all_reports_once_and_goes_idle() {
+        let server = NetServer::new();
+        let unknown = "radio:00000000-0000-4000-8000-0000000000ff";
+        let h = net_harness(&LIVE_TONES, &server, FAST, with_repeat(RepeatMode::All));
+        h.player.play(ids(&[unknown]), 0).unwrap();
+        let mut events = collect_until(&h.events, Duration::from_secs(5), back_to_idle);
+        std::thread::sleep(Duration::from_millis(200));
+        events.extend(h.events.try_iter());
+        let details = error_details(&events);
+        assert_eq!(details.len(), 1, "{details:?}");
+        assert_eq!(details[0].0, unknown);
+        assert_eq!(details[0].1, ErrorKind::Track);
+        assert_eq!(details[0].2, Source::Radio);
+        assert!(server.opens().is_empty());
+        assert_eq!(h.player.state().status, PlayerStatus::Idle);
+    }
+
+    #[test]
+    fn repeat_all_goes_round_past_a_failing_station() {
+        let server = NetServer::new();
+        server.set(|c| c.fail_ids = vec![STATION.into()]);
+        let tones = [("n1", NET_A, 500), (STATION, LIVE, 0)];
+        let h = net_harness(&tones, &server, FAST, with_repeat(RepeatMode::All));
+        h.player.play(ids(&["n1", STATION]), 0).unwrap();
+        let events = collect_until(&h.events, Duration::from_secs(10), |seen| {
+            changes(seen).len() == 2
+        });
+        assert_eq!(changes(&events), ids(&["n1", "n1"]), "{events:#?}");
+        let details = error_details(&events);
+        assert_eq!(details.len(), 1, "{details:?}");
+        assert_eq!(details[0].0, STATION);
+        assert_eq!(details[0].1, ErrorKind::Track);
+        assert!(!back_to_idle(&events), "not idle: {events:#?}");
     }
 }
