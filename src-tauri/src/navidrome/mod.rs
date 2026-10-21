@@ -17,6 +17,7 @@ pub mod client;
 pub mod covers;
 pub mod keychain;
 pub mod playlists;
+pub mod scrobble;
 pub mod stars;
 pub mod stream;
 pub mod sync;
@@ -565,6 +566,7 @@ impl Core {
         {
             (self.emit)(NavidromeEvent::PlaylistsChanged);
         }
+        self.flush_scrobbles(client, epoch)?;
         Ok(report)
     }
 

@@ -205,6 +205,7 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
             media.sink(),
             shell::player_sink(handle.clone()),
             library::history::spawn_recorder(Arc::clone(&library.db)),
+            navidrome::scrobble::spawn_scrobbler(Arc::clone(&navidrome)),
             Arc::new(move |event| {
                 if let Some(sink) = to_flow.get() {
                     sink(event);
