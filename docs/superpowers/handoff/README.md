@@ -10,7 +10,8 @@ Start here to continue Prism on another machine or in a new session. It says whe
 | Roadmap and the M1 plan | `docs/superpowers/plans/2026-10-20-prism-m1-foundation.md` |
 | M2 plan (Everyday player) | `docs/superpowers/plans/2026-10-20-prism-m2-everyday-player.md` |
 | M3 plan (Navidrome) | `docs/superpowers/plans/2026-10-21-prism-m3-navidrome.md` |
-| M4 plan (Radio), not started | `docs/superpowers/plans/2026-10-21-prism-m4-radio.md` |
+| M4 plan (Radio) | `docs/superpowers/plans/2026-10-21-prism-m4-radio.md` |
+| Rules for every M4 implementer agent | `docs/superpowers/handoff/ledgers/m4-implementer-rules.md` |
 | Per-milestone ledgers (progress, rulings, deferred minors, incidents) | `docs/superpowers/handoff/ledgers/` |
 | Rules every implementer agent follows | `docs/superpowers/handoff/ledgers/m3-implementer-rules.md` |
 | Mockups from brainstorming | `docs/superpowers/mockups/` |
@@ -27,6 +28,7 @@ Each milestone branch is cut from the previous one. None is merged into `main` y
 | `PRISM-1` | M1 Foundation | done |
 | `PRISM-2` | M2 Everyday player, plus the up next panel, repeat and shuffle | done, owner hand check mostly confirmed |
 | `PRISM-3` | M3 Navidrome | Tasks 1-19 done; Task 20 (owner hand check) open |
+| `PRISM-4` | M4 Radio, cut from `PRISM-3` before the M3 hand check | Tasks 1-12 and the UI integration pass done; Task 13 (owner hand check) open |
 | `spike-ytm` | YouTube Music sign-in spike | reference only |
 
 Parallel work uses short-lived branches `PRISM-<milestone><task>` (for example `PRISM-312`) in worktrees under `../Prism-wt/`. They are merged with `--no-ff` into the milestone branch and then deleted.
@@ -57,7 +59,16 @@ Parallel work uses short-lived branches `PRISM-<milestone><task>` (for example `
    - Settings, sidebar, source views, hearts and quality labels
 
    Open: Task 20, the owner hand check against the real server (see below).
-4. **M4 Radio** (Radio Browser): next. Write the plan against the real code after the M3 hand check.
+4. **M4 Radio** (Radio Browser): built and reviewed, merged on `PRISM-4`. It covers:
+   - Radio Browser client with mirror rotation
+   - coarse location (geojs.io, ipinfo fallback) or a manual country and region
+   - "Near you" in three bands (75 km, region, country), worldwide search, saved and recent stations
+   - live streams with a bounded buffer, ICY titles, playlists, reconnect, Shoutcast `ICY 200 OK`, HLS through FFmpeg, Ogg chains in place, AAC+ through FFmpeg
+   - engine live mode (no seek, no next, pause rejoins live, one offline notice per source)
+   - station logos from the favicon or the station homepage, never from private networks
+   - the Radio view, live player surfaces, stations in Favorites, Home, Ctrl+K and Settings
+
+   Open: Task 13, the owner hand check (see `ledgers/m4-progress.md`), and merging the M3 hand-check fixes from `PRISM-3` into `PRISM-4`.
 5. **M5 YouTube Music**: an embedded music.youtube.com view inside the main window (no extra window). The sign-in spike succeeded through the Google sign-in route.
 6. **M6 Release v1.0.0**:
    - installer and versionless asset copies, plus auto-update
