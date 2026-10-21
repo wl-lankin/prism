@@ -6,10 +6,12 @@
 //! 0..n; every change that could leave a gap renumbers.
 
 use std::collections::HashMap;
+use std::hash::Hash;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::bail;
-use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use rusqlite::types::{FromSql, Value, ValueRef};
+use rusqlite::{params, Connection, OptionalExtension, ToSql, Transaction};
 use serde::Serialize;
 
 use super::model::Track;
@@ -147,15 +149,99 @@ fn summarize(conn: &Connection, id: i64) -> anyhow::Result<Playlist> {
     })
 }
 
-/// Every playlist, most recently changed first.
+/// What one ordered scan of an entry table says about a playlist.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct EntryTotals {
+    /// Entries, including those whose track is not in the index.
+    pub track_count: u32,
+    /// Summed over the entries whose track is in the index.
+    pub duration_ms: u64,
+    /// Up to four distinct cover ids, in playlist order.
+    pub cover_ids: Vec<String>,
+}
+
+/// The scan behind [`entry_totals`]: every entry of `entries` with its track's duration and
+/// cover, in primary key order (`playlist_id`, `position`), so it needs no sort.
+pub(crate) fn entry_scan_sql(entries: &str) -> String {
+    format!(
+        "SELECT p.playlist_id, t.duration_ms, t.cover_id
+         FROM {entries} p LEFT JOIN tracks t ON t.id = p.track_id
+         ORDER BY p.playlist_id, p.position"
+    )
+}
+
+/// Count, duration and the first four distinct covers of every playlist of the entry table
+/// `entries` (columns `playlist_id`, `position`, `track_id`), folded from one ordered scan.
+/// Entries whose track is not in the index count, but add no duration and no cover. A playlist
+/// without entries is absent.
+pub(crate) fn entry_totals<K: FromSql + Eq + Hash>(
+    conn: &Connection,
+    entries: &str,
+) -> anyhow::Result<HashMap<K, EntryTotals>> {
+    let mut stmt = conn.prepare(&entry_scan_sql(entries))?;
+    let mut rows = stmt.query([])?;
+    let mut out: HashMap<K, EntryTotals> = HashMap::new();
+    // The rows come grouped by playlist: the key is decoded once per playlist, not per row.
+    let mut current: Option<(Value, EntryTotals)> = None;
+    while let Some(row) = rows.next()? {
+        let key = row.get_ref(0)?;
+        if current
+            .as_ref()
+            .is_none_or(|(known, _)| ValueRef::from(known) != key)
+        {
+            if let Some((known, totals)) = current.take() {
+                out.insert(K::column_result(ValueRef::from(&known))?, totals);
+            }
+            current = Some((Value::column_result(key)?, EntryTotals::default()));
+        }
+        let Some((_, totals)) = current.as_mut() else {
+            continue;
+        };
+        totals.track_count = totals.track_count.saturating_add(1);
+        if let Some(duration) = row.get_ref(1)?.as_i64_or_null()? {
+            totals.duration_ms = totals.duration_ms.saturating_add(duration.max(0) as u64);
+        }
+        if totals.cover_ids.len() < COVER_MOSAIC {
+            if let Some(cover) = row.get_ref(2)?.as_str_or_null()? {
+                if !totals.cover_ids.iter().any(|known| known == cover) {
+                    totals.cover_ids.push(cover.to_owned());
+                }
+            }
+        }
+    }
+    if let Some((known, totals)) = current {
+        out.insert(K::column_result(ValueRef::from(&known))?, totals);
+    }
+    Ok(out)
+}
+
+/// Every playlist, most recently changed first: one query for the playlists and one ordered
+/// scan of every entry (no query per playlist).
 pub fn playlists_list(conn: &Connection) -> anyhow::Result<Vec<Playlist>> {
-    let ids: Vec<i64> = {
-        let mut stmt =
-            conn.prepare("SELECT id FROM playlists ORDER BY updated_at DESC, id DESC")?;
-        let rows = stmt.query_map([], |row| row.get(0))?;
-        rows.collect::<Result<_, _>>()?
-    };
-    ids.into_iter().map(|id| summarize(conn, id)).collect()
+    let mut totals: HashMap<i64, EntryTotals> = entry_totals(conn, "playlist_tracks")?;
+    let mut stmt = conn
+        .prepare("SELECT id, name, updated_at FROM playlists ORDER BY updated_at DESC, id DESC")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+        ))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (id, name, updated_at) = row?;
+        let totals = totals.remove(&id).unwrap_or_default();
+        out.push(Playlist {
+            id,
+            name,
+            track_count: totals.track_count,
+            duration_ms: totals.duration_ms,
+            cover_ids: totals.cover_ids,
+            updated_at,
+        });
+    }
+    Ok(out)
 }
 
 pub fn playlist_create(conn: &Connection, name: &str) -> anyhow::Result<Playlist> {
@@ -168,34 +254,46 @@ pub fn playlist_create(conn: &Connection, name: &str) -> anyhow::Result<Playlist
     summarize(conn, conn.last_insert_rowid())
 }
 
-pub fn playlist_rename(conn: &Connection, id: i64, name: &str) -> anyhow::Result<()> {
+/// Renames the playlist; returns whether the name changed (the same name changes nothing).
+pub fn playlist_rename(conn: &Connection, id: i64, name: &str) -> anyhow::Result<bool> {
     let name = clean_name(name)?;
     ensure_exists(conn, id)?;
-    conn.execute(
-        "UPDATE playlists SET name = ?2, updated_at = ?3 WHERE id = ?1",
+    let rows = conn.execute(
+        "UPDATE playlists SET name = ?2, updated_at = ?3 WHERE id = ?1 AND name IS NOT ?2",
         params![id, name, now_ms()],
     )?;
-    Ok(())
+    Ok(rows > 0)
 }
 
-/// Deletes the playlist and, through the foreign key, its entries. Idempotent.
-pub fn playlist_delete(conn: &Connection, id: i64) -> anyhow::Result<()> {
-    conn.execute("DELETE FROM playlists WHERE id = ?1", [id])?;
-    Ok(())
+/// Deletes the playlist and, through the foreign key, its entries. Idempotent; returns whether
+/// a playlist was deleted.
+pub fn playlist_delete(conn: &Connection, id: i64) -> anyhow::Result<bool> {
+    Ok(conn.execute("DELETE FROM playlists WHERE id = ?1", [id])? > 0)
 }
 
-/// The entries in order; a track that is not in the index comes back with `track: None`.
-pub fn playlist_entries(conn: &Connection, id: i64) -> anyhow::Result<Vec<PlaylistEntry>> {
-    ensure_exists(conn, id)?;
+/// The entries of `playlist_id` in the entry table `entries` (columns `playlist_id`,
+/// `position`, `track_id`), in order and numbered 0..n; a track that is not in the index comes
+/// back with `track: None`.
+pub(crate) fn resolve_entries(
+    conn: &Connection,
+    entries: &str,
+    playlist_id: &dyn ToSql,
+) -> anyhow::Result<Vec<PlaylistEntry>> {
     let sql = format!(
         "SELECT {TRACK_COLUMNS} FROM tracks t
-         WHERE t.id IN (SELECT track_id FROM playlist_tracks WHERE playlist_id = ?1)"
+         WHERE t.id IN (SELECT track_id FROM {entries} WHERE playlist_id = ?1)"
     );
-    let resolved: HashMap<String, Track> = collect(conn, &sql, [id], track_from_row)?
+    let resolved: HashMap<String, Track> = collect(conn, &sql, [playlist_id], track_from_row)?
         .into_iter()
         .map(|track| (track.id.clone(), track))
         .collect();
-    Ok(track_ids(conn, id)?
+    let mut stmt = conn.prepare(&format!(
+        "SELECT track_id FROM {entries} WHERE playlist_id = ?1 ORDER BY position"
+    ))?;
+    let ids = stmt
+        .query_map([playlist_id], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<String>, _>>()?;
+    Ok(ids
         .into_iter()
         .enumerate()
         .map(|(position, track_id)| PlaylistEntry {
@@ -206,11 +304,18 @@ pub fn playlist_entries(conn: &Connection, id: i64) -> anyhow::Result<Vec<Playli
         .collect())
 }
 
-/// Appends the tracks in the given order; the same track may be added again.
-pub fn playlist_add(conn: &Connection, id: i64, track_ids: &[String]) -> anyhow::Result<()> {
+/// The entries in order; a track that is not in the index comes back with `track: None`.
+pub fn playlist_entries(conn: &Connection, id: i64) -> anyhow::Result<Vec<PlaylistEntry>> {
+    ensure_exists(conn, id)?;
+    resolve_entries(conn, "playlist_tracks", &id)
+}
+
+/// Appends the tracks in the given order; the same track may be added again. Returns whether
+/// anything was added.
+pub fn playlist_add(conn: &Connection, id: i64, track_ids: &[String]) -> anyhow::Result<bool> {
     ensure_exists(conn, id)?;
     if track_ids.is_empty() {
-        return Ok(());
+        return Ok(false);
     }
     if track_ids.iter().any(|track_id| track_id.is_empty()) {
         bail!("A track id cannot be empty");
@@ -231,11 +336,12 @@ pub fn playlist_add(conn: &Connection, id: i64, track_ids: &[String]) -> anyhow:
     }
     touch(&tx, id)?;
     tx.commit()?;
-    Ok(())
+    Ok(true)
 }
 
 /// Removes the entries at `positions` (unknown positions are ignored) and renumbers the rest.
-pub fn playlist_remove(conn: &Connection, id: i64, positions: &[u32]) -> anyhow::Result<()> {
+/// Returns whether anything was removed.
+pub fn playlist_remove(conn: &Connection, id: i64, positions: &[u32]) -> anyhow::Result<bool> {
     ensure_exists(conn, id)?;
     let tx = conn.unchecked_transaction()?;
     let before = track_ids(&tx, id)?;
@@ -245,31 +351,60 @@ pub fn playlist_remove(conn: &Connection, id: i64, positions: &[u32]) -> anyhow:
         .filter(|(position, _)| !positions.contains(&(*position as u32)))
         .map(|(_, track_id)| track_id.clone())
         .collect();
-    if kept.len() != before.len() {
+    let changed = kept.len() != before.len();
+    if changed {
         write_entries(&tx, id, &kept)?;
         touch(&tx, id)?;
     }
     tx.commit()?;
-    Ok(())
+    Ok(changed)
 }
 
-/// Moves the entry at `from` so it ends up at index `to` (both within 0..n).
-pub fn playlist_move(conn: &Connection, id: i64, from: u32, to: u32) -> anyhow::Result<()> {
+/// Moves the entry at `from` so it ends up at index `to` (both within 0..n). Returns whether
+/// the order changed (not for `from == to`, nor for a move between equal tracks).
+pub fn playlist_move(conn: &Connection, id: i64, from: u32, to: u32) -> anyhow::Result<bool> {
     ensure_exists(conn, id)?;
     let tx = conn.unchecked_transaction()?;
-    let mut ids = track_ids(&tx, id)?;
+    let before = track_ids(&tx, id)?;
     let (from, to) = (from as usize, to as usize);
-    if from >= ids.len() || to >= ids.len() {
+    if from >= before.len() || to >= before.len() {
         bail!("That position is outside the playlist");
     }
-    if from != to {
-        let moved = ids.remove(from);
-        ids.insert(to, moved);
+    let mut ids = before.clone();
+    let moved = ids.remove(from);
+    ids.insert(to, moved);
+    let changed = ids != before;
+    if changed {
         write_entries(&tx, id, &ids)?;
         touch(&tx, id)?;
     }
     tx.commit()?;
-    Ok(())
+    Ok(changed)
+}
+
+/// Asserts the plan of the summary scan: entries in primary key order (no sort, no temp
+/// b-tree) and each track looked up by its id (no scan of `tracks`).
+#[cfg(test)]
+pub(crate) fn assert_scan_needs_no_sort(conn: &Connection, entries: &str) {
+    let mut stmt = conn
+        .prepare(&format!("EXPLAIN QUERY PLAN {}", entry_scan_sql(entries)))
+        .unwrap();
+    let plan: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(3))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let text = plan.join(" | ");
+    assert!(!text.contains("TEMP B-TREE"), "{text}");
+    assert!(
+        plan.iter()
+            .any(|step| step.starts_with("SEARCH t ") && step.contains("id=?")),
+        "{text}"
+    );
+    assert!(
+        !plan.iter().any(|step| step.starts_with("SCAN t")),
+        "{text}"
+    );
 }
 
 #[cfg(test)]
@@ -468,8 +603,8 @@ mod tests {
         let conn = db.0.lock().unwrap();
         let doomed = filled(&conn, &["a", "b"]);
         let kept = filled(&conn, &["c"]);
-        playlist_delete(&conn, doomed).unwrap();
-        playlist_delete(&conn, doomed).unwrap();
+        assert!(playlist_delete(&conn, doomed).unwrap());
+        assert!(!playlist_delete(&conn, doomed).unwrap());
         let rows = |id: i64| -> i64 {
             conn.query_row(
                 "SELECT COUNT(*) FROM playlist_tracks WHERE playlist_id = ?1",
@@ -536,6 +671,97 @@ mod tests {
         // The track returns: the entry resolves again without any edit.
         insert_track(&conn, "navidrome:abc", 500, None);
         assert!(playlist_entries(&conn, id).unwrap()[1].track.is_some());
+    }
+
+    #[test]
+    fn noop_rename_reports_no_change() {
+        let db = db();
+        let conn = db.0.lock().unwrap();
+        let id = filled(&conn, &["a", "b"]);
+        conn.execute("UPDATE playlists SET updated_at = 7", [])
+            .unwrap();
+        // The same name, also after trimming: nothing changes, not even the change time.
+        assert!(!playlist_rename(&conn, id, "Mix").unwrap());
+        assert!(!playlist_rename(&conn, id, "  Mix ").unwrap());
+        assert_eq!(playlist_list_one(&conn, id).updated_at, 7);
+        assert!(playlist_rename(&conn, id, "mix").unwrap());
+        assert_eq!(playlist_list_one(&conn, id).name, "mix");
+        assert_ne!(playlist_list_one(&conn, id).updated_at, 7);
+    }
+
+    #[test]
+    fn noop_edits_report_no_change() {
+        let db = db();
+        let conn = db.0.lock().unwrap();
+        let id = filled(&conn, &["a", "a", "b"]);
+        conn.execute("UPDATE playlists SET updated_at = 7", [])
+            .unwrap();
+        assert!(!playlist_add(&conn, id, &[]).unwrap());
+        assert!(!playlist_remove(&conn, id, &[]).unwrap());
+        assert!(!playlist_remove(&conn, id, &[3, 99]).unwrap());
+        assert!(!playlist_move(&conn, id, 1, 1).unwrap());
+        // Two equal tracks swap places: the order reads the same.
+        assert!(!playlist_move(&conn, id, 0, 1).unwrap());
+        assert_eq!(playlist_list_one(&conn, id).updated_at, 7);
+        assert!(playlist_move(&conn, id, 2, 0).unwrap());
+        assert_eq!(order(&conn, id), strings(&["b", "a", "a"]));
+        assert!(playlist_remove(&conn, id, &[0]).unwrap());
+        assert!(playlist_add(&conn, id, &strings(&["c"])).unwrap());
+        assert_eq!(order(&conn, id), strings(&["a", "a", "c"]));
+    }
+
+    #[test]
+    fn playlists_list_counts_and_covers_unchanged() {
+        let db = db();
+        let conn = db.0.lock().unwrap();
+        insert_track(&conn, "a", 1000, Some("c1"));
+        insert_track(&conn, "b", 2000, Some("c2"));
+        insert_track(&conn, "c", 4000, None);
+        insert_track(&conn, "d", 8000, Some("c3"));
+        insert_track(&conn, "e", 16000, Some("c4"));
+        insert_track(&conn, "f", 32000, Some("c5"));
+        insert_track(&conn, "g", 64000, Some("c1"));
+        let empty = playlist_create(&conn, "Empty").unwrap().id;
+        let gone_only = filled(&conn, &["navidrome:x", "local:gone"]);
+        let mixed = filled(&conn, &["c", "navidrome:x", "b", "a", "b", "g"]);
+        let many = filled(&conn, &["f", "e", "a", "g", "d", "b", "c"]);
+        let one = filled(&conn, &["d"]);
+        conn.execute("UPDATE playlists SET updated_at = 100 - id", [])
+            .unwrap();
+        conn.execute(
+            "UPDATE playlists SET updated_at = 1000 WHERE id = ?1",
+            [many],
+        )
+        .unwrap();
+
+        let listed = playlists_list(&conn).unwrap();
+        // The one query gives exactly what the per-playlist summary gives, in the same order.
+        let expected: Vec<Playlist> = [many, empty, gone_only, mixed, one]
+            .into_iter()
+            .map(|id| summarize(&conn, id).unwrap())
+            .collect();
+        assert_eq!(listed, expected);
+
+        let by_id = |id: i64| listed.iter().find(|p| p.id == id).unwrap().clone();
+        assert_eq!(by_id(empty).track_count, 0);
+        assert_eq!(by_id(empty).duration_ms, 0);
+        assert!(by_id(empty).cover_ids.is_empty());
+        // Entries whose track is missing count, add no duration and no cover.
+        assert_eq!(by_id(gone_only).track_count, 2);
+        assert_eq!(by_id(gone_only).duration_ms, 0);
+        assert!(by_id(gone_only).cover_ids.is_empty());
+        assert_eq!(by_id(mixed).track_count, 6);
+        assert_eq!(by_id(mixed).duration_ms, 4000 + 2000 + 1000 + 2000 + 64000);
+        assert_eq!(by_id(mixed).cover_ids, strings(&["c2", "c1"]));
+        assert_eq!(by_id(many).cover_ids, strings(&["c5", "c4", "c1", "c3"]));
+        assert_eq!(by_id(one).cover_ids, strings(&["c3"]));
+    }
+
+    #[test]
+    fn summary_scan_follows_the_primary_key() {
+        let db = db();
+        let conn = db.0.lock().unwrap();
+        assert_scan_needs_no_sort(&conn, "playlist_tracks");
     }
 
     #[test]

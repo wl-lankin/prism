@@ -408,6 +408,8 @@ pub fn run() {
             commands::navidrome_connect,
             commands::navidrome_disconnect,
             commands::navidrome_sync,
+            commands::navidrome_playlists,
+            commands::navidrome_playlist_entries,
             commands::mini_toggle,
             commands::mini_layout,
             commands::mini_menu,

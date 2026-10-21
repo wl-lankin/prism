@@ -16,6 +16,7 @@
 pub mod client;
 pub mod covers;
 pub mod keychain;
+pub mod playlists;
 pub mod stars;
 pub mod stream;
 pub mod sync;
@@ -41,6 +42,7 @@ use client::{
     normalize_url, Account, NavidromeError, NavidromeFailure, ServerInfo, SubsonicClient,
 };
 use keychain::{account_key, CredentialStore};
+use playlists::sync_playlists_cancellable;
 use stars::FlushOutcome;
 use sync::{
     ensure_server, server_key, sync_library_cancellable, wipe_navidrome, SyncError, SyncProgress,
@@ -427,6 +429,15 @@ impl Core {
         }
     }
 
+    /// [`Core::is_current`] checked while holding the database lock, the way a wipe orders
+    /// itself: a wipe that already holds the lock has bumped the epoch.
+    fn is_current_under_db_lock(&self, epoch: u64) -> bool {
+        match lock_db(&self.db) {
+            Ok(_conn) => self.is_current(epoch),
+            Err(_) => false,
+        }
+    }
+
     /// The scheduler thread: waits for a kick or the due time, then runs one cycle on a
     /// worker and waits for it before the next one.
     fn schedule(self: Arc<Core>) {
@@ -548,6 +559,11 @@ impl Core {
                 eprintln!("Navidrome star import: {}", err.code());
             }
             result => result?,
+        }
+        if sync_playlists_cancellable(&self.db, client, now_ms(), &cancelled)?
+            && self.is_current_under_db_lock(epoch)
+        {
+            (self.emit)(NavidromeEvent::PlaylistsChanged);
         }
         Ok(report)
     }

@@ -710,6 +710,61 @@ fn saved_account_starts_syncing() {
 }
 
 #[test]
+fn cycle_syncs_playlists_and_emits_only_on_change() {
+    let server = FakeServer::start(FakeLibrary::synthetic(2, 3));
+    let env = start(saved_account(&server, true));
+    env.wait_state(LinkState::Online);
+    env.wait_idle();
+    let playlists_changed = |env: &Env| {
+        env.events()
+            .iter()
+            .filter(|e| matches!(e, NavidromeEvent::PlaylistsChanged))
+            .count()
+    };
+    assert_eq!(env.count("SELECT COUNT(*) FROM remote_playlists"), 2);
+    assert_eq!(playlists_changed(&env), 1);
+    // Nothing changed on the server: one listing, no fetch, no event.
+    env.service.sync_now();
+    env.wait_idle();
+    env.wait_state(LinkState::Online);
+    assert_eq!(requests(&server, "getPlaylists"), 2);
+    assert_eq!(requests(&server, "getPlaylist"), 2);
+    assert_eq!(playlists_changed(&env), 1);
+    server.edit(|lib| {
+        lib.playlists.remove(0);
+    });
+    env.service.sync_now();
+    env.wait_idle();
+    env.wait_state(LinkState::Online);
+    assert_eq!(env.count("SELECT COUNT(*) FROM remote_playlists"), 1);
+    assert_eq!(playlists_changed(&env), 2);
+}
+
+#[test]
+fn a_failing_playlist_keeps_the_cycle_online() {
+    let server = FakeServer::start(FakeLibrary::synthetic(2, 3));
+    server.set_fault(Fault::CodeFor {
+        method: "getPlaylist",
+        id: "pl-1",
+        code: 0,
+    });
+    let env = start(saved_account(&server, true));
+    env.wait_state(LinkState::Online);
+    env.wait_idle();
+    let status = env.service.status();
+    assert_eq!(status.state, LinkState::Online);
+    assert!(status.error.is_none());
+    assert_eq!(env.nd_tracks(), 6);
+    assert_eq!(env.count("SELECT COUNT(*) FROM remote_playlists"), 1);
+    // The next cycle asks for it again and gets it.
+    server.set_fault(Fault::None);
+    env.service.sync_now();
+    env.wait_idle();
+    env.wait_state(LinkState::Online);
+    assert_eq!(env.count("SELECT COUNT(*) FROM remote_playlists"), 2);
+}
+
+#[test]
 fn a_panicking_cycle_does_not_stop_the_scheduler() {
     let server = FakeServer::start(FakeLibrary::synthetic(1, 2));
     let env = start(|_, _| {});

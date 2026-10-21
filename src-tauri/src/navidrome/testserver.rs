@@ -94,6 +94,13 @@ pub(crate) enum Fault {
         method: &'static str,
         payload: Value,
     },
+    /// Requests to `method` with this `id` fail with this Subsonic error code; everything else
+    /// is served normally.
+    CodeFor {
+        method: &'static str,
+        id: &'static str,
+        code: u32,
+    },
     /// Every request answers this HTTP status with a Subsonic error body of this code.
     StatusWithCode { status: u16, code: u32 },
 }
@@ -690,6 +697,13 @@ fn route(
             method: replaced,
             payload,
         } if replaced == method => return (Reply::json(ok(payload)), delivery),
+        Fault::CodeFor {
+            method: failing,
+            id,
+            code,
+        } if failing == method && param(&params, "id") == Some(id) => {
+            return (Reply::json(failed(code)), delivery)
+        }
         Fault::StatusWithCode { status, code } => {
             let mut reply = Reply::json(failed(code));
             reply.status = status;

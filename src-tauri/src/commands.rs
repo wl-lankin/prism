@@ -10,13 +10,14 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use crate::audio::list_devices;
 use crate::flow::{FlowOutcome, FlowVariant};
 use crate::library::favorites::{self, FavKind, FavoriteIds};
-use crate::library::model::{Album, Artist, Folder, Source, Track};
+use crate::library::model::{navidrome_raw, Album, Artist, Folder, Source, Track};
 use crate::library::playlists::{self, Playlist, PlaylistEntry};
 use crate::library::query::{self, SearchResult};
 use crate::library::scan::{lock, ScanReport};
 use crate::library::watch::{FolderWatcher, WatchState};
 use crate::library::{normalize, tauri_emitter, Library};
 use crate::navidrome::client::{NavidromeFailure, ServerInfo};
+use crate::navidrome::playlists::{self as remote_playlists, RemotePlaylist};
 use crate::navidrome::stars;
 use crate::navidrome::{NavidromeService, NavidromeStatus, FAILURE_INTERNAL};
 use crate::player::{PlayerState, QueueItem, DROPPED_PREFIX};
@@ -385,18 +386,21 @@ pub async fn playlist_create(app: AppHandle, name: String) -> Result<Playlist, S
 
 #[tauri::command]
 pub async fn playlist_rename(app: AppHandle, id: i64, name: String) -> Result<(), String> {
-    read(&app, move |conn| {
+    let changed = read(&app, move |conn| {
         playlists::playlist_rename(conn, id, &name)
     })
     .await?;
-    emit_playlists_changed(&app);
+    if changed {
+        emit_playlists_changed(&app);
+    }
     Ok(())
 }
 
 #[tauri::command]
 pub async fn playlist_delete(app: AppHandle, id: i64) -> Result<(), String> {
-    read(&app, move |conn| playlists::playlist_delete(conn, id)).await?;
-    emit_playlists_changed(&app);
+    if read(&app, move |conn| playlists::playlist_delete(conn, id)).await? {
+        emit_playlists_changed(&app);
+    }
     Ok(())
 }
 
@@ -408,31 +412,37 @@ pub async fn playlist_entries(app: AppHandle, id: i64) -> Result<Vec<PlaylistEnt
 #[tauri::command]
 pub async fn playlist_add(app: AppHandle, id: i64, track_ids: Vec<String>) -> Result<(), String> {
     library_ids_only(track_ids.iter().map(String::as_str))?;
-    read(&app, move |conn| {
+    let changed = read(&app, move |conn| {
         playlists::playlist_add(conn, id, &track_ids)
     })
     .await?;
-    emit_playlists_changed(&app);
+    if changed {
+        emit_playlists_changed(&app);
+    }
     Ok(())
 }
 
 #[tauri::command]
 pub async fn playlist_remove(app: AppHandle, id: i64, positions: Vec<u32>) -> Result<(), String> {
-    read(&app, move |conn| {
+    let changed = read(&app, move |conn| {
         playlists::playlist_remove(conn, id, &positions)
     })
     .await?;
-    emit_playlists_changed(&app);
+    if changed {
+        emit_playlists_changed(&app);
+    }
     Ok(())
 }
 
 #[tauri::command]
 pub async fn playlist_move(app: AppHandle, id: i64, from: u32, to: u32) -> Result<(), String> {
-    read(&app, move |conn| {
+    let changed = read(&app, move |conn| {
         playlists::playlist_move(conn, id, from, to)
     })
     .await?;
-    emit_playlists_changed(&app);
+    if changed {
+        emit_playlists_changed(&app);
+    }
     Ok(())
 }
 
@@ -597,6 +607,24 @@ pub async fn navidrome_disconnect(app: AppHandle) -> Result<(), String> {
 pub fn navidrome_sync(state: State<'_, AppState>) -> Result<(), String> {
     state.navidrome.sync_now();
     Ok(())
+}
+
+/// The server's playlists in the index (read-only), most recently changed first.
+#[tauri::command]
+pub async fn navidrome_playlists(app: AppHandle) -> Result<Vec<RemotePlaylist>, String> {
+    read(&app, remote_playlists::list).await
+}
+
+/// The entries of a server playlist; a track not in the index comes back with `track: None`.
+#[tauri::command]
+pub async fn navidrome_playlist_entries(
+    app: AppHandle,
+    id: String,
+) -> Result<Vec<PlaylistEntry>, String> {
+    if navidrome_raw(&id).is_none() {
+        return Err("This playlist no longer exists".to_string());
+    }
+    read(&app, move |conn| remote_playlists::entries(conn, &id)).await
 }
 
 // Shell
