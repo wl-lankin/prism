@@ -293,7 +293,12 @@ const en = {
   'navidrome.error.internal': 'Something went wrong with the Navidrome connection. Please try again.',
   'navidrome.error.withDetail': '{text} The server said: {detail}',
   'navidrome.notConnected': 'Navidrome is not connected. Sign in again in the settings.',
-  'navidrome.offlineNotice': 'Navidrome is not reachable. Press Play to go on once it is back.',
+  // Short enough for the two notice lines of the mini player.
+  'navidrome.offlineNotice': 'Navidrome is not reachable. Press Play once it is back.',
+
+  // Streamed quality (Task 17): a Navidrome track transcoded at the streaming quality.
+  'quality.streamedFrom': 'Streamed as {stream} from {file}',
+  'quality.from': '{stream} from {file}',
 
   'settings.navidrome': 'Navidrome',
   'settings.navidrome.lead': 'Sign in to your Navidrome server. Its library is kept on this computer, so you can browse it even when the server is away.',
@@ -631,7 +636,10 @@ const de: Record<Key, string> = {
   'navidrome.error.internal': 'Bei der Verbindung zu Navidrome ist etwas schiefgegangen. Bitte versuche es erneut.',
   'navidrome.error.withDetail': '{text} Der Server meldet: {detail}',
   'navidrome.notConnected': 'Navidrome ist nicht verbunden. Melde dich in den Einstellungen wieder an.',
-  'navidrome.offlineNotice': 'Navidrome ist nicht erreichbar. Drücke Wiedergabe, sobald der Server wieder da ist.',
+  'navidrome.offlineNotice': 'Navidrome ist nicht erreichbar. Später mit Abspielen fortsetzen.',
+
+  'quality.streamedFrom': 'Gestreamt als {stream} aus {file}',
+  'quality.from': '{stream} aus {file}',
 
   'settings.navidrome': 'Navidrome',
   'settings.navidrome.lead': 'Melde dich bei deinem Navidrome-Server an. Seine Mediathek wird auf diesem Computer gespeichert, so kannst du sie auch durchsuchen, wenn der Server nicht erreichbar ist.',

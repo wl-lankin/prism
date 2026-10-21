@@ -1,11 +1,18 @@
 <script lang="ts">
   import { t } from '../i18n';
-  import { favorites, isFavorite, setFavorite } from '../stores/favorites.svelte';
+  import { favorites, heartable, isFavorite, setFavorite } from '../stores/favorites.svelte';
+  import { notify } from '../stores/notice.svelte';
   import type { FavKind } from '../types';
   import Icon from './Icon.svelte';
 
   /** The favorite toggle. Off it is an outline; on it fills with the first spectrum color, and
-   *  turning it on sends a short prism-colored ring out from it. */
+   *  turning it on sends a short prism-colored ring out from it.
+   *
+   *  `id` may name several items that stand for one thing (an artist found in more than one
+   *  source): the heart is on when any of them is a favorite, and a click sets all of them to
+   *  the new state. Navidrome ids drop out while no account is signed in (the backend refuses
+   *  them); a heart left with nothing to change is `aria-disabled`, dimmed, and a click on it
+   *  says why instead of changing anything. */
   let {
     kind,
     id,
@@ -17,7 +24,7 @@
     revealed = false,
   }: {
     kind: FavKind;
-    id: string;
+    id: string | readonly string[];
     size?: number;
     /** The accessible name; it stays the same in both states (`aria-pressed` carries the state). */
     label?: string;
@@ -33,10 +40,15 @@
 
   let focused = $state(false);
 
+  const ids = $derived(typeof id === 'string' ? [id] : id);
+  /** The ids a click may change now. */
+  const usable = $derived(ids.filter((x) => heartable(x)));
+  const disabled = $derived(usable.length === 0);
+
   const on = $derived.by(() => {
     // Read the set itself so a reload of the whole set is followed too.
     void favorites.version;
-    return isFavorite(kind, id);
+    return ids.some((x) => isFavorite(kind, x));
   });
 
   /** A focused heart never hides, so a click that un-sets it does not leave focus on nothing. */
@@ -47,9 +59,14 @@
 
   function toggle(event: MouseEvent) {
     event.stopPropagation();
+    if (disabled) {
+      notify(t('navidrome.notConnected'));
+      return;
+    }
     const next = !on;
     if (next) bursts++;
-    void setFavorite(kind, id, next);
+    // Only the items not already in the new state, so nothing is queued for nothing.
+    for (const x of usable) if (isFavorite(kind, x) !== next) void setFavorite(kind, x, next);
   }
 </script>
 
@@ -59,10 +76,12 @@
   class:on
   class:round
   class:hidden
+  class:muted={disabled}
+  aria-disabled={disabled ? 'true' : undefined}
   aria-hidden={hidden ? 'true' : undefined}
   aria-pressed={on}
   aria-label={label ?? t('favorites.toggle')}
-  title={on ? t('favorites.remove') : t('favorites.add')}
+  title={disabled ? t('navidrome.notConnected') : on ? t('favorites.remove') : t('favorites.add')}
   {tabindex}
   onclick={toggle}
   onfocus={() => (focused = true)}
@@ -112,7 +131,7 @@
     pointer-events: none;
   }
 
-  .heart:hover {
+  .heart:hover:not(.muted) {
     color: var(--text);
     background: rgba(255, 255, 255, 0.07);
   }
@@ -121,11 +140,11 @@
     color: var(--spec-1);
   }
 
-  .heart.on:hover {
+  .heart.on:hover:not(.muted) {
     color: color-mix(in srgb, var(--spec-1) 82%, #fff);
   }
 
-  .heart:active .glyph {
+  .heart:active:not(.muted) .glyph {
     transform: scale(0.88);
   }
 
@@ -142,7 +161,7 @@
     color: var(--text);
   }
 
-  .round:hover {
+  .round:hover:not(.muted) {
     background: rgba(255, 255, 255, 0.1);
   }
 
@@ -151,8 +170,19 @@
     box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--spec-1) 38%, transparent);
   }
 
-  .round.on:hover {
+  .round.on:hover:not(.muted) {
     background: color-mix(in srgb, var(--spec-1) 20%, transparent);
+  }
+
+  /* Signed out of Navidrome: it still shows the state, quietly. Dimmed by color, not opacity,
+     so the rows' hover reveal (which sets the opacity) keeps working. */
+  .heart.muted {
+    color: rgba(243, 243, 245, 0.26);
+    cursor: default;
+  }
+
+  .heart.on.muted {
+    color: color-mix(in srgb, var(--spec-1) 45%, transparent);
   }
 
   .round:focus-visible {

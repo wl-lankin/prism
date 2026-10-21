@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { sourceQualityLabel } from '../format';
+  import { sourceQualityLabel, streamedFrom } from '../format';
   import { holdToOpen } from '../flow';
   import { t } from '../i18n';
   import {
@@ -17,9 +17,10 @@
   } from '../ipc';
   import { initFavorites } from '../stores/favorites.svelte';
   import { notice, notify } from '../stores/notice.svelte';
-  import { initPlayer, player } from '../stores/player.svelte';
+  import { initNavidrome } from '../stores/navidrome.svelte';
+  import { followPlayerErrors, initPlayer, player } from '../stores/player.svelte';
   import { initRing, ring } from '../stores/ring.svelte';
-  import { followSettings, initSettings } from '../stores/settings.svelte';
+  import { followSettings, initSettings, settings } from '../stores/settings.svelte';
   import type { FlowVariant } from '../types';
   import shape from '../window-shape.json';
   import Cover from './Cover.svelte';
@@ -65,6 +66,24 @@
     return () => {
       gone = true;
       stop?.();
+    };
+  });
+
+  // The Navidrome status (hearts on Navidrome tracks need an account) and the offline notice,
+  // which shows here in the notice line and never takes focus.
+  $effect(() => {
+    const stops: (() => void)[] = [];
+    let gone = false;
+    const keep = (stop: () => void) => (gone ? stop() : stops.push(stop));
+    initNavidrome()
+      .then(keep)
+      .catch((err) => console.error('loading the Navidrome status failed', err));
+    followPlayerErrors()
+      .then(keep)
+      .catch((err) => console.error('following the player errors failed', err));
+    return () => {
+      gone = true;
+      for (const stop of stops) stop();
     };
   });
 
@@ -119,7 +138,12 @@
   const mode: RingMode = $derived(player.status === 'idle' ? 'flow' : player.status === 'playing' ? 'pause' : 'play');
   const progress = $derived(player.durationMs > 0 ? player.positionMs / player.durationMs : 0);
   const byline = $derived(track ? [track.artist, track.album].filter(Boolean).join(' · ') : '');
-  const source = $derived(track ? sourceQualityLabel(track, (s) => t(`source.${s}`)) : '');
+  const source = $derived(track ? sourceQualityLabel(track, (s) => t(`source.${s}`), settings.navidromeQuality) : '');
+  /** The line's tooltip also names the file behind a transcode; the line itself stays short. */
+  const sourceTitle = $derived.by(() => {
+    const file = track ? streamedFrom(track, settings.navidromeQuality) : null;
+    return file ? t('quality.from', { stream: source, file }) : source;
+  });
 
   let lastVolume = 0.8;
   const muted = $derived(player.volume <= 0.001);
@@ -248,7 +272,7 @@
           <div class="title" title={track.title}>{track.title}</div>
           <div class="lines">
             <div class="sub" title={byline}>{player.status === 'loading' ? t('transport.loading') : byline}</div>
-            <div class="source" style="--dot:var(--src-{track.source})" title={source}><span>{source}</span></div>
+            <div class="source" style="--dot:var(--src-{track.source})" title={sourceTitle}><span>{source}</span></div>
           </div>
         {/if}
         <p class="notice" role="status" aria-live="polite">{notice.text ?? ''}</p>

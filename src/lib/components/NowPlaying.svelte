@@ -1,12 +1,13 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import { formatDuration, sourceQualityLabel } from '../format';
+  import { formatDuration, sourceQualityLabel, streamedFrom } from '../format';
   import { t } from '../i18n';
   import { coverUrl, playerJump, playerQueueRange } from '../ipc';
   import { evictPages, pagesFor } from '../pages';
   import { FAVORITE_KEY, isFavoriteKey, toggleFavorite } from '../stores/favorites.svelte';
   import { go } from '../stores/nav.svelte';
   import { player } from '../stores/player.svelte';
+  import { settings } from '../stores/settings.svelte';
   import type { FlowVariant, QueueItem, Track } from '../types';
   import { visibleRange } from '../virtual';
   import Backdrop from './Backdrop.svelte';
@@ -30,6 +31,13 @@
   const current = $derived(player.queueIndex);
   /** Dropped files ("file:" ids) are not in the library: no album, no artist page, no heart. */
   const inLibrary = $derived(!!track && !track.id.startsWith('file:'));
+  /** Source and how it plays; a Navidrome transcode also names the file behind it. */
+  const qualityText = $derived.by(() => {
+    if (!track) return '';
+    const label = sourceQualityLabel(track, (s) => t(`source.${s}`), settings.navidromeQuality);
+    const file = streamedFrom(track, settings.navidromeQuality);
+    return file ? t('quality.from', { stream: label, file }) : label;
+  });
   const backdrop = $derived(coverUrl(track?.coverId ?? null, 96));
 
   const flow = $derived((player.flow ?? null) as FlowVariant | null);
@@ -253,7 +261,7 @@
         </p>
         <div class="source">
           <span class="quality" style="--dot:var(--src-{track.source})">
-            {sourceQualityLabel(track, (s) => t(`source.${s}`))}
+            <span class="qtext" title={qualityText}>{qualityText}</span>
           </span>
           {#if inLibrary}
             <Heart kind="track" id={track.id} round label={t('favorites.toggleItem', { name: track.title })} />
@@ -495,10 +503,19 @@
     letter-spacing: 0.01em;
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
+    min-width: 0;
+  }
+
+  /* A transcode label is longer; a narrow header cuts it, the tooltip has it whole. */
+  .qtext {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .quality::before {
     content: '';
+    flex: none;
     width: 7px;
     height: 7px;
     border-radius: 50%;

@@ -164,3 +164,31 @@ it('shows the generic text for a failure with a code newer than this build', () 
   expect(navidromeErrorText({ code: 'later' })).toBe(strings.en['navidrome.error.internal']);
   expect(navidromeErrorText({ code: 'server', detail: 'busy' })).toContain('busy');
 });
+
+it('knows the status after the first answer, the first event or a failed load', async () => {
+  const { navidromeStatusKnown } = await import('./navidrome.svelte');
+
+  navidromeStatusKnown.loaded = false;
+  invoke.mockResolvedValue(status({ state: 'off', configured: false }));
+  let stop = await initNavidrome();
+  expect(navidromeStatusKnown.loaded).toBe(true);
+  stop();
+
+  // An event before the answer is enough.
+  navidromeStatusKnown.loaded = false;
+  invoke.mockReturnValue(new Promise(() => {}));
+  void initNavidrome();
+  await vi.waitFor(() => expect(listeners.has('navidrome://status')).toBe(true));
+  expect(navidromeStatusKnown.loaded).toBe(false);
+  send(status({ state: 'online' }));
+  expect(navidromeStatusKnown.loaded).toBe(true);
+
+  // A failed load too: the hearts then go by the starting state.
+  navidromeStatusKnown.loaded = false;
+  invoke.mockRejectedValue(new Error('no backend'));
+  vi.spyOn(console, 'error').mockImplementation(() => {});
+  stop = await initNavidrome();
+  expect(navidromeStatusKnown.loaded).toBe(true);
+  stop();
+  vi.mocked(console.error).mockRestore();
+});

@@ -952,3 +952,314 @@ describe('Row play button', () => {
     unmount(app);
   });
 });
+
+// Task 17: Navidrome favorites, artist hearts, signed-out hearts, the offline notice and
+// streamed quality labels.
+describe('Navidrome favorites and quality', () => {
+  const ndArtist: Artist = {
+    id: 'navidrome:ar1',
+    source: 'navidrome',
+    name: 'Lumen Field',
+    albumCount: 2,
+    trackCount: 9,
+    coverId: null,
+  };
+  const ndTrack = (over: Partial<Track> = {}): Track => ({
+    ...track(1),
+    id: 'navidrome:s1',
+    source: 'navidrome',
+    albumId: 'navidrome:al1',
+    path: null,
+    bitDepth: 24,
+    sampleRate: 96_000,
+    ...over,
+  });
+
+  /** Serves `answers` for the named commands and the shared mock for the rest. */
+  function serve(answers: Record<string, unknown>) {
+    const base = invoke.getMockImplementation()!;
+    invoke.mockImplementation(async (cmd, args) => (cmd in answers ? answers[cmd] : base(cmd, args)));
+    return () => invoke.mockImplementation(base);
+  }
+
+  let restore: (() => void) | undefined;
+  beforeEach(async () => {
+    const { navidrome, navidromeStatusKnown } = await import('../stores/navidrome.svelte');
+    const { favorites } = await import('../stores/favorites.svelte');
+    navidrome.state = 'online';
+    navidromeStatusKnown.loaded = true;
+    favorites.tracks.clear();
+    favorites.albums.clear();
+    favorites.artists.clear();
+  });
+  afterEach(async () => {
+    restore?.();
+    restore = undefined;
+    const { navidrome, navidromeStatusKnown } = await import('../stores/navidrome.svelte');
+    const { player } = await import('../stores/player.svelte');
+    const { settings } = await import('../stores/settings.svelte');
+    const { notice } = await import('../stores/notice.svelte');
+    navidrome.state = 'off';
+    navidromeStatusKnown.loaded = false;
+    settings.navidromeQuality = 'original';
+    notice.text = null;
+    Object.assign(player, { status: 'idle', track: null });
+    library.artists = null;
+  });
+
+  async function favoritesView(artists: Artist[]) {
+    const { default: FavoritesView } = await import('./FavoritesView.svelte');
+    const { favorites } = await import('../stores/favorites.svelte');
+    for (const a of artists) favorites.artists.add(a.id);
+    restore = serve({ favorites_tracks: [], favorites_albums: [], favorites_artists: artists });
+    const app = mount(FavoritesView, { target });
+    await settle();
+    (target.querySelector('#fav-tab-artist') as HTMLElement).click();
+    flushSync();
+    return app;
+  }
+
+  const chips = () => [...target.querySelectorAll('.chips [role="radio"]')].map((x) => x.textContent?.trim());
+  const artistNames = () => [...target.querySelectorAll('.artists .text')].map((x) => x.textContent);
+
+  it('navidrome_chip_appears_with_navidrome_favorites', async () => {
+    const app = await favoritesView([ndArtist]);
+    expect(chips()).toEqual(['All', 'Local files', 'Navidrome']);
+    unmount(app);
+  });
+
+  it('artist_favorites_filter_by_source', async () => {
+    const other: Artist = { ...artist, id: 'Quiet Harbor', name: 'Quiet Harbor' };
+    const app = await favoritesView([other, ndArtist]);
+    expect(artistNames()).toEqual(['Quiet Harbor', 'Lumen Field']);
+
+    const navidromeChip = [...target.querySelectorAll<HTMLElement>('.chips [role="radio"]')][2];
+    navidromeChip.click();
+    flushSync();
+    expect(artistNames()).toEqual(['Lumen Field']);
+    // The heart of a listed artist is its id, not its name.
+    const heart = target.querySelector('.artists .heart') as HTMLElement;
+    heart.click();
+    flushSync();
+    expect(invoke).toHaveBeenCalledWith('favorites_set', { kind: 'artist', id: 'navidrome:ar1', on: false });
+    unmount(app);
+  });
+
+  it('says so when only another source has favorite artists', async () => {
+    const app = await favoritesView([ndArtist]);
+    [...target.querySelectorAll<HTMLElement>('.chips [role="radio"]')][1].click();
+    flushSync();
+    expect(target.querySelector('.empty .lead')?.textContent).toBe('None of these favorites come from Local files.');
+    unmount(app);
+  });
+
+  async function artistView(artists: Artist[]) {
+    const { default: ArtistView } = await import('./ArtistView.svelte');
+    library.artists = artists;
+    const app = mount(ArtistView, { target, props: { name: 'Lumen Field' } });
+    await settle();
+    return { app, heart: target.querySelector('.hero .heart') as HTMLButtonElement };
+  }
+
+  const setCalls = () => invoke.mock.calls.filter(([cmd]) => cmd === 'favorites_set').map(([, args]) => args);
+
+  it('artist_view_hearts_the_navidrome_id', async () => {
+    // Navidrome only: the Navidrome id, so the favorite resolves and reaches the server.
+    let view = await artistView([ndArtist]);
+    view.heart.click();
+    flushSync();
+    expect(setCalls()).toEqual([{ kind: 'artist', id: 'navidrome:ar1', on: true }]);
+    unmount(view.app);
+
+    // Local only: the name, as in M2.
+    const { favorites } = await import('../stores/favorites.svelte');
+    favorites.artists.clear();
+    invoke.mockClear();
+    view = await artistView([artist]);
+    view.heart.click();
+    flushSync();
+    expect(setCalls()).toEqual([{ kind: 'artist', id: 'Lumen Field', on: true }]);
+    unmount(view.app);
+  });
+
+  it('an artist in both sources hearts both, and un-hearts both from either', async () => {
+    const { favorites } = await import('../stores/favorites.svelte');
+    const view = await artistView([artist, ndArtist]);
+    expect(view.heart.getAttribute('aria-pressed')).toBe('false');
+    view.heart.click();
+    flushSync();
+    expect(setCalls()).toEqual([
+      { kind: 'artist', id: 'Lumen Field', on: true },
+      { kind: 'artist', id: 'navidrome:ar1', on: true },
+    ]);
+
+    // Starred on the server only (imported): the heart is on, and one click clears both
+    // without touching the side that is already off.
+    favorites.artists.clear();
+    favorites.artists.add('navidrome:ar1');
+    flushSync();
+    expect(view.heart.getAttribute('aria-pressed')).toBe('true');
+    invoke.mockClear();
+    view.heart.click();
+    flushSync();
+    expect(setCalls()).toEqual([{ kind: 'artist', id: 'navidrome:ar1', on: false }]);
+    expect(view.heart.getAttribute('aria-pressed')).toBe('false');
+    unmount(view.app);
+  });
+
+  it('mutes hearts on Navidrome items while signed out, and keeps local ones', async () => {
+    const { default: Heart } = await import('./Heart.svelte');
+    const { navidrome } = await import('../stores/navidrome.svelte');
+    const { notice } = await import('../stores/notice.svelte');
+    navidrome.state = 'off';
+    const app = mount(Heart, { target, props: { kind: 'track', id: 'navidrome:s1' } });
+    const local = mount(Heart, { target, props: { kind: 'track', id: 'local:t1' } });
+    flushSync();
+    const [nd, loc] = [...target.querySelectorAll<HTMLButtonElement>('.heart')];
+    expect(nd.getAttribute('aria-disabled')).toBe('true');
+    expect(nd.disabled).toBe(false);
+    expect(nd.title).toBe('Navidrome is not connected. Sign in again in the settings.');
+    expect(loc.getAttribute('aria-disabled')).toBeNull();
+    // A click says why instead of changing anything.
+    nd.click();
+    flushSync();
+    expect(invoke).not.toHaveBeenCalledWith('favorites_set', expect.anything());
+    expect(nd.getAttribute('aria-pressed')).toBe('false');
+    expect(notice.text).toBe('Navidrome is not connected. Sign in again in the settings.');
+
+    // Offline (or any state but off) hearts still work: the backend queues them.
+    navidrome.state = 'offline';
+    flushSync();
+    expect(nd.getAttribute('aria-disabled')).toBeNull();
+    nd.click();
+    flushSync();
+    expect(invoke).toHaveBeenCalledWith('favorites_set', { kind: 'track', id: 'navidrome:s1', on: true });
+    unmount(app);
+    unmount(local);
+  });
+
+  it('does not mute Navidrome hearts before the first status answer', async () => {
+    const { default: Heart } = await import('./Heart.svelte');
+    const { navidrome, navidromeStatusKnown } = await import('../stores/navidrome.svelte');
+    // The store's starting value, before the backend answered: not a sign-out.
+    navidrome.state = 'off';
+    navidromeStatusKnown.loaded = false;
+    const app = mount(Heart, { target, props: { kind: 'track', id: 'navidrome:s1' } });
+    flushSync();
+    const heart = target.querySelector<HTMLButtonElement>('.heart')!;
+    expect(heart.getAttribute('aria-disabled')).toBeNull();
+    expect(heart.classList.contains('muted')).toBe(false);
+    // Once the answer says signed out, it mutes.
+    navidromeStatusKnown.loaded = true;
+    flushSync();
+    expect(heart.getAttribute('aria-disabled')).toBe('true');
+    unmount(app);
+  });
+
+  it('the artist heart writes all its ids before the first status answer', async () => {
+    const { navidrome, navidromeStatusKnown } = await import('../stores/navidrome.svelte');
+    navidrome.state = 'off';
+    navidromeStatusKnown.loaded = false;
+    const view = await artistView([artist, ndArtist]);
+    view.heart.click();
+    flushSync();
+    expect(setCalls()).toEqual([
+      { kind: 'artist', id: 'Lumen Field', on: true },
+      { kind: 'artist', id: 'navidrome:ar1', on: true },
+    ]);
+    unmount(view.app);
+  });
+
+  it('plays only the albums of the shown favorite artists, by name and source', async () => {
+    const localAlbum = { ...album, id: 'a1', source: 'local' as const };
+    const ndAlbum = { ...album, id: 'navidrome:al1', source: 'navidrome' as const };
+    // Only the local "Lumen Field" is a favorite; the name also exists in Navidrome.
+    const app = await favoritesView([artist]);
+    const base = invoke.getMockImplementation()!;
+    invoke.mockImplementation(async (cmd, args) =>
+      cmd === 'library_artist_albums' ? [localAlbum, ndAlbum] : base(cmd, args),
+    );
+    const play = [...target.querySelectorAll<HTMLButtonElement>('.btn.primary')][0];
+    play.click();
+    await settle();
+    const albumCalls = invoke.mock.calls.filter(([cmd]) => cmd === 'library_album_tracks').map(([, a]) => a);
+    expect(albumCalls).toEqual([{ albumId: 'a1' }]);
+    unmount(app);
+  });
+
+  it('shows the not-connected text, never the raw error, when a heart is refused', async () => {
+    const { setFavorite } = await import('../stores/favorites.svelte');
+    const { notice } = await import('../stores/notice.svelte');
+    // Tauri rejects a command with the error string itself.
+    const base = invoke.getMockImplementation()!;
+    restore = () => invoke.mockImplementation(base);
+    invoke.mockImplementation(async (cmd, args) => {
+      if (cmd === 'favorites_set') throw 'Navidrome is not connected';
+      return base(cmd, args);
+    });
+    await setFavorite('track', 'navidrome:s1', true);
+    expect(notice.text).toBe('Navidrome is not connected. Sign in again in the settings.');
+  });
+
+  it('offline_error_shows_one_notice', async () => {
+    const { listen } = await import('@tauri-apps/api/event');
+    const { followPlayerErrors } = await import('../stores/player.svelte');
+    const { notice } = await import('../stores/notice.svelte');
+    let emit: ((event: { payload: unknown }) => void) | undefined;
+    vi.mocked(listen).mockImplementationOnce(async (name, cb) => {
+      expect(name).toBe('player://error');
+      emit = cb as typeof emit;
+      return () => {};
+    });
+    vi.useFakeTimers();
+    const stop = await followPlayerErrors();
+    const offline = { trackId: 'navidrome:s1', message: 'Navidrome is not reachable', kind: 'offline' };
+
+    emit!({ payload: offline });
+    expect(notice.text).toBe('Navidrome is not reachable. Press Play once it is back.');
+    // The same notice is not stacked or restarted by a second report while it shows.
+    emit!({ payload: offline });
+    expect(notice.text).toBe('Navidrome is not reachable. Press Play once it is back.');
+    vi.advanceTimersByTime(5000);
+    expect(notice.text).toBeNull();
+
+    // A track error shows nothing, as in M2: the player moves on by itself.
+    emit!({ payload: { trackId: 'local:t1', message: 'decode failed', kind: 'track' } });
+    expect(notice.text).toBeNull();
+
+    // A later drop is a new event with its own notice, in the UI language.
+    setLang('de');
+    emit!({ payload: offline });
+    expect(notice.text).toBe('Navidrome ist nicht erreichbar. Später mit Abspielen fortsetzen.');
+    stop();
+  });
+
+  it('labels the streamed quality in the transport strip and Now Playing', async () => {
+    const { default: TransportStrip } = await import('./TransportStrip.svelte');
+    const { default: NowPlaying } = await import('./NowPlaying.svelte');
+    const { player } = await import('../stores/player.svelte');
+    const { settings } = await import('../stores/settings.svelte');
+    Object.assign(player, { status: 'playing', track: ndTrack() });
+    const strip = mount(TransportStrip, { target });
+    const np = mount(NowPlaying, { target });
+    flushSync();
+    const stripLabel = () => target.querySelector('.strip .quality') as HTMLElement;
+    const npLabel = () => target.querySelector('.source .quality') as HTMLElement;
+    expect(stripLabel().textContent?.trim()).toBe('FLAC 24/96');
+    expect(npLabel().textContent?.trim()).toBe('Navidrome · FLAC 24/96');
+
+    settings.navidromeQuality = '192';
+    flushSync();
+    expect(stripLabel().textContent?.trim()).toBe('MP3 192');
+    expect(stripLabel().title).toBe('Streamed as MP3 192 from FLAC 24/96');
+    expect(npLabel().textContent?.trim()).toBe('Navidrome · MP3 192 from FLAC 24/96');
+
+    // A local track ignores the streaming quality.
+    player.track = track(1);
+    flushSync();
+    expect(stripLabel().textContent?.trim()).toBe('FLAC 16/44.1');
+    expect(stripLabel().title).toBe('');
+    unmount(np);
+    unmount(strip);
+  });
+});

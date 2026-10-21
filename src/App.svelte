@@ -32,7 +32,7 @@
   import { initNavidrome } from './lib/stores/navidrome.svelte';
   import { go, nav, overlays, type View } from './lib/stores/nav.svelte';
   import { notice, notify } from './lib/stores/notice.svelte';
-  import { initPlayer, player } from './lib/stores/player.svelte';
+  import { followPlayerErrors, initPlayer, player } from './lib/stores/player.svelte';
   import { initRing, ring } from './lib/stores/ring.svelte';
   import { followSettings, initSettings } from './lib/stores/settings.svelte';
   import { initWindow, windowState } from './lib/stores/window.svelte';
@@ -121,6 +121,19 @@
     initNavidrome()
       .then((cleanup) => (gone ? cleanup() : (stop = cleanup)))
       .catch((err) => console.error('loading the Navidrome status failed', err));
+    return () => {
+      gone = true;
+      stop?.();
+    };
+  });
+
+  // One notice when a Navidrome track pauses because the server cannot be reached.
+  $effect(() => {
+    let stop: (() => void) | undefined;
+    let gone = false;
+    followPlayerErrors()
+      .then((unlisten) => (gone ? unlisten() : (stop = unlisten)))
+      .catch((err) => console.error('following the player errors failed', err));
     return () => {
       gone = true;
       stop?.();

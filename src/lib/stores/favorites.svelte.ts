@@ -2,10 +2,12 @@ import { SvelteSet } from 'svelte/reactivity';
 import { t } from '../i18n';
 import { favoritesIds, favoritesSet, onFavoritesChanged } from '../ipc';
 import type { FavKind, FavoriteIds } from '../types';
+import { navidrome, navidromeErrorText, navidromeStatusKnown } from './navidrome.svelte';
 import { notify } from './notice.svelte';
 
-/** Every favorite id, by kind. Track and album ids, artist names. The sets are filled from
- *  `favorites_ids` and changed in place, so `has()` in a template follows each id. */
+/** Every favorite id, by kind. Track, album and artist ids (a local artist's id is its name,
+ *  a Navidrome artist's `navidrome:<id>`). The sets are filled from `favorites_ids` and
+ *  changed in place, so `has()` in a template follows each id. */
 class FavoritesStore {
   tracks = new SvelteSet<string>();
   albums = new SvelteSet<string>();
@@ -54,6 +56,14 @@ export function isFavorite(kind: FavKind, id: string): boolean {
   return setOf(kind).has(id);
 }
 
+/** Whether a heart may change `id` now. A Navidrome item needs a signed-in account (online,
+ *  offline or failing alike: the backend queues the star); while signed out the backend
+ *  refuses it. Before the first status answer every id counts as heartable, so nothing flashes
+ *  dimmed at startup; a real refusal then comes back as "not connected" with its notice. */
+export function heartable(id: string): boolean {
+  return !id.startsWith('navidrome:') || !navidromeStatusKnown.loaded || navidrome.state !== 'off';
+}
+
 /** Shows the change at once, then saves it; a failure puts the old state back with a notice. */
 export async function setFavorite(kind: FavKind, id: string, on: boolean): Promise<void> {
   const set = setOf(kind);
@@ -70,7 +80,9 @@ export async function setFavorite(kind: FavKind, id: string, on: boolean): Promi
       if (was) set.add(id);
       else set.delete(id);
     }
-    notify(t('favorites.failed', { message: String(err) }));
+    // A heart on a Navidrome item while signed out says so in the UI language.
+    const text = navidromeErrorText(err);
+    notify(text === t('navidrome.notConnected') ? text : t('favorites.failed', { message: text }));
   } finally {
     if (pending.get(key) === on) pending.delete(key);
   }
