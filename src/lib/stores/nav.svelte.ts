@@ -13,6 +13,7 @@ export type View =
   | 'artist'
   | 'nowplaying'
   | 'radio'
+  | 'youtube'
   | 'settings';
 
 export interface Nav {

@@ -13,6 +13,7 @@
   import Icon from './lib/components/Icon.svelte';
   import NowPlaying from './lib/components/NowPlaying.svelte';
   import RadioView from './lib/components/RadioView.svelte';
+  import YouTubeView from './lib/components/YouTubeView.svelte';
   import PlaylistsView from './lib/components/PlaylistsView.svelte';
   import PlaylistView from './lib/components/PlaylistView.svelte';
   import QueuePanel from './lib/components/QueuePanel.svelte';
@@ -35,6 +36,7 @@
   import { albumsOf, artistsOf, countOf, hasMixedSources, initLibrary, library } from './lib/stores/library.svelte';
   import { failureText, initNavidrome, navidrome } from './lib/stores/navidrome.svelte';
   import { initRadio, radio } from './lib/stores/radio.svelte';
+  import { initYtm } from './lib/stores/ytm.svelte';
   import { go, nav, overlays, type View } from './lib/stores/nav.svelte';
   import { notice, notify } from './lib/stores/notice.svelte';
   import { followPlayerErrors, initPlayer, player } from './lib/stores/player.svelte';
@@ -126,6 +128,18 @@
     initRadio()
       .then((cleanup) => (gone ? cleanup() : (stop = cleanup)))
       .catch((err) => console.error('loading the radio state failed', err));
+    return () => {
+      gone = true;
+      stop?.();
+    };
+  });
+
+  $effect(() => {
+    let stop: (() => void) | undefined;
+    let gone = false;
+    initYtm()
+      .then((cleanup) => (gone ? cleanup() : (stop = cleanup)))
+      .catch((err) => console.error('loading the YouTube Music state failed', err));
     return () => {
       gone = true;
       stop?.();
@@ -385,6 +399,7 @@
     artist: 'nav.artists',
     nowplaying: 'nowPlaying.title',
     radio: 'radio.title',
+    youtube: 'ytm.title',
     settings: 'nav.settings',
   };
 </script>
@@ -521,6 +536,8 @@
               <FavoritesView />
             {:else if nav.view === 'radio'}
               <RadioView />
+            {:else if nav.view === 'youtube'}
+              <YouTubeView />
             {:else if nav.view === 'nowplaying'}
               <NowPlaying />
             {:else if nav.view === 'playlists'}

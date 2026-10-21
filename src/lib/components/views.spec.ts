@@ -1364,12 +1364,6 @@ describe('Sources', () => {
     unmount(mounted);
   });
 
-  it('has no YouTube placeholder in the sidebar', async () => {
-    const mounted = await app();
-    expect(entry('YouTube Music')).toBeUndefined();
-    unmount(mounted);
-  });
-
   it('local_entry_passes_source_local', async () => {
     const mounted = await app();
     entry('Local files')!.click();
