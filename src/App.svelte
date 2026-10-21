@@ -31,10 +31,10 @@
   import { activateIdle, holdToOpen } from './lib/flow';
   import { lang, t, tc, type Key } from './lib/i18n';
   import { onNavGo, playerPlayFiles, playerToggle, startupNotice, traySetLabels, windowVibrancy } from './lib/ipc';
-  import { initFavorites } from './lib/stores/favorites.svelte';
+  import { favorites, initFavorites } from './lib/stores/favorites.svelte';
   import { albumsOf, artistsOf, countOf, hasMixedSources, initLibrary, library } from './lib/stores/library.svelte';
   import { failureText, initNavidrome, navidrome } from './lib/stores/navidrome.svelte';
-  import { initRadio } from './lib/stores/radio.svelte';
+  import { initRadio, radio } from './lib/stores/radio.svelte';
   import { go, nav, overlays, type View } from './lib/stores/nav.svelte';
   import { notice, notify } from './lib/stores/notice.svelte';
   import { followPlayerErrors, initPlayer, player } from './lib/stores/player.svelte';
@@ -59,9 +59,9 @@
   const ringSize = $derived(maximized ? MAIN.ringMaximized : MAIN.ring);
   const strip = $derived(maximized ? 0 : MAIN.strip);
   /** The ring dock's bottom, measured from the window's bottom edge. */
-  const dockBottom = $derived(maximized ? (TRANSPORT - ringSize) / 2 : MAIN.ringRoom);
+  const dockBottom = $derived(maximized ? (TRANSPORT - ringSize) / 2 : MAIN.ringRoom + MAIN.ringLift);
   /** The dock's top above the card's bottom edge, for the notice above it. */
-  const dockTop = $derived(maximized ? dockBottom + ringSize : ringSize / 2);
+  const dockTop = $derived(maximized ? dockBottom + ringSize : ringSize / 2 + MAIN.ringLift);
   const isMac = typeof navigator !== 'undefined' && /Mac/.test(navigator.platform || navigator.userAgent);
 
   let glass = $state(false);
@@ -318,6 +318,7 @@
   /** An empty view of every source while Navidrome is signed in says what Navidrome is doing
    *  (the first sync, mostly) rather than asking for a music folder. */
   const emptyAsNavidrome = $derived(nav.source === 'navidrome' || (!nav.source && navidrome.configured));
+  const hasHomeStations = $derived(radio.saved.favorites.some((x) => favorites.stations.has(x.id)));
 
   const sourceTabs = $derived<{ value: SourceTab; label: string }[]>([
     { value: 'albums', label: t('nav.albums') },
@@ -489,9 +490,10 @@
             {:else if libraryView(nav.view) && library.trackCounts === null}
               <!-- The first load takes a moment; nothing flashes meanwhile. -->
             {:else if libraryView(nav.view) && shownTracks === 0}
-              <!-- With the stations row above, the empty state takes the room that is left and
-                   scrolls if that is too little, so nothing is cut off at the strip. -->
-              <div class="empty-home">
+              <!-- Under favorite stations, the empty library is a quiet section of Home
+                   rather than the big centred invitation. -->
+              {@const withStations = nav.view === 'home' && !nav.source && hasHomeStations}
+              <div class="empty-home" class:with-stations={withStations}>
                 {#if nav.view === 'home' && !nav.source}
                   <div class="home-stations"><HomeStations /></div>
                 {/if}
@@ -499,7 +501,7 @@
                   {#if emptyAsNavidrome}
                     <SourceEmpty source="navidrome" offerLocal={!nav.source} />
                   {:else}
-                    <EmptyLibrary />
+                    <EmptyLibrary compact={withStations} />
                   {/if}
                 </div>
               </div>

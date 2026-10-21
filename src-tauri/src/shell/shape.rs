@@ -19,6 +19,8 @@ pub struct MainShape {
     pub strip: f64,
     pub ring: f64,
     pub ring_room: f64,
+    /// How far the ring's centre sits above the card's bottom edge (owner, 2026-10-21).
+    pub ring_lift: f64,
     /// The dark ring the page draws around the Flow ring (`box-shadow: 0 0 0 <bezel>px`).
     pub bezel: f64,
     pub corner: f64,
@@ -95,7 +97,7 @@ pub fn main_region(width: f64, height: f64) -> Region {
         corner: main.corner,
         ring: Circle {
             cx: width / 2.0,
-            cy: bottom,
+            cy: bottom - main.ring_lift,
             r: main.ring / 2.0 + main.bezel + main.glow,
         },
     }
@@ -499,9 +501,11 @@ mod tests {
         // The ring's lower half hangs below the card, over the strip.
         assert!(region.contains(W / 2.0, H - strip + 30.0));
         assert!(region.contains(W / 2.0 + 30.0, H - strip + 20.0));
-        // The glow below the ring is part of the shape too, out to where it fades (88 px).
-        assert!(region.contains(W / 2.0, H - strip + 88.0));
-        assert!(region.contains(W / 2.0 + 62.0, H - strip + 62.0));
+        // The glow below the ring is part of the shape too, out to where it fades (88 px from
+        // the ring's centre, which sits `ringLift` above the card's edge).
+        let lift = shapes().main.ring_lift;
+        assert!(region.contains(W / 2.0, H - strip - lift + 88.0));
+        assert!(region.contains(W / 2.0 + 62.0, H - strip - lift + 62.0));
     }
 
     #[test]
@@ -539,7 +543,7 @@ mod tests {
             region.ring,
             Circle {
                 cx: W / 2.0,
-                cy: H - main.strip,
+                cy: H - main.strip - main.ring_lift,
                 r: main.ring / 2.0 + main.bezel + main.glow
             }
         );
@@ -632,14 +636,15 @@ mod tests {
             GdiRects {
                 card: [0, 0, 1281, 726],
                 ellipse: 32,
-                ring: [550, 634, 731, 815],
+                ring: [550, 626, 731, 807],
             }
         );
         let at_175 = GdiRects::new(&region, 1.75);
         // 724 * 1.75 = 1267, + 1 for GDI, + 2 slack; ring r = 90 * 1.75 = 157.5.
         assert_eq!(at_175.card, [0, 0, 2241, 1270]);
         assert_eq!(at_175.ellipse, 56);
-        assert_eq!(at_175.ring, [963, 1110, 1279, 1426]);
+        // The ring's centre: (724 - 8) * 1.75 = 1253.
+        assert_eq!(at_175.ring, [963, 1096, 1279, 1412]);
         // Equal input gives equal rects, so an unchanged shape is not applied again.
         assert_eq!(GdiRects::new(&main_region(W, H), 1.75), at_175);
         assert_ne!(GdiRects::new(&main_region(W + 1.0, H), 1.75), at_175);
@@ -656,6 +661,7 @@ mod tests {
                 strip: 96.0,
                 ring: 96.0,
                 ring_room: 48.0,
+                ring_lift: 8.0,
                 bezel: 6.0,
                 corner: 16.0,
                 // Measured on screen: the 96 px ring's blurred glow fades out about 88 px
