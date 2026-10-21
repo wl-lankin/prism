@@ -1,18 +1,64 @@
+<script lang="ts" module>
+  import { t } from '../i18n';
+  import { navidromePlaylistEntries } from '../ipc';
+  import { playIds, playShuffled } from '../play';
+  import { notify } from '../stores/notice.svelte';
+  import type { PlaylistEntry } from '../types';
+
+  /** Plays `list` from the entry at `fromPosition`, as `playPlaylist` does: entries whose track
+   *  is not in the index are skipped, a skipped start plays from the next available entry, and
+   *  `shuffled` plays every available entry in random order. `remote` words the notice for a
+   *  Navidrome playlist with nothing available. */
+  export async function playEntries(
+    list: PlaylistEntry[],
+    fromPosition = 0,
+    options: { shuffled?: boolean; remote?: boolean } = {},
+  ): Promise<void> {
+    const ids: string[] = [];
+    let start = -1;
+    for (const entry of list) {
+      if (!entry.track) continue;
+      if (start < 0 && entry.position >= fromPosition) start = ids.length;
+      ids.push(entry.trackId);
+    }
+    if (!ids.length) {
+      notify(t(options.remote ? 'playlist.remoteNothingPlayable' : 'playlist.nothingPlayable'));
+      return;
+    }
+    if (options.shuffled) return playShuffled(ids);
+    if (start >= 0) return playIds(ids, start);
+  }
+
+  /** Plays a Navidrome playlist (`navidrome:<id>`) from its first available entry. */
+  export async function playRemotePlaylist(id: string, options: { shuffled?: boolean } = {}): Promise<void> {
+    try {
+      await playEntries(await navidromePlaylistEntries(id), 0, { ...options, remote: true });
+    } catch (err) {
+      notify(t('flow.failed', { message: String(err) }));
+    }
+  }
+
+  /** A stable number for a Navidrome playlist id, so its empty tile keeps one color. */
+  export function remoteSeed(id: string): number {
+    let hash = 0;
+    for (let i = 0; i < id.length; i++) hash = (hash * 31 + id.charCodeAt(i)) | 0;
+    return hash;
+  }
+</script>
+
 <script lang="ts">
   import { tick } from 'svelte';
   import { flip } from 'svelte/animate';
   import { formatDuration } from '../format';
-  import { t, tc } from '../i18n';
+  import { tc } from '../i18n';
   import { coverUrl, playlistDelete, playlistEntries, playlistMove, playlistRemove } from '../ipc';
   import { menuPoint } from '../menu';
   import { playPlaylist } from '../play';
   import { FAVORITE_KEY, isFavoriteKey, toggleFavorite } from '../stores/favorites.svelte';
   import { library } from '../stores/library.svelte';
   import { back, go } from '../stores/nav.svelte';
-  import { notify } from '../stores/notice.svelte';
   import { player } from '../stores/player.svelte';
   import { playlists, renamePlaylist } from '../stores/playlists.svelte';
-  import type { PlaylistEntry } from '../types';
   import Backdrop from './Backdrop.svelte';
   import Cover from './Cover.svelte';
   import Heart from './Heart.svelte';
@@ -24,8 +70,16 @@
   /** One playlist: its mosaic over a blurred backdrop, a title that is edited in place, play and
    *  shuffle, and the entries. Rows are dragged to a new place (or moved with Alt+Up and
    *  Alt+Down) and removed with Delete or the menu. Entries whose track is not in the library
-   *  stay in place, dimmed, and are skipped when playing. */
-  let { playlistId }: { playlistId: number } = $props();
+   *  stay in place, dimmed, and are skipped when playing.
+   *
+   *  A Navidrome playlist (an id `navidrome:<id>`) is read-only: it plays, shuffles and its
+   *  songs go into Prism playlists, but it has no rename, delete, reordering or removal. */
+  let { playlistId }: { playlistId: number | string } = $props();
+
+  /** The Navidrome playlist's id, or null for a Prism playlist. */
+  const remoteId = $derived(typeof playlistId === 'string' ? playlistId : null);
+  /** The Prism playlist's id (-1 for a Navidrome playlist). */
+  const localId = $derived(typeof playlistId === 'number' ? playlistId : -1);
 
   /** Row height; dragging moves rows in whole rows. */
   const ROW = 54;
@@ -48,7 +102,7 @@
     void refresh;
     let gone = false;
     const asked = changes;
-    playlistEntries(id)
+    (typeof id === 'string' ? navidromePlaylistEntries(id) : playlistEntries(id))
       .then((list) => {
         // A change made since the request (or still on its way) would be undone by this
         // list; the queue refetches once it has drained.
@@ -64,8 +118,13 @@
     };
   });
 
-  const playlist = $derived(playlists.list?.find((p) => p.id === playlistId) ?? null);
-  const missingPlaylist = $derived(playlists.list !== null && !playlist);
+  const local = $derived(remoteId ? null : (playlists.list?.find((p) => p.id === localId) ?? null));
+  const remote = $derived(remoteId ? (playlists.remote?.find((p) => p.id === remoteId) ?? null) : null);
+  const playlist = $derived(local ?? remote);
+  const missingPlaylist = $derived(
+    remoteId ? playlists.remote !== null && !remote : playlists.list !== null && !local,
+  );
+  const seed = $derived(remoteId ? remoteSeed(remoteId) : localId);
   const name = $derived(playlist?.name ?? '');
   const count = $derived(entries?.length ?? playlist?.trackCount ?? 0);
   const unavailable = $derived(entries?.filter((entry) => !entry.track).length ?? 0);
@@ -98,15 +157,15 @@
   let titleButton = $state<HTMLButtonElement>();
 
   function startEdit() {
-    if (!playlist) return;
-    draft = playlist.name;
+    if (!local) return;
+    draft = local.name;
     editing = true;
   }
 
   async function commit() {
     if (!editing) return;
     editing = false;
-    await renamePlaylist(playlistId, draft);
+    await renamePlaylist(localId, draft);
   }
 
   function onTitleKey(event: KeyboardEvent) {
@@ -124,7 +183,7 @@
 
   // A playlist just made from the Playlists view opens with its title ready to type over.
   $effect(() => {
-    if (playlist && playlists.renaming === playlistId) {
+    if (local && playlists.renaming === localId) {
       playlists.renaming = null;
       startEdit();
     }
@@ -136,9 +195,11 @@
 
   async function deletePlaylist() {
     confirming = false;
+    if (remoteId) return;
+    const id = localId;
     try {
-      await playlistDelete(playlistId);
-      playlists.list = (playlists.list ?? []).filter((p) => p.id !== playlistId);
+      await playlistDelete(id);
+      playlists.list = (playlists.list ?? []).filter((p) => p.id !== id);
       go('playlists');
     } catch (err) {
       notify(t('playlist.deleteFailed', { message: String(err) }));
@@ -147,10 +208,23 @@
 
   // Playing
 
+  /** Plays from the entry at `position`. A Navidrome playlist plays the entries shown, so
+   *  what plays matches the list on screen. */
+  function playFrom(position: number, options: { shuffled?: boolean } = {}) {
+    if (remoteId) void playEntries(entries ?? [], position, { ...options, remote: true });
+    else void playPlaylist(localId, position, options);
+  }
+
   /** Plays from row `i`; a dimmed row (not in the library) does nothing. */
   function play(i: number) {
     const entry = entries?.[i];
-    if (entry?.track) void playPlaylist(playlistId, entry.position);
+    if (entry?.track) playFrom(entry.position);
+  }
+
+  /** What a dimmed row says: a Navidrome song that is not in the index (not synced yet, or no
+   *  server connected) is unavailable from there; a local one has left the library. */
+  function missingLabel(trackId: string): string {
+    return trackId.startsWith('navidrome:') ? t('playlist.remoteMissing') : t('playlist.missing');
   }
 
   // Changing the order and removing. Both show at once and go to the backend one after the
@@ -176,22 +250,22 @@
   }
 
   function move(from: number, to: number) {
-    if (!entries || from === to || !entries[from] || to < 0 || to >= entries.length) return;
+    if (remoteId || !entries || from === to || !entries[from] || to < 0 || to >= entries.length) return;
     const next = [...entries];
     const [moved] = next.splice(from, 1);
     next.splice(to, 0, moved);
     entries = next.map((entry, position) => ({ ...entry, position }));
     selected = to;
-    const id = playlistId;
+    const id = localId;
     enqueue(() => playlistMove(id, from, to));
   }
 
   function removeAt(i: number) {
     const entry = entries?.[i];
-    if (!entries || !entry) return;
+    if (remoteId || !entries || !entry) return;
     entries = entries.filter((_, k) => k !== i).map((e, position) => ({ ...e, position }));
     if (selected >= entries.length) selected = entries.length - 1;
-    const id = playlistId;
+    const id = localId;
     enqueue(() => playlistRemove(id, [entry.position]));
   }
 
@@ -214,7 +288,7 @@
   function onkeydown(event: KeyboardEvent) {
     const n = entries?.length ?? 0;
     if (!n) return;
-    if (event.altKey && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) {
+    if (!remoteId && event.altKey && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) {
       event.preventDefault();
       if (selected < 0) return;
       const to = selected + (event.key === 'ArrowUp' ? -1 : 1);
@@ -232,7 +306,7 @@
     } else if (event.key === 'Enter' && selected >= 0) {
       event.preventDefault();
       play(selected);
-    } else if (event.key === 'Delete' && selected >= 0) {
+    } else if (event.key === 'Delete' && selected >= 0 && !remoteId) {
       event.preventDefault();
       removeAt(selected);
     } else if (isFavoriteKey(event) && entries?.[selected]?.track) {
@@ -255,12 +329,15 @@
       ...at,
       albumId: track?.albumId,
       artist: track ? track.albumArtist || track.artist : undefined,
-      onremove: () => {
-        // The entry may have moved while the menu was open: find it by its key.
-        const key = rows[i]?.key;
-        const now = rows.findIndex((r) => r.key === key);
-        removeAt(now >= 0 ? now : i);
-      },
+      // A Navidrome playlist is read-only: its menu only adds to Prism playlists.
+      onremove: remoteId
+        ? undefined
+        : () => {
+            // The entry may have moved while the menu was open: find it by its key.
+            const key = rows[i]?.key;
+            const now = rows.findIndex((r) => r.key === key);
+            removeAt(now >= 0 ? now : i);
+          },
     };
   }
 
@@ -274,7 +351,7 @@
 
   function onpointerdown(event: PointerEvent) {
     dragged = false;
-    if (event.button !== 0 || (event.target as HTMLElement).closest('button')) return;
+    if (remoteId || event.button !== 0 || (event.target as HTMLElement).closest('button')) return;
     const row = (event.target as HTMLElement).closest<HTMLElement>('[data-index]');
     if (!row || !scroller) return;
     press = { index: Number(row.dataset.index), y: event.clientY, scroll: scroller.scrollTop, pointer: event.pointerId };
@@ -359,10 +436,12 @@
     {:else if playlist}
       <header class="hero">
         <div class="art">
-          <PlaylistCover {coverIds} seed={playlist.id} size={232} radius="14px" cache={600} />
+          <PlaylistCover {coverIds} {seed} size={232} radius="14px" cache={600} />
         </div>
         <div class="info">
-          {#if editing}
+          {#if remote}
+            <h1><span class="text">{name}</span></h1>
+          {:else if editing}
             <input
               class="title-input"
               type="text"
@@ -394,25 +473,45 @@
             <span id="pl-rename-hint" class="sr-only">{t('playlist.rename')}</span>
           {/if}
           <p class="meta">
+            {#if remote}
+              <!-- The Navidrome source dot; unified with the shared source badge at merge. -->
+              <span class="source"><span class="source-dot" data-source="navidrome"></span>{t('source.navidrome')}</span>
+              {#if remote.owner}<span>{t('playlist.owner', { owner: remote.owner })}</span>{/if}
+            {/if}
             <span>{tc('view.count.songs', count)}</span>
             {#if totalMs > 0}<span>{length(totalMs)}</span>{/if}
             {#if unavailable}<span class="warn">{t('playlist.unavailable', { count: unavailable })}</span>{/if}
           </p>
           <div class="actions">
-            <button type="button" class="btn primary" disabled={!playable} onclick={() => playPlaylist(playlistId)}>
+            <button type="button" class="btn primary" disabled={!playable} onclick={() => playFrom(0)}>
               <Icon name="play" size={16} filled />
               {t('album.play')}
             </button>
-            <button
-              type="button"
-              class="btn ghost"
-              disabled={!playable}
-              onclick={() => playPlaylist(playlistId, 0, { shuffled: true })}
-            >
+            <button type="button" class="btn ghost" disabled={!playable} onclick={() => playFrom(0, { shuffled: true })}>
               <Icon name="shuffle" size={16} />
               {t('album.shuffle')}
             </button>
-            {#if confirming}
+            {#if remote}
+              <span class="readonly" title={t('playlist.readOnlyHint')} aria-describedby="pl-readonly-hint">
+                <svg
+                  class="lock"
+                  width="14"
+                  height="14"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.6"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  aria-hidden="true"
+                >
+                  <rect x="5.5" y="10.5" width="13" height="9" rx="2" />
+                  <path d="M8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5" />
+                </svg>
+                {t('playlist.readOnly')}
+              </span>
+              <span id="pl-readonly-hint" class="sr-only">{t('playlist.readOnlyHint')}</span>
+            {:else if confirming}
               <span class="confirm">
                 <button type="button" class="btn danger" onclick={deletePlaylist}>{t('playlist.deleteConfirm')}</button>
                 <button type="button" class="btn ghost" onclick={() => (confirming = false)}>{t('playlist.keep')}</button>
@@ -437,11 +536,15 @@
       {:else if entries && entries.length === 0}
         <div class="empty">
           <h2>{t('playlist.empty')}</h2>
-          <p class="lead">{t('playlist.emptyLead')}</p>
-          <button type="button" class="btn ghost" onclick={() => go('albums')}>
-            <Icon name="album" size={16} />
-            {t('favorites.browse')}
-          </button>
+          {#if remote}
+            <p class="lead">{t('playlist.remoteEmptyLead')}</p>
+          {:else}
+            <p class="lead">{t('playlist.emptyLead')}</p>
+            <button type="button" class="btn ghost" onclick={() => go('albums')}>
+              <Icon name="album" size={16} />
+              {t('favorites.browse')}
+            </button>
+          {/if}
         </div>
       {:else if entries}
         <div
@@ -451,7 +554,9 @@
           role="listbox"
           tabindex="0"
           aria-label={name}
-          aria-keyshortcuts="{FAVORITE_KEY} Delete Alt+ArrowUp Alt+ArrowDown"
+          aria-keyshortcuts={remoteId ? FAVORITE_KEY : `${FAVORITE_KEY} Delete Alt+ArrowUp Alt+ArrowDown`}
+          aria-readonly={remoteId ? 'true' : undefined}
+          aria-describedby={remote ? 'pl-readonly-hint' : undefined}
           aria-activedescendant={selected >= 0 && selected < entries.length ? `pl-row-${selected}` : undefined}
           {onkeydown}
           {oncontextmenu}
@@ -490,7 +595,9 @@
               style:transform={drag ? `translateY(${offset(row.i)}px)` : null}
               animate:flip={{ duration: settle }}
             >
-              <span class="grip" title={t('playlist.reorder')}><Icon name="grip" size={14} /></span>
+              {#if !remoteId}
+                <span class="grip" title={t('playlist.reorder')}><Icon name="grip" size={14} /></span>
+              {/if}
               <span class="num">
                 {#if track}
                   <RowPlay
@@ -507,7 +614,7 @@
               </span>
               <Cover coverId={track?.coverId ?? null} size={38} cache={96} radius="7px" />
               <span class="name">
-                <span class="title">{track ? track.title : t('playlist.missing')}</span>
+                <span class="title">{track ? track.title : missingLabel(row.entry.trackId)}</span>
                 {#if track}
                   <button
                     type="button"
@@ -647,7 +754,8 @@
     border-radius: 6px;
   }
 
-  .rename .text {
+  .rename .text,
+  h1 > .text {
     display: -webkit-box;
     -webkit-line-clamp: 2;
     line-clamp: 2;
@@ -721,6 +829,37 @@
     border-radius: 50%;
     background: var(--spec-2);
     box-shadow: 0 0 8px color-mix(in srgb, var(--spec-2) 55%, transparent);
+  }
+
+  /* A Navidrome playlist: the source in its color, and a quiet read-only tag by the buttons. */
+  .source {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    color: var(--text);
+  }
+
+  .source-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--src-navidrome);
+    box-shadow: 0 0 8px color-mix(in srgb, var(--src-navidrome) 55%, transparent);
+  }
+
+  /* The read-only label, as on the Playlists cards: dim text, only the lock in the source color. */
+  .readonly {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: 4px;
+    color: var(--text-dim);
+    font-size: 12.5px;
+    cursor: default;
+  }
+
+  .lock {
+    color: var(--src-navidrome);
   }
 
   .actions {
@@ -918,7 +1057,7 @@
   }
 
   /* Not in the library: kept in its place, quiet, skipped when playing. */
-  .row.missing > :global(*) {
+  .row.missing > :global(:not(.grip)) {
     opacity: 0.42;
   }
 

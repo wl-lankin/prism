@@ -366,6 +366,15 @@ const en = {
   'settings.navidrome.qualityHint': 'Original plays the file as it is on the server. 320, 192 and 128 kbps stream as MP3 and save data on slow or mobile networks.',
   'settings.navidrome.quality.original': 'Original',
 
+  'playlists.remote.lead': 'Playlists from your server. Edit them in Navidrome.',
+  'playlist.readOnly': 'Read-only',
+  'playlist.readOnlyHint': 'This playlist belongs to your Navidrome server. Change it there.',
+  'playlist.owner': 'by {owner}',
+  'playlist.remoteMissing': 'Not available from Navidrome',
+  'playlist.remoteEmptyLead': 'Add songs to it in Navidrome and they show up here after the next sync.',
+  'playlist.remoteNothingPlayable': 'None of these songs are available from Navidrome yet.',
+  'playlists.emptyLocal': 'No Prism playlists yet',
+
   'about.version': 'Version {version}',
   'about.tagline': 'One player, every color of sound.',
   'about.madeBy': 'Made by',
@@ -738,6 +747,15 @@ const de: Record<Key, string> = {
   'settings.navidrome.quality': 'Streaming-Qualität',
   'settings.navidrome.qualityHint': 'Original spielt die Datei so, wie sie auf dem Server liegt. 320, 192 und 128 kbps kommen als MP3 und sparen Daten in langsamen oder mobilen Netzen.',
   'settings.navidrome.quality.original': 'Original',
+
+  'playlists.remote.lead': 'Playlists von deinem Server. Bearbeiten kannst du sie in Navidrome.',
+  'playlist.readOnly': 'Schreibgeschützt',
+  'playlist.readOnlyHint': 'Diese Playlist gehört zu deinem Navidrome-Server. Ändern kannst du sie dort.',
+  'playlist.owner': 'von {owner}',
+  'playlist.remoteMissing': 'Von Navidrome nicht verfügbar',
+  'playlist.remoteEmptyLead': 'Füge in Navidrome Titel hinzu, dann erscheinen sie hier nach dem nächsten Abgleich.',
+  'playlist.remoteNothingPlayable': 'Keiner dieser Titel ist bisher über Navidrome verfügbar.',
+  'playlists.emptyLocal': 'Noch keine Prism-Playlists',
 
   'about.version': 'Version {version}',
   'about.tagline': 'Ein Player, jede Farbe des Klangs.',
