@@ -514,7 +514,10 @@ impl ViewHost for TauriHost {
     fn clear_data(&self) -> Result<(), String> {
         let view = if own_store() {
             // The store goes as a whole afterwards (`remove_store`); never the main page's.
+            // With only the sign-in window open, clear through it, since the store may still
+            // be in use when its removal is tried.
             self.webview()
+                .or_else(|| self.app.get_webview(super::signin::SIGNIN_LABEL))
         } else {
             let view = self
                 .webview()
