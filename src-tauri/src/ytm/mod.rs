@@ -3,7 +3,8 @@
 //!
 //! The page is untrusted. It reaches Prism only through `ytm_report` (see [`report_allowed`]
 //! and [`report::parse`]), and Prism talks back only with the fixed [`SNIPPETS`]; a seek, a
-//! volume or a queue entry sets one number, formatted by Rust, before its snippet runs.
+//! volume, a queue entry or a lyrics request sets one number, formatted by Rust, before its
+//! snippet runs.
 
 pub mod agent;
 pub mod covers;
@@ -17,11 +18,14 @@ pub mod state;
 mod testpage;
 pub mod view;
 
-use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Instant;
+use std::fmt;
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use covers::Artwork;
-use report::{PageQueue, PageState, Report};
+use report::{PageLyrics, PageQueue, PageState, Report};
+
+use crate::lyrics::{Lyrics, LyricsSource};
 use state::{YtmAction, YtmControl, YtmQueue, YtmQueueItem, YtmState, YtmStatus};
 
 /// The label of the child web view that shows music.youtube.com.
@@ -56,7 +60,7 @@ pub fn report_allowed(
 }
 
 /// The only script Prism sends into the page, by action name.
-pub const SNIPPETS: [(&str, &str); 8] = [
+pub const SNIPPETS: [(&str, &str); 9] = [
     (
         "toggle",
         "window.dispatchEvent(new CustomEvent('prism-ytm', { detail: 'toggle' }));",
@@ -89,7 +93,14 @@ pub const SNIPPETS: [(&str, &str); 8] = [
         "queue",
         "window.dispatchEvent(new CustomEvent('prism-ytm', { detail: 'queue' }));",
     ),
+    (
+        "lyrics",
+        "window.dispatchEvent(new CustomEvent('prism-ytm', { detail: 'lyrics' }));",
+    ),
 ];
+
+/// How long [`YtmService::lyrics`] waits for the page by default (the bridge gives up after 7 s).
+pub const LYRICS_TIMEOUT: Duration = Duration::from_secs(8);
 
 fn snippet(name: &str) -> &'static str {
     SNIPPETS
@@ -130,6 +141,15 @@ pub fn queue_scripts(index: u32) -> Vec<String> {
     vec![
         format!("window.__prismQueueIndex = {index};"),
         snippet("queue").into(),
+    ]
+}
+
+/// The scripts that ask the page for lyrics: the request number as an integer literal, then
+/// the fixed snippet.
+pub fn lyrics_scripts(request: u32) -> Vec<String> {
+    vec![
+        format!("window.__prismLyricsRequest = {request};"),
+        snippet("lyrics").into(),
     ]
 }
 
@@ -213,6 +233,8 @@ pub struct YtmService {
     order: Mutex<()>,
     follower: Mutex<Option<StateFollower>>,
     queue_emit: Mutex<Option<QueueEmit>>,
+    lyrics: Mutex<LyricsSlot>,
+    lyrics_ready: Condvar,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -236,6 +258,8 @@ impl YtmService {
             order: Mutex::new(()),
             follower: Mutex::new(None),
             queue_emit: Mutex::new(None),
+            lyrics: Mutex::default(),
+            lyrics_ready: Condvar::new(),
         }
     }
 
@@ -286,10 +310,15 @@ impl YtmService {
     }
 
     fn handle_at(&self, report: Report, now: Instant) {
+        // Outside the rate limit: only an answer to a request Prism made counts, once.
+        let report = match report {
+            Report::Lyrics(answer) => return self.take_lyrics(answer),
+            other => other,
+        };
         let _order = lock(&self.order);
         let (page, queue) = match report {
             Report::State(page) => (Some(page), None),
-            Report::Ended => (None, None),
+            Report::Ended | Report::Lyrics(_) => (None, None),
             Report::Queue(queue) => (None, Some(queue)),
         };
         {
@@ -396,7 +425,126 @@ impl YtmService {
             duration_ms: page.duration_ms,
             can_next: page.can_next,
             can_prev: page.can_prev,
+            video_id: page.video_id.clone(),
         }
+    }
+
+    /// Asks the page for the lyrics of the video it plays and returns the request's number.
+    /// The answer arrives later as a [`Report::Lyrics`].
+    pub fn request_lyrics(&self) -> u32 {
+        let n = {
+            let mut slot = lock(&self.lyrics);
+            slot.issued = slot.issued.wrapping_add(1).max(1);
+            slot.issued
+        };
+        for script in lyrics_scripts(n) {
+            self.page.eval(&script);
+        }
+        n
+    }
+
+    /// The lyrics YouTube Music has for the video playing now: its id, and its lyrics or
+    /// `None` when it has none. Blocks until the page answers or `timeout` is over, so it
+    /// must not run under any lock or on the event loop.
+    pub fn lyrics(&self, timeout: Duration) -> Result<(String, Option<Lyrics>), PageLyricsError> {
+        let asked = lock(&self.inner)
+            .state
+            .video_id
+            .clone()
+            .ok_or(PageLyricsError::NoVideo)?;
+        let n = self.request_lyrics();
+        let deadline = Instant::now() + timeout;
+        let mut slot = lock(&self.lyrics);
+        let answer = loop {
+            if let Some(answer) = slot.answer_for(n) {
+                break answer;
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(PageLyricsError::Timeout);
+            }
+            slot = self
+                .lyrics_ready
+                .wait_timeout(slot, left)
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .0;
+        };
+        drop(slot);
+        if answer.failed {
+            return Err(PageLyricsError::Failed);
+        }
+        if answer.video_id != asked {
+            return Err(PageLyricsError::Changed);
+        }
+        let lyrics = answer
+            .text
+            .as_deref()
+            .and_then(|text| Lyrics::plain(LyricsSource::Youtube, text));
+        Ok((answer.video_id, lyrics))
+    }
+
+    #[cfg(test)]
+    fn answer_for(&self, n: u32) -> Option<PageLyrics> {
+        lock(&self.lyrics).answer_for(n)
+    }
+
+    /// Keeps an answer to a request Prism made and nobody answered yet, else drops it.
+    fn take_lyrics(&self, answer: PageLyrics) {
+        let mut slot = lock(&self.lyrics);
+        let fresh = answer.request >= 1
+            && answer.request <= slot.issued
+            && slot
+                .answer
+                .as_ref()
+                .is_none_or(|kept| answer.request > kept.request);
+        if fresh {
+            slot.answer = Some(answer);
+            self.lyrics_ready.notify_all();
+        }
+    }
+}
+
+/// Why [`YtmService::lyrics`] has no answer. None of these is a miss to remember.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageLyricsError {
+    /// The page reports no video, so there is nothing to ask about.
+    NoVideo,
+    /// The page did not answer in time.
+    Timeout,
+    /// The page could not reach YouTube Music's API, or did not understand its answer.
+    Failed,
+    /// The page answered for another video than the one asked about: the song changed.
+    Changed,
+}
+
+impl fmt::Display for PageLyricsError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            PageLyricsError::NoVideo => "YouTube Music plays no video",
+            PageLyricsError::Timeout => "YouTube Music did not answer in time",
+            PageLyricsError::Failed => "YouTube Music could not be asked for lyrics",
+            PageLyricsError::Changed => "YouTube Music moved on to another song",
+        })
+    }
+}
+
+impl std::error::Error for PageLyricsError {}
+
+/// Lyrics requests and the newest answer the page gave to one of them.
+#[derive(Default)]
+struct LyricsSlot {
+    /// The number of the last request sent; 0 before the first.
+    issued: u32,
+    answer: Option<PageLyrics>,
+}
+
+impl LyricsSlot {
+    /// An answer to request `n` or a later one (as fresh as `n` would be).
+    fn answer_for(&self, n: u32) -> Option<PageLyrics> {
+        self.answer
+            .as_ref()
+            .filter(|answer| answer.request >= n)
+            .cloned()
     }
 }
 
@@ -410,7 +558,7 @@ impl YtmControl for YtmService {
 
 #[cfg(test)]
 mod tests {
-    use super::report::tests::{bridge_report, queue_report, ART, THUMB};
+    use super::report::tests::{bridge_report, lyrics_report, queue_report, ART, THUMB, VIDEO};
     use super::*;
     use serde_json::json;
 
@@ -680,7 +828,7 @@ mod tests {
         let names: Vec<&str> = SNIPPETS.iter().map(|(name, _)| *name).collect();
         assert_eq!(
             names,
-            ["toggle", "play", "pause", "next", "prev", "seek", "volume", "queue"]
+            ["toggle", "play", "pause", "next", "prev", "seek", "volume", "queue", "lyrics"]
         );
         for (name, script) in SNIPPETS {
             assert_eq!(
@@ -782,6 +930,229 @@ mod tests {
             assert_eq!(sent[1], snippet("queue"));
             assert!(fixed.contains(&sent[1].as_str()));
         }
+    }
+
+    #[test]
+    fn state_carries_the_video_id() {
+        let f = fixture();
+        f.service.handle(report_with(json!({})));
+        assert_eq!(f.service.state().video_id.as_deref(), Some(VIDEO));
+        assert_eq!(
+            serde_json::to_value(f.service.state()).unwrap()["videoId"],
+            VIDEO
+        );
+        // Another song: a new state event, even if nothing else changed.
+        f.service
+            .handle(report_with(json!({ "videoId": "otherVideo1" })));
+        assert_eq!(f.service.state().video_id.as_deref(), Some("otherVideo1"));
+        assert_eq!(lock(&f.emitted).len(), 2);
+        f.service.handle(report_with(json!({ "videoId": "" })));
+        assert_eq!(f.service.state().video_id, None);
+        f.service.reset();
+        assert_eq!(f.service.state().video_id, None);
+    }
+
+    #[test]
+    fn lyrics_request_snippets_are_constants() {
+        for n in [1, 42, u32::MAX] {
+            let sent = lyrics_scripts(n);
+            assert_eq!(sent.len(), 2);
+            let number = sent[0]
+                .strip_prefix("window.__prismLyricsRequest = ")
+                .and_then(|rest| rest.strip_suffix(';'))
+                .unwrap();
+            assert!(number.chars().all(|ch| ch.is_ascii_digit()), "{number}");
+            assert_eq!(number.parse::<u32>().unwrap(), n);
+            assert_eq!(sent[1], snippet("lyrics"));
+        }
+
+        let f = fixture();
+        f.service.handle(report_with(json!({})));
+        assert_eq!(f.service.request_lyrics(), 1);
+        assert_eq!(f.service.request_lyrics(), 2);
+        assert_eq!(
+            *lock(&f.page.0),
+            [
+                "window.__prismLyricsRequest = 1;",
+                snippet("lyrics"),
+                "window.__prismLyricsRequest = 2;",
+                snippet("lyrics"),
+            ]
+        );
+    }
+
+    /// A page that answers every lyrics request through `answer`, from another thread.
+    struct AnsweringPage {
+        service: std::sync::OnceLock<std::sync::Weak<YtmService>>,
+        answer: Box<dyn Fn(u32) -> Vec<serde_json::Value> + Send + Sync>,
+        delay: std::time::Duration,
+        sent: Mutex<Vec<String>>,
+    }
+
+    impl PageEval for AnsweringPage {
+        fn eval(&self, script: &str) {
+            lock(&self.sent).push(script.to_string());
+            let Some(n) = script
+                .strip_prefix("window.__prismLyricsRequest = ")
+                .and_then(|rest| rest.strip_suffix(';'))
+                .and_then(|n| n.parse::<u32>().ok())
+            else {
+                return;
+            };
+            let Some(service) = self.service.get().and_then(std::sync::Weak::upgrade) else {
+                return;
+            };
+            let reports = (self.answer)(n);
+            let delay = self.delay;
+            std::thread::spawn(move || {
+                std::thread::sleep(delay);
+                for report in reports {
+                    service.handle(report::parse(report).unwrap());
+                }
+            });
+        }
+    }
+
+    fn answering(
+        answer: impl Fn(u32) -> Vec<serde_json::Value> + Send + Sync + 'static,
+    ) -> (Arc<YtmService>, Arc<AnsweringPage>) {
+        let page = Arc::new(AnsweringPage {
+            service: std::sync::OnceLock::new(),
+            answer: Box::new(answer),
+            delay: std::time::Duration::from_millis(20),
+            sent: Mutex::default(),
+        });
+        let service = Arc::new(YtmService::new(
+            Arc::clone(&page) as Arc<dyn PageEval>,
+            Arc::new(|_| {}),
+        ));
+        let _ = page.service.set(Arc::downgrade(&service));
+        service.handle(report_with(json!({})));
+        (service, page)
+    }
+
+    const WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+    #[test]
+    fn lyrics_round_trip() {
+        let (service, _page) =
+            answering(|n| vec![lyrics_report(n, Some("Eins aus Testhausen\n\n\nZwei\n"))]);
+        let (video, lyrics) = service.lyrics(WAIT).unwrap();
+        assert_eq!(video, VIDEO);
+        let lyrics = lyrics.unwrap();
+        assert_eq!(lyrics.source, crate::lyrics::LyricsSource::Youtube);
+        assert!(!lyrics.synced && !lyrics.instrumental);
+        let texts: Vec<&str> = lyrics.lines.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(texts, ["Eins aus Testhausen", "", "Zwei"]);
+
+        // No lyrics on the page: a known miss for this video.
+        let (service, _page) = answering(|n| vec![lyrics_report(n, None)]);
+        assert_eq!(service.lyrics(WAIT), Ok((VIDEO.to_string(), None)));
+        // Text that cleans away to nothing is no lyrics either.
+        let (service, _page) = answering(|n| vec![lyrics_report(n, Some(" \u{1b}\n\t"))]);
+        assert_eq!(service.lyrics(WAIT), Ok((VIDEO.to_string(), None)));
+
+        // The page could not ask YouTube Music: an error, never a miss.
+        let (service, _page) = answering(|n| {
+            let mut report = lyrics_report(n, None);
+            report["failed"] = json!(true);
+            vec![report]
+        });
+        assert_eq!(service.lyrics(WAIT), Err(PageLyricsError::Failed));
+    }
+
+    #[test]
+    fn lyrics_answers_for_other_requests_or_videos_do_not_count() {
+        // Older and future requests first, then the right one.
+        // The first request goes unanswered, so its id is an older one when the second is answered.
+        let (service, _page) = answering(|n| {
+            if n == 1 {
+                return Vec::new();
+            }
+            vec![
+                lyrics_report(n - 1, Some("alt")),
+                lyrics_report(n + 1, Some("zukunft")),
+                lyrics_report(n, Some("richtig")),
+            ]
+        });
+        service.request_lyrics();
+        let (_, lyrics) = service.lyrics(WAIT).unwrap();
+        assert_eq!(lyrics.unwrap().lines[0].text, "richtig");
+
+        // The answer is for another video than the one asked about: the song changed.
+        let (service, _page) = answering(|n| {
+            let mut report = lyrics_report(n, Some("anderes Lied"));
+            report["videoId"] = json!("otherVideo1");
+            vec![report]
+        });
+        assert_eq!(service.lyrics(WAIT), Err(PageLyricsError::Changed));
+
+        // No answer at all.
+        let (service, page) = answering(|_| Vec::new());
+        let start = Instant::now();
+        assert_eq!(
+            service.lyrics(std::time::Duration::from_millis(150)),
+            Err(PageLyricsError::Timeout)
+        );
+        assert!(start.elapsed() >= std::time::Duration::from_millis(150));
+        assert_eq!(lock(&page.sent).len(), 2);
+
+        // Nothing playing: nothing to ask, nothing sent.
+        let (service, page) = answering(|n| vec![lyrics_report(n, Some("x"))]);
+        service.reset();
+        assert_eq!(service.lyrics(WAIT), Err(PageLyricsError::NoVideo));
+        assert!(lock(&page.sent).is_empty());
+    }
+
+    #[test]
+    fn unasked_lyrics_reports_change_nothing_and_skip_the_rate_limit() {
+        let f = fixture();
+        f.service.handle(report_with(json!({})));
+        // Answers nobody asked for are dropped without touching the state or the queue.
+        for n in [0, 1, 7] {
+            f.service
+                .handle(report::parse(lyrics_report(n, Some("x"))).unwrap());
+        }
+        assert_eq!(lock(&f.emitted).len(), 1);
+        assert_eq!(lock(&f.followed).len(), 1);
+        assert!(lock(&f.queues).is_empty());
+
+        // Out of tokens, an asked-for answer still arrives.
+        let at = Instant::now();
+        for _ in 0..20 {
+            f.service.handle_at(report_with(json!({})), at);
+        }
+        let n = f.service.request_lyrics();
+        f.service
+            .handle_at(report::parse(lyrics_report(n, Some("da"))).unwrap(), at);
+        assert_eq!(
+            f.service.answer_for(n).map(|a| a.text),
+            Some(Some("da".to_string()))
+        );
+        // Only once: a second answer for the same request is dropped.
+        f.service.handle_at(
+            report::parse(lyrics_report(n, Some("noch mal"))).unwrap(),
+            at,
+        );
+        assert_eq!(
+            f.service.answer_for(n).map(|a| a.text),
+            Some(Some("da".to_string()))
+        );
+    }
+
+    #[test]
+    fn concurrent_lyrics_calls_both_get_an_answer() {
+        let (service, _page) = answering(|n| vec![lyrics_report(n, Some("gleich"))]);
+        std::thread::scope(|scope| {
+            let calls: Vec<_> = (0..2)
+                .map(|_| scope.spawn(|| service.lyrics(WAIT)))
+                .collect();
+            for call in calls {
+                let (video, lyrics) = call.join().unwrap().unwrap();
+                assert_eq!(video, VIDEO);
+                assert_eq!(lyrics.unwrap().lines[0].text, "gleich");
+            }
+        });
     }
 
     fn queue_with(items: serde_json::Value) -> Report {
@@ -953,6 +1324,21 @@ mod tests {
         assert!(BRIDGE.contains(&format!("var URL_MAX = {};", report::MAX_ARTWORK_BYTES)));
         assert!(BRIDGE.contains("case 'queue':"));
         assert!(BRIDGE.contains("window.__prismQueueIndex"));
+    }
+
+    /// The bridge keeps its lyrics reports inside what `report::parse` takes, and asks only
+    /// YouTube Music's own API on the page's origin.
+    #[test]
+    fn bridge_lyrics_caps_match_the_report_caps() {
+        assert!(BRIDGE.contains("var LYRICS_BYTES_MAX = 60 * 1024;"));
+        const { assert!(60 * 1024 + 1024 < report::MAX_LYRICS_REPORT_BYTES) };
+        assert!(BRIDGE.contains("case 'lyrics':"));
+        assert!(BRIDGE.contains("window.__prismLyricsRequest"));
+        assert!(BRIDGE.contains("'/youtubei/v1/' + endpoint + '?prettyPrint=false'"));
+        // One request site, with a relative path: every request stays on the page's origin.
+        assert_eq!(BRIDGE.matches("fetch(").count(), 1);
+        assert!(!BRIDGE.contains("XMLHttpRequest"));
+        assert!(!BRIDGE.contains("sendBeacon"));
     }
 
     #[test]

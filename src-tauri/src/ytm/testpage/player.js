@@ -5,11 +5,21 @@
 (function () {
   'use strict';
 
+  // Song 1 has lyrics, song 2 an unselectable lyrics tab, song 3 none (see innertube.json).
   var SONGS = [
-    { title: 'Demo Song 1', artist: 'Demo Artist 1', album: 'Demo Album 1', color: '#ffc94d' },
-    { title: 'Demo Song 2', artist: 'Demo Artist 2', album: 'Demo Album 2', color: '#5fd3c6' },
-    { title: 'Demo Song 3', artist: 'Demo Artist 3', album: 'Demo Album 3', color: '#b48cff' },
+    { title: 'Demo Song 1', artist: 'Demo Artist 1', album: 'Demo Album 1', color: '#ffc94d', videoId: 'demoSong001' },
+    { title: 'Demo Song 2', artist: 'Demo Artist 2', album: 'Demo Album 2', color: '#5fd3c6', videoId: 'demoSong002' },
+    { title: 'Demo Song 3', artist: 'Demo Artist 3', album: 'Demo Album 3', color: '#b48cff', videoId: 'demoSong003' },
   ];
+
+  // What the bridge reads for lyrics, shaped like YouTube Music's page.
+  var CONTEXT = { client: { clientName: 'WEB_REMIX', clientVersion: '1.20261022.01.00', hl: 'de', gl: 'DE' } };
+  window.ytcfg = {
+    get: function (key) {
+      return key === 'INNERTUBE_CONTEXT' ? CONTEXT : undefined;
+    },
+  };
+  var moviePlayer = document.getElementById('movie_player');
   // Previous restarts the song after this many seconds, as on YouTube Music.
   var RESTART_AFTER = 3;
 
@@ -66,6 +76,11 @@
     index = (n + SONGS.length) % SONGS.length;
     var song = SONGS[index];
     video.src = 'tone/' + (index + 1) + '.wav';
+    var id = song.videoId;
+    moviePlayer.getVideoData = function () {
+      return { video_id: id };
+    };
+    history.replaceState(null, '', '?v=' + id);
     text(title, song.title);
     text(artist, song.artist);
     art.style.background = song.color;

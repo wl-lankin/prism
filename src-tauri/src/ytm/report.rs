@@ -18,6 +18,8 @@ pub const MAX_REPORT_BYTES: usize = 16 * 1024;
 /// bridge leaves out the tail of a queue that would not fit.
 pub const MAX_QUEUE_REPORT_BYTES: usize = 256 * 1024;
 pub const MAX_QUEUE_ITEMS: usize = 200;
+/// The cap for a lyrics report; the bridge cuts the text to fit.
+pub const MAX_LYRICS_REPORT_BYTES: usize = 64 * 1024;
 pub const MAX_TEXT_CHARS: usize = 256;
 pub const MAX_ARTWORK_BYTES: usize = 2048;
 /// A position may run this far past the duration (the page rounds both on its own).
@@ -31,6 +33,23 @@ pub enum Report {
     /// The track ended; a state report follows.
     Ended,
     Queue(PageQueue),
+    /// The page's answer to one of Prism's lyrics requests.
+    Lyrics(PageLyrics),
+}
+
+/// The lyrics YouTube Music's own API has for one video, as the page fetched them.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PageLyrics {
+    /// The number of the request this answers.
+    pub request: u32,
+    /// Always a video id.
+    pub video_id: String,
+    /// Raw text, bounded only by the report's cap; `Lyrics::plain` cleans it. `None`: no lyrics.
+    pub text: Option<String>,
+    /// For example "Source: LyricFind", cleaned like a title.
+    pub provider: Option<String>,
+    /// The page could not ask YouTube Music (network, status, an unknown answer); never a miss.
+    pub failed: bool,
 }
 
 /// YouTube Music's queue as its page shows it, cleaned.
@@ -67,6 +86,8 @@ pub struct PageState {
     pub can_prev: bool,
     /// The player bar, its buttons and the video were all found.
     pub available: bool,
+    /// The playing video's id; `None` when the page sent none or something else.
+    pub video_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,6 +122,17 @@ struct RawState {
     can_next: bool,
     can_prev: bool,
     available: bool,
+    video_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct RawLyrics {
+    request: u32,
+    video_id: String,
+    text: Option<String>,
+    provider: Option<String>,
+    failed: bool,
 }
 
 #[derive(Deserialize)]
@@ -141,10 +173,10 @@ impl Write for Capped {
 }
 
 pub fn parse(value: Value) -> Result<Report, ReportError> {
-    let cap = if value.get("kind").and_then(Value::as_str) == Some("queue") {
-        MAX_QUEUE_REPORT_BYTES
-    } else {
-        MAX_REPORT_BYTES
+    let cap = match value.get("kind").and_then(Value::as_str) {
+        Some("queue") => MAX_QUEUE_REPORT_BYTES,
+        Some("lyrics") => MAX_LYRICS_REPORT_BYTES,
+        _ => MAX_REPORT_BYTES,
     };
     if serde_json::to_writer(&mut Capped { written: 0, cap }, &value).is_err() {
         return Err(ReportError::TooLarge);
@@ -165,8 +197,44 @@ pub fn parse(value: Value) -> Result<Report, ReportError> {
         "ended" => Err(ReportError::Shape("fields on an ended report".into())),
         "state" => state(object).map(Report::State),
         "queue" => queue(object).map(Report::Queue),
+        "lyrics" => lyrics(object).map(Report::Lyrics),
         _ => Err(ReportError::Shape("unknown kind".into())),
     }
+}
+
+/// YouTube's video ids: exactly 11 of `A-Z a-z 0-9 _ -`.
+pub fn is_video_id(id: &str) -> bool {
+    id.len() == 11
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+fn lyrics(object: Map<String, Value>) -> Result<PageLyrics, ReportError> {
+    // serde would take a missing `Option` field as `None`; the bridge always sends both.
+    for field in ["text", "provider"] {
+        if !object.contains_key(field) {
+            return Err(ReportError::Shape(format!("missing field `{field}`")));
+        }
+    }
+    let raw: RawLyrics = serde_json::from_value(Value::Object(object))
+        .map_err(|err| ReportError::Shape(err.to_string()))?;
+    if !is_video_id(&raw.video_id) {
+        return Err(ReportError::Shape("not a video id".into()));
+    }
+    if raw.failed && raw.text.is_some() {
+        return Err(ReportError::Shape("lyrics on a failed answer".into()));
+    }
+    Ok(PageLyrics {
+        request: raw.request,
+        video_id: raw.video_id,
+        text: raw.text,
+        provider: raw
+            .provider
+            .map(|provider| clean(&provider))
+            .filter(|provider| !provider.is_empty()),
+        failed: raw.failed,
+    })
 }
 
 fn queue(object: Map<String, Value>) -> Result<PageQueue, ReportError> {
@@ -218,6 +286,7 @@ fn state(object: Map<String, Value>) -> Result<PageState, ReportError> {
         can_next: raw.can_next,
         can_prev: raw.can_prev,
         available: raw.available,
+        video_id: is_video_id(&raw.video_id).then_some(raw.video_id),
     })
 }
 
@@ -257,6 +326,8 @@ pub(crate) mod tests {
     use serde_json::json;
 
     pub(crate) const ART: &str = "https://lh3.googleusercontent.com/abc=w544-h544";
+    /// An invented video id in YouTube's shape.
+    pub(crate) const VIDEO: &str = "testVideo01";
 
     /// A report as the bridge sends it.
     pub(crate) fn bridge_report() -> Value {
@@ -273,7 +344,179 @@ pub(crate) mod tests {
             "canNext": true,
             "canPrev": false,
             "available": true,
+            "videoId": VIDEO,
         })
+    }
+
+    /// A lyrics answer as the bridge sends it.
+    pub(crate) fn lyrics_report(request: u32, text: Option<&str>) -> Value {
+        json!({
+            "v": 1,
+            "kind": "lyrics",
+            "request": request,
+            "videoId": VIDEO,
+            "text": text,
+            "provider": text.map(|_| "Source: Testquelle"),
+            "failed": false,
+        })
+    }
+
+    fn lyrics_of(value: Value) -> PageLyrics {
+        match parse(value) {
+            Ok(Report::Lyrics(lyrics)) => lyrics,
+            other => panic!("expected lyrics, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn state_carries_a_checked_video_id() {
+        assert_eq!(state_of(bridge_report()).video_id.as_deref(), Some(VIDEO));
+        for good in ["abc-DEF_123", "___________", "0123456789a"] {
+            assert_eq!(
+                state_of(with("videoId", json!(good))).video_id.as_deref(),
+                Some(good)
+            );
+        }
+        // Not an id: dropped, the rest of the report still counts.
+        for bad in [
+            "",
+            "short",
+            "testVideo012",
+            "testVideo0!",
+            "test/ideo01",
+            "testVide\u{e4}1",
+            "testVideo0\n",
+            " testVideo0",
+            "../../etc/p",
+        ] {
+            let state = state_of(with("videoId", json!(bad)));
+            assert_eq!(state.video_id, None, "{bad:?}");
+            assert_eq!(state.title, "Testlied");
+        }
+        // Missing or mistyped: the report has the wrong shape.
+        let mut missing = bridge_report();
+        missing.as_object_mut().unwrap().remove("videoId");
+        assert!(matches!(parse(missing), Err(ReportError::Shape(_))));
+        for bad in [json!(null), json!(5), json!(["testVideo01"])] {
+            assert!(matches!(
+                parse(with("videoId", bad)),
+                Err(ReportError::Shape(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn lyrics_report_is_strict_and_capped() {
+        let lyrics = lyrics_of(lyrics_report(7, Some("Eins\nZwei")));
+        assert_eq!(
+            lyrics,
+            PageLyrics {
+                request: 7,
+                video_id: VIDEO.into(),
+                text: Some("Eins\nZwei".into()),
+                provider: Some("Source: Testquelle".into()),
+                failed: false,
+            }
+        );
+        let none = lyrics_of(lyrics_report(8, None));
+        assert_eq!((none.text, none.provider, none.failed), (None, None, false));
+        let mut failed = lyrics_report(9, None);
+        failed["failed"] = json!(true);
+        assert!(lyrics_of(failed).failed);
+
+        // The text stays raw (Lyrics::plain cleans it); the provider is cleaned like a title.
+        let mut dirty = lyrics_report(1, Some("a\u{0}b\r\nc"));
+        dirty["provider"] = json!(format!("  Source:\u{202E} X{}", "y".repeat(400)));
+        let dirty = lyrics_of(dirty);
+        assert_eq!(dirty.text.as_deref(), Some("a\u{0}b\r\nc"));
+        let provider = dirty.provider.unwrap();
+        assert!(provider.starts_with("Source: X"));
+        assert_eq!(provider.chars().count(), MAX_TEXT_CHARS - 2);
+        let mut blank = lyrics_report(1, Some("x"));
+        blank["provider"] = json!(" \u{200B} ");
+        assert_eq!(lyrics_of(blank).provider, None);
+
+        // A full lyrics text fits its own cap, which is larger than a state's; past it, refused.
+        let long = "Zeile aus Testhausen\n".repeat(2_500);
+        assert!(long.len() > MAX_REPORT_BYTES && long.len() < MAX_LYRICS_REPORT_BYTES - 1024);
+        assert_eq!(
+            lyrics_of(lyrics_report(1, Some(&long))).text.as_deref(),
+            Some(long.as_str())
+        );
+        let huge = "x".repeat(MAX_LYRICS_REPORT_BYTES);
+        assert_eq!(
+            parse(lyrics_report(1, Some(&huge))),
+            Err(ReportError::TooLarge)
+        );
+        // A state report does not get the lyrics cap by claiming it elsewhere.
+        let mut big_state = bridge_report();
+        big_state["title"] = Value::String("x".repeat(17 * 1024));
+        big_state["text"] = json!("lyrics");
+        assert_eq!(parse(big_state), Err(ReportError::TooLarge));
+
+        // The video id must be one.
+        for bad in [
+            "",
+            "short",
+            "testVideo012",
+            "test/ideo01",
+            "testVideo0\u{0}",
+        ] {
+            let mut report = lyrics_report(1, Some("x"));
+            report["videoId"] = json!(bad);
+            assert!(
+                matches!(parse(report), Err(ReportError::Shape(_))),
+                "{bad:?}"
+            );
+        }
+
+        // The request id: a whole number in u32.
+        for bad in [
+            json!(-1),
+            json!(1.5),
+            json!("1"),
+            json!(null),
+            json!(u64::from(u32::MAX) + 1),
+        ] {
+            let mut report = lyrics_report(1, Some("x"));
+            report["request"] = bad.clone();
+            assert!(matches!(parse(report), Err(ReportError::Shape(_))), "{bad}");
+        }
+        assert_eq!(lyrics_of(lyrics_report(u32::MAX, None)).request, u32::MAX);
+
+        // Shape: unknown, missing and mistyped fields refuse the whole report.
+        let mut extra = lyrics_report(1, Some("x"));
+        extra["html"] = json!("<b>x</b>");
+        assert!(matches!(parse(extra), Err(ReportError::Shape(_))));
+        for field in ["request", "videoId", "text", "provider", "failed"] {
+            let mut missing = lyrics_report(1, Some("x"));
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(
+                matches!(parse(missing), Err(ReportError::Shape(_))),
+                "{field}"
+            );
+        }
+        for (field, value) in [
+            ("text", json!(5)),
+            ("text", json!(["a"])),
+            ("provider", json!(5)),
+            ("failed", json!("false")),
+            ("failed", Value::Null),
+        ] {
+            let mut typed = lyrics_report(1, Some("x"));
+            typed[field] = value;
+            assert!(
+                matches!(parse(typed), Err(ReportError::Shape(_))),
+                "{field}"
+            );
+        }
+        // A failure carries no text.
+        let mut both = lyrics_report(1, Some("x"));
+        both["failed"] = json!(true);
+        assert!(matches!(parse(both), Err(ReportError::Shape(_))));
+        let mut version = lyrics_report(1, None);
+        version["v"] = json!(2);
+        assert_eq!(parse(version), Err(ReportError::Version));
     }
 
     fn with(field: &str, value: Value) -> Value {

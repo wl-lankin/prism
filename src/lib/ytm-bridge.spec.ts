@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import source from '../../src-tauri/src/ytm/bridge.js?raw';
 import fakePage from '../../src-tauri/src/ytm/testpage/index.html?raw';
+import innertubeFixture from '../../src-tauri/src/ytm/testpage/innertube.json?raw';
 
 type Report = Record<string, unknown>;
 type FakeWindow = EventTarget & Record<string, unknown>;
@@ -17,6 +18,8 @@ let reports: Report[] = [];
 /** Queue reports go here, with the time each was sent, so the state tests count as before. */
 let queues: Report[] = [];
 let queueTimes: number[] = [];
+/** Lyrics answers go here. */
+let lyricsReports: Report[] = [];
 let session: { metadata: Meta | null; playbackState: string };
 let win: FakeWindow;
 let video: HTMLVideoElement | null;
@@ -30,6 +33,8 @@ function fakeWindow(): FakeWindow {
       if (args.report.kind === 'queue') {
         queues.push(args.report);
         queueTimes.push(Date.now());
+      } else if (args.report.kind === 'lyrics') {
+        lyricsReports.push(args.report);
       } else {
         reports.push(args.report);
       }
@@ -76,10 +81,14 @@ function buildPlayer(withBar = true) {
   document.body.appendChild(bar);
 }
 
-function run(opts: { host?: string; hostname?: string; dev?: boolean | 'unset'; framed?: boolean; w?: FakeWindow } = {}) {
+function run(opts: { host?: string; hostname?: string; search?: string; dev?: boolean | 'unset'; framed?: boolean; w?: FakeWindow } = {}) {
   const w = opts.w ?? win;
   if (opts.framed) w.top = {};
-  const loc = { host: opts.host ?? 'music.youtube.com', hostname: opts.hostname ?? (opts.host ?? 'music.youtube.com').split(':')[0] };
+  const loc = {
+    host: opts.host ?? 'music.youtube.com',
+    hostname: opts.hostname ?? (opts.host ?? 'music.youtube.com').split(':')[0],
+    search: opts.search ?? '',
+  };
   const nav = { mediaSession: session };
   const prefix = opts.dev === undefined || opts.dev === 'unset' ? '' : `const ALLOW_DEV_HOST = ${opts.dev};\n`;
   new Function('window', 'location', 'navigator', prefix + source)(w, loc, nav);
@@ -100,6 +109,7 @@ function states(): Report[] {
 beforeEach(() => {
   vi.useFakeTimers();
   reports = [];
+  lyricsReports = [];
   queues = [];
   queueTimes = [];
   for (const k of Object.keys(clicks)) delete clicks[k];
@@ -155,7 +165,28 @@ it('reports_metadata_and_play_state', () => {
     canNext: true,
     canPrev: true,
     available: true,
+    videoId: '',
   });
+});
+
+it('reports_the_video_id_from_the_player_else_the_url', () => {
+  run({ search: '?v=urlVideo_01&list=RDAMVM' });
+  expect(states()[0].videoId).toBe('urlVideo_01');
+  const player = document.createElement('div');
+  player.id = 'movie_player';
+  Object.assign(player, { getVideoData: () => ({ video_id: 'playerVid01' }) });
+  document.body.appendChild(player);
+  vi.advanceTimersByTime(1000);
+  expect(states().at(-1)!.videoId).toBe('playerVid01');
+  // Anything that is not a video id is no video id.
+  for (const bad of ['short', 'playerVid012', 'a/b/c/d/e/f', '<b>x</b>xx', 42, null]) {
+    Object.assign(player, { getVideoData: () => ({ video_id: bad }) });
+    vi.advanceTimersByTime(1000);
+    expect(states().at(-1)!.videoId).toBe('urlVideo_01');
+  }
+  Object.assign(player, { getVideoData: () => { throw new Error('boom'); } });
+  expect(() => vi.advanceTimersByTime(1000)).not.toThrow();
+  expect(states().at(-1)!.videoId).toBe('urlVideo_01');
 });
 
 it('picks_the_largest_https_artwork', () => {
@@ -742,5 +773,261 @@ describe('the queue', () => {
     win.__prismQueueIndex = 0;
     expect(() => command('queue')).not.toThrow();
     expect(queueClicks).toEqual([]);
+  });
+});
+
+/** The fake page's innertube answers, shared with the Rust fake server. */
+const innertube = JSON.parse(innertubeFixture) as {
+  next: Record<string, unknown>;
+  browse: Record<string, unknown>;
+};
+const CONTEXT = { client: { clientName: 'WEB_REMIX', clientVersion: '1.20261022.01.00', hl: 'de' }, user: { lockedSafetyMode: false } };
+const FIXTURE_TEXT = 'Erste Zeile vom Testlied\nZweite Zeile vom Testlied\n\nDer Refrain aus Testhausen';
+
+interface Call {
+  url: string;
+  init: RequestInit;
+  body: Record<string, unknown>;
+}
+
+describe('lyrics', () => {
+  let calls: Call[];
+  /** Replaces the answer for one endpoint; returns undefined to answer from the fixture. */
+  let override: (endpoint: string, body: Record<string, unknown>, init: RequestInit) => Promise<Response> | undefined;
+
+  function json(value: unknown, status = 200): Promise<Response> {
+    return Promise.resolve(new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } }));
+  }
+
+  function fakeFetch(url: string, init: RequestInit): Promise<Response> {
+    const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+    calls.push({ url, init, body });
+    const endpoint = /^\/youtubei\/v1\/(\w+)\?prettyPrint=false$/.exec(url)?.[1] ?? '';
+    const custom = override(endpoint, body, init);
+    if (custom) return custom;
+    if (endpoint === 'next' && typeof body.videoId === 'string' && body.videoId in innertube.next) {
+      return json(innertube.next[body.videoId]);
+    }
+    if (endpoint === 'browse' && typeof body.browseId === 'string' && body.browseId in innertube.browse) {
+      return json(innertube.browse[body.browseId]);
+    }
+    return json({ error: { code: 404 } }, 404);
+  }
+
+  function playVideo(id: unknown) {
+    let player = document.getElementById('movie_player');
+    if (!player) {
+      player = document.createElement('div');
+      player.id = 'movie_player';
+      document.body.appendChild(player);
+    }
+    Object.assign(player, { getVideoData: () => ({ video_id: id }) });
+  }
+
+  async function ask(n: unknown) {
+    win.__prismLyricsRequest = n;
+    command('lyrics');
+    await vi.advanceTimersByTimeAsync(0);
+  }
+
+  beforeEach(() => {
+    calls = [];
+    override = () => undefined;
+    win.fetch = fakeFetch;
+    win.ytcfg = { get: (key: string) => (key === 'INNERTUBE_CONTEXT' ? CONTEXT : undefined) };
+    playVideo('demoSong001');
+  });
+
+  it('answers_a_request_with_the_lyrics_youtube_music_has', async () => {
+    run();
+    await ask(3);
+    expect(lyricsReports).toEqual([
+      { v: 1, kind: 'lyrics', request: 3, videoId: 'demoSong001', text: FIXTURE_TEXT, provider: 'Source: Testquelle', failed: false },
+    ]);
+    // Two requests, both on the page's own origin, as YouTube Music's own client sends them.
+    expect(calls.map((call) => call.url)).toEqual(['/youtubei/v1/next?prettyPrint=false', '/youtubei/v1/browse?prettyPrint=false']);
+    for (const call of calls) {
+      expect(call.init.method).toBe('POST');
+      expect(call.init.credentials).toBe('omit');
+      expect(call.body.context).toEqual(CONTEXT);
+    }
+    expect(calls[0].body).toMatchObject({ videoId: 'demoSong001', isAudioOnly: true });
+    expect(calls[1].body).toMatchObject({ browseId: 'MPLYt_demoSong001' });
+    expect(Object.keys(calls[1].body).sort()).toEqual(['browseId', 'context']);
+    // The page's own context object is not touched.
+    expect(CONTEXT).toEqual({ client: { clientName: 'WEB_REMIX', clientVersion: '1.20261022.01.00', hl: 'de' }, user: { lockedSafetyMode: false } });
+  });
+
+  it('no_lyrics_tab_or_an_unselectable_one_means_no_lyrics', async () => {
+    run();
+    playVideo('demoSong002');
+    await ask(1);
+    playVideo('demoSong003');
+    await ask(2);
+    expect(lyricsReports).toEqual([
+      { v: 1, kind: 'lyrics', request: 1, videoId: 'demoSong002', text: null, provider: null, failed: false },
+      { v: 1, kind: 'lyrics', request: 2, videoId: 'demoSong003', text: null, provider: null, failed: false },
+    ]);
+    // No browse request without a lyrics tab.
+    expect(calls.map((call) => call.url)).toEqual(['/youtubei/v1/next?prettyPrint=false', '/youtubei/v1/next?prettyPrint=false']);
+  });
+
+  // The tab promised lyrics, so a page without them is a shape Prism does not know: an
+  // error, never a miss that would be kept for days.
+  it('a_lyrics_page_without_a_description_shelf_fails', async () => {
+    override = (endpoint) => (endpoint === 'browse' ? json({ contents: { sectionListRenderer: { contents: [{ messageRenderer: {} }] } } }) : undefined);
+    run();
+    await ask(1);
+    expect(lyricsReports).toEqual([{ v: 1, kind: 'lyrics', request: 1, videoId: 'demoSong001', text: null, provider: null, failed: true }]);
+  });
+
+  it('joins_every_run_and_skips_odd_ones', async () => {
+    override = (endpoint) =>
+      endpoint === 'browse'
+        ? json({
+            contents: {
+              sectionListRenderer: {
+                contents: [
+                  {
+                    musicDescriptionShelfRenderer: {
+                      description: { runs: [{ text: 'Eins\n' }, { text: 42 }, null, { text: 'Zwei' }] },
+                      footer: { runs: [{ text: 'Source: ' }, { text: 'Testquelle' }] },
+                    },
+                  },
+                ],
+              },
+            },
+          })
+        : undefined;
+    run();
+    await ask(1);
+    expect(lyricsReports[0]).toMatchObject({ text: 'Eins\nZwei', provider: 'Source: Testquelle', failed: false });
+  });
+
+  it('a_failed_request_is_reported_as_failed_not_as_no_lyrics', async () => {
+    const failures: (() => Promise<Response>)[] = [
+      () => Promise.reject(new TypeError('network')),
+      () => json({ error: {} }, 500),
+      () => Promise.resolve(new Response('<html>nope</html>', { status: 200 })),
+      () => json('a string'),
+      () => json({ contents: { singleColumnMusicWatchNextResultsRenderer: {} } }),
+    ];
+    run();
+    for (const [i, failure] of failures.entries()) {
+      override = (endpoint) => (endpoint === 'next' ? failure() : undefined);
+      await ask(i + 1);
+    }
+    // The browse step fails too.
+    override = (endpoint) => (endpoint === 'browse' ? json({}, 403) : undefined);
+    await ask(10);
+    expect(lyricsReports.map((r) => r.request)).toEqual([1, 2, 3, 4, 5, 10]);
+    for (const report of lyricsReports) {
+      expect(report).toMatchObject({ kind: 'lyrics', videoId: 'demoSong001', text: null, provider: null, failed: true });
+    }
+  });
+
+  it('a_browse_id_that_is_not_one_fails_without_a_request', async () => {
+    for (const bad of ['MPLYt/../../x', 'MPLYt_x?y=1', '', 42, 'x'.repeat(200)]) {
+      override = (endpoint) => {
+        if (endpoint !== 'next') return undefined;
+        const answer = JSON.parse(JSON.stringify(innertube.next.demoSong001));
+        answer.contents.singleColumnMusicWatchNextResultsRenderer.tabbedRenderer.watchNextTabbedResultsRenderer.tabs[1].tabRenderer.endpoint.browseEndpoint.browseId = bad;
+        return json(answer);
+      };
+      calls = [];
+      lyricsReports = [];
+      win = fakeWindow();
+      win.fetch = fakeFetch;
+      win.ytcfg = { get: () => CONTEXT };
+      run();
+      await ask(1);
+      expect(calls).toHaveLength(1);
+      expect(lyricsReports).toEqual([{ v: 1, kind: 'lyrics', request: 1, videoId: 'demoSong001', text: null, provider: null, failed: true }]);
+    }
+  });
+
+  it('takes_the_video_id_from_the_url_without_a_player', async () => {
+    document.getElementById('movie_player')!.remove();
+    run({ search: '?v=demoSong001&list=RDAMVMdemoSong001' });
+    await ask(1);
+    expect(lyricsReports[0]).toMatchObject({ videoId: 'demoSong001', text: FIXTURE_TEXT });
+  });
+
+  it('ignores_bad_request_numbers_and_missing_video_ids', async () => {
+    run();
+    for (const bad of [0, -1, 1.5, '3', Number.NaN, Infinity, 2 ** 32, null, undefined, { valueOf: () => 1 }]) {
+      await ask(bad);
+    }
+    playVideo('not an id');
+    await ask(1);
+    document.getElementById('movie_player')!.remove();
+    await ask(2);
+    expect(calls).toHaveLength(0);
+    expect(lyricsReports).toHaveLength(0);
+    // The largest request number still counts.
+    playVideo('demoSong001');
+    await ask(2 ** 32 - 1);
+    expect(lyricsReports[0]).toMatchObject({ request: 2 ** 32 - 1 });
+  });
+
+  it('works_without_the_page_config', async () => {
+    delete win.ytcfg;
+    run();
+    await ask(1);
+    expect(lyricsReports[0]).toMatchObject({ text: FIXTURE_TEXT, failed: false });
+    const client = (calls[0].body.context as { client: Record<string, string> }).client;
+    expect(client.clientName).toBe('WEB_REMIX');
+    expect(client.clientVersion).toMatch(/^1\.\d{8}\.01\.00$/);
+    // A config that throws or hands back something odd counts as missing.
+    win.ytcfg = { get: () => { throw new Error('boom'); } };
+    await ask(2);
+    win.ytcfg = { get: () => 'context' };
+    await ask(3);
+    expect(lyricsReports.map((r) => r.failed)).toEqual([false, false, false]);
+  });
+
+  it('long_lyrics_are_cut_to_fit_the_report_cap', async () => {
+    // Quotes double when escaped, so the cut must count the report as JSON.
+    const long = ('Zeile "aus" Testhausen\n').repeat(5000);
+    override = (endpoint) =>
+      endpoint === 'browse'
+        ? json({ contents: { sectionListRenderer: { contents: [{ musicDescriptionShelfRenderer: { description: { runs: [{ text: long }] }, footer: { runs: [{ text: 'P'.repeat(1000) }] } } }] } } })
+        : undefined;
+    run();
+    await ask(1);
+    const report = lyricsReports[0];
+    expect(new TextEncoder().encode(JSON.stringify(report)).length).toBeLessThanOrEqual(60 * 1024);
+    expect((report.text as string).length).toBeGreaterThan(20 * 1024);
+    expect(long.startsWith(report.text as string)).toBe(true);
+    expect((report.provider as string).length).toBe(256);
+  });
+
+  it('gives_up_after_its_time_limit', async () => {
+    override = (_endpoint, _body, init) =>
+      new Promise<Response>((_, reject) => {
+        init.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+      });
+    run();
+    await ask(1);
+    expect(lyricsReports).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(6999);
+    expect(lyricsReports).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(lyricsReports).toEqual([{ v: 1, kind: 'lyrics', request: 1, videoId: 'demoSong001', text: null, provider: null, failed: true }]);
+  });
+
+  it('a_lyrics_request_never_throws_into_the_page', async () => {
+    win.fetch = () => {
+      throw new Error('boom');
+    };
+    run();
+    await expect(ask(1)).resolves.toBeUndefined();
+    expect(lyricsReports[0]).toMatchObject({ failed: true });
+    delete win.fetch;
+    await ask(2);
+    expect(lyricsReports[1]).toMatchObject({ request: 2, failed: true });
+    // The rest of the bridge goes on.
+    command('next');
+    expect(clicks['next-button']).toBe(1);
   });
 });

@@ -1,5 +1,6 @@
-//! The fake YouTube Music page on `127.0.0.1`: `index.html`, `player.js` and three tones
-//! synthesized at start (nothing binary in the repo). Hand-rolled on a plain `TcpListener`
+//! The fake YouTube Music page on `127.0.0.1`: `index.html`, `player.js`, three tones
+//! synthesized at start (nothing binary in the repo) and the two API calls the bridge makes
+//! for lyrics, answered from `innertube.json`. Hand-rolled on a plain `TcpListener`
 //! like the other fake servers, one request per connection; the tones answer byte ranges,
 //! which WebKit needs before it plays a media file.
 //!
@@ -54,39 +55,105 @@ pub(crate) fn tone(n: usize) -> Vec<u8> {
     wav
 }
 
+/// The demo songs' video ids, in order (invented, in YouTube's shape).
+pub(crate) const VIDEO_IDS: [&str; SONGS] = ["demoSong001", "demoSong002", "demoSong003"];
+/// YouTube Music's API answers for the demo songs: song 1 has lyrics, song 2 an
+/// unselectable lyrics tab, song 3 none. Shared with the bridge's specs.
+const INNERTUBE: &str = include_str!("innertube.json");
+const BODY_MAX: usize = 64 * 1024;
+
 struct Request {
     head_only: bool,
+    post: bool,
     path: String,
     range: Option<String>,
+    body: Vec<u8>,
+}
+
+fn header<'a>(head: &'a str, wanted: &str) -> Option<&'a str> {
+    head.lines().skip(1).find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.trim()
+            .eq_ignore_ascii_case(wanted)
+            .then(|| value.trim())
+    })
 }
 
 fn read_request(stream: &mut TcpStream) -> Option<Request> {
     let _ = stream.set_nonblocking(false);
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
-    let mut head = Vec::new();
+    let mut data = Vec::new();
     let mut buf = [0u8; 2048];
-    while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+    let end = loop {
+        if let Some(at) = data.windows(4).position(|w| w == b"\r\n\r\n") {
+            break at + 4;
+        }
         let n = stream.read(&mut buf).ok()?;
-        if n == 0 || head.len() > 16 * 1024 {
+        if n == 0 || data.len() > 16 * 1024 {
             return None;
         }
-        head.extend_from_slice(&buf[..n]);
-    }
-    let head = String::from_utf8(head).ok()?;
-    let mut lines = head.lines();
-    let mut first = lines.next()?.split(' ');
+        data.extend_from_slice(&buf[..n]);
+    };
+    let head = String::from_utf8(data[..end].to_vec()).ok()?;
+    let mut first = head.lines().next()?.split(' ');
     let method = first.next()?;
     let target = first.next()?;
-    let range = lines.find_map(|line| {
-        let (name, value) = line.split_once(':')?;
-        name.trim()
-            .eq_ignore_ascii_case("range")
-            .then(|| value.trim().to_owned())
-    });
+    let length: usize = header(&head, "content-length").map_or(Some(0), |v| v.parse().ok())?;
+    if length > BODY_MAX {
+        return None;
+    }
+    let mut body = data[end..].to_vec();
+    while body.len() < length {
+        let n = stream.read(&mut buf).ok()?;
+        if n == 0 {
+            return None;
+        }
+        body.extend_from_slice(&buf[..n]);
+    }
+    body.truncate(length);
     Some(Request {
         head_only: method == "HEAD",
+        post: method == "POST",
         path: target.split(['?', '#']).next().unwrap_or("/").to_owned(),
-        range,
+        range: header(&head, "range").map(str::to_owned),
+        body,
+    })
+}
+
+/// `POST /youtubei/v1/next` and `/browse` as YouTube Music answers them, from the fixture.
+/// A body without a client context is refused, as the real API does.
+fn innertube(request: &Request) -> Option<Reply> {
+    let endpoint = request.path.strip_prefix("/youtubei/v1/")?;
+    let not_found = || {
+        reply(
+            404,
+            "application/json",
+            b"{\"error\":{\"code\":404}}".to_vec(),
+        )
+    };
+    if !request.post || !matches!(endpoint, "next" | "browse") {
+        return Some(not_found());
+    }
+    let body: serde_json::Value = match serde_json::from_slice(&request.body) {
+        Ok(body) => body,
+        Err(_) => return Some(reply(400, "application/json", b"{}".to_vec())),
+    };
+    if !body["context"]["client"]["clientName"].is_string() {
+        return Some(reply(400, "application/json", b"{}".to_vec()));
+    }
+    let key = if endpoint == "next" {
+        "videoId"
+    } else {
+        "browseId"
+    };
+    let fixture: serde_json::Value = serde_json::from_str(INNERTUBE).expect("innertube.json");
+    let answer = body[key]
+        .as_str()
+        .and_then(|id| fixture[endpoint].get(id))
+        .map(|answer| serde_json::to_vec(answer).expect("fixture answer"));
+    Some(match answer {
+        Some(answer) => reply(200, "application/json; charset=utf-8", answer),
+        None => not_found(),
     })
 }
 
@@ -130,6 +197,9 @@ fn reply(status: u16, content_type: &str, body: Vec<u8>) -> Reply {
 }
 
 fn answer(request: &Request, tones: &[Vec<u8>]) -> Reply {
+    if let Some(reply) = innertube(request) {
+        return reply;
+    }
     let song = request
         .path
         .strip_prefix("/tone/")
@@ -172,6 +242,7 @@ fn reason(status: u16) -> &'static str {
     match status {
         200 => "OK",
         206 => "Partial Content",
+        400 => "Bad Request",
         404 => "Not Found",
         416 => "Range Not Satisfiable",
         _ => "Status",
@@ -362,6 +433,128 @@ mod tests {
                 "{path}"
             );
         }
+    }
+
+    fn innertube(
+        page: &FakeYtm,
+        endpoint: &str,
+        body: serde_json::Value,
+    ) -> (u16, serde_json::Value) {
+        let url = format!("{}youtubei/v1/{endpoint}?prettyPrint=false", page.url());
+        crate::radio::testserver::assert_loopback(&url);
+        let answer = reqwest::blocking::Client::new()
+            .post(url)
+            .json(&body)
+            .send()
+            .expect("asking the fake innertube");
+        let status = answer.status().as_u16();
+        (status, answer.json().unwrap_or(serde_json::Value::Null))
+    }
+
+    fn context() -> serde_json::Value {
+        serde_json::json!({ "client": { "clientName": "WEB_REMIX", "clientVersion": "1.20261022.01.00" } })
+    }
+
+    /// The lyrics tab's browse id, read the way the bridge reads it.
+    fn lyrics_browse_id(next: &serde_json::Value) -> Option<String> {
+        let tabs = next.pointer(
+            "/contents/singleColumnMusicWatchNextResultsRenderer/tabbedRenderer/watchNextTabbedResultsRenderer/tabs",
+        )?;
+        tabs.as_array()?.iter().find_map(|tab| {
+            let tab = tab.get("tabRenderer")?;
+            if tab.get("unselectable").is_some() {
+                return None;
+            }
+            let browse = tab.pointer("/endpoint/browseEndpoint")?;
+            (browse.pointer(
+                "/browseEndpointContextSupportedConfigs/browseEndpointContextMusicConfig/pageType",
+            )? == "MUSIC_PAGE_TYPE_TRACK_LYRICS")
+                .then(|| browse["browseId"].as_str().map(str::to_owned))?
+        })
+    }
+
+    #[test]
+    fn innertube_answers_like_youtube_music() {
+        let page = FakeYtm::start();
+        let ask = |video: &str| {
+            innertube(
+                &page,
+                "next",
+                serde_json::json!({ "videoId": video, "isAudioOnly": true, "context": context() }),
+            )
+        };
+
+        let (status, next) = ask(VIDEO_IDS[0]);
+        assert_eq!(status, 200);
+        let browse_id = lyrics_browse_id(&next).expect("song 1 has a lyrics tab");
+        let (status, browse) = innertube(
+            &page,
+            "browse",
+            serde_json::json!({ "browseId": browse_id, "context": context() }),
+        );
+        assert_eq!(status, 200);
+        let shelf = browse
+            .pointer("/contents/sectionListRenderer/contents/0/musicDescriptionShelfRenderer")
+            .unwrap();
+        let text = shelf
+            .pointer("/description/runs/0/text")
+            .unwrap()
+            .as_str()
+            .unwrap();
+        assert!(text.lines().count() >= 3);
+        assert_eq!(
+            shelf.pointer("/footer/runs/0/text").unwrap(),
+            "Source: Testquelle"
+        );
+
+        // Song 2 has an unselectable lyrics tab, song 3 none.
+        for video in &VIDEO_IDS[1..] {
+            let (status, next) = ask(video);
+            assert_eq!(status, 200);
+            assert_eq!(lyrics_browse_id(&next), None, "{video}");
+        }
+
+        // Unknown ids, a missing context and other paths are refused.
+        assert_eq!(ask("unknownVid1").0, 404);
+        assert_eq!(
+            innertube(
+                &page,
+                "next",
+                serde_json::json!({ "videoId": VIDEO_IDS[0] })
+            )
+            .0,
+            400
+        );
+        assert_eq!(
+            innertube(
+                &page,
+                "browse",
+                serde_json::json!({ "browseId": "MPLYt_x", "context": context() })
+            )
+            .0,
+            404
+        );
+        assert_eq!(
+            innertube(&page, "search", serde_json::json!({ "context": context() })).0,
+            404
+        );
+        assert_eq!(
+            get(&format!("{}youtubei/v1/next", page.url()), None).status(),
+            404
+        );
+    }
+
+    #[test]
+    fn page_names_its_videos_and_context() {
+        assert_eq!(VIDEO_IDS.len(), SONGS);
+        for id in VIDEO_IDS {
+            assert!(crate::ytm::report::is_video_id(id), "{id}");
+            assert!(PLAYER.contains(&format!("videoId: '{id}'")), "{id}");
+        }
+        assert!(PLAYER.contains("window.ytcfg"));
+        assert!(PLAYER.contains("INNERTUBE_CONTEXT"));
+        assert!(PLAYER.contains("getVideoData"));
+        assert!(INDEX.contains("<div id=\"movie_player\"></div>"));
     }
 
     #[test]
