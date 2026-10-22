@@ -7,8 +7,8 @@
   import { player } from '../stores/player.svelte';
   import { currentTitle } from '../stores/radio.svelte';
   import { settings } from '../stores/settings.svelte';
-  import { QUEUE_TOGGLE_ID } from '../queue';
-  import { queuePanel, toggleQueuePanel } from '../stores/queue.svelte';
+  import { LYRICS_TOGGLE_ID, QUEUE_TOGGLE_ID } from '../queue';
+  import { lyricsPanel, queuePanel, toggleLyricsPanel, toggleQueuePanel } from '../stores/queue.svelte';
   import { restartToUpdate, update } from '../stores/update.svelte';
   import Cover from './Cover.svelte';
   import Heart from './Heart.svelte';
@@ -175,6 +175,19 @@
       onclick={() => toggleQueuePanel()}
     >
       <Icon name="queue" size={18} />
+    </button>
+    <button
+      type="button"
+      id={LYRICS_TOGGLE_ID}
+      class="btn small toggle"
+      class:on={lyricsPanel.open}
+      aria-pressed={lyricsPanel.open}
+      aria-label={t('transport.lyrics')}
+      title={t('transport.lyrics')}
+      aria-keyshortcuts="Control+L"
+      onclick={() => toggleLyricsPanel()}
+    >
+      <Icon name="lyrics" size={18} />
     </button>
     <!-- Dropped files ("file:" ids) are not in the library; a favorite of one would be an orphan. -->
     {#if !yt && !idle && track && !track.id.startsWith('file:')}

@@ -9,6 +9,7 @@ import type {
   FlowOutcome,
   FlowVariant,
   Folder,
+  LyricsAnswer,
   NavidromeStatus,
   NearResult,
   NowPlaying,
@@ -130,6 +131,10 @@ export const favoritesArtists = () => call<Artist[]>('favorites_artists');
 /** Puts the YouTube Music view at `rect` (created on first use) and shows it. */
 export const ytmShow = (rect: YtmRect) => call<void>('ytm_show', { rect });
 export const ytmHide = () => call<void>('ytm_hide');
+/** Lyrics of a local or Navidrome track. */
+export const lyricsForTrack = (trackId: string) => call<LyricsAnswer>('lyrics_for_track', { trackId });
+/** Lyrics of the song YouTube Music plays now. */
+export const lyricsForYoutube = () => call<LyricsAnswer>('lyrics_for_youtube');
 export const ytmState = () => call<YtmState>('ytm_state');
 export const ytmQueue = () => call<YtmQueue>('ytm_queue');
 /** Plays entry `index` of YouTube Music's queue; rejects when the queue has no such entry. */

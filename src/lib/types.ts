@@ -170,6 +170,8 @@ export interface Settings {
   /** 1000..8000 */
   crossfadeMs: number;
   coverLookup: boolean;
+  /** Search lyrics on lrclib.net when no file or server has them. */
+  lyricsLookup: boolean;
   miniOnTop: boolean;
   /** A global shortcut in Tauri's accelerator syntax. */
   miniShortcut: string;
@@ -406,3 +408,22 @@ export interface YtmRect {
   width: number;
   height: number;
 }
+
+export type LyricsSource = 'lrcFile' | 'embedded' | 'navidrome' | 'lrclib' | 'youtube';
+
+/** `startMs` is set on every line of synced lyrics and on none of plain lyrics. */
+export interface LyricsLine {
+  startMs: number | null;
+  text: string;
+}
+
+export interface Lyrics {
+  source: LyricsSource;
+  synced: boolean;
+  /** The track has no vocals; `lines` is empty. */
+  instrumental: boolean;
+  lines: LyricsLine[];
+}
+
+/** `error`: a network or server error with nothing else found; the UI offers "Try again". */
+export type LyricsAnswer = { status: 'found'; lyrics: Lyrics } | { status: 'none' } | { status: 'error' };

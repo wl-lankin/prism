@@ -11,6 +11,7 @@ export const DEFAULT_SETTINGS: Settings = {
   crossfade: 'flow',
   crossfadeMs: 4000,
   coverLookup: true,
+  lyricsLookup: true,
   miniOnTop: false,
   miniShortcut: 'CommandOrControl+Alt+P',
   startWithSystem: false,

@@ -1167,6 +1167,30 @@
       </div>
     </section>
 
+    <section aria-labelledby="settings-lyrics">
+      <h2 id="settings-lyrics">{t('settings.lyrics')}</h2>
+      <div class="panel">
+        <div class="row">
+          <div class="row-text">
+            <span class="row-label" id="label-lyrics">{t('settings.lyricsLookup')}</span>
+            <span class="hint">{t('settings.lyricsLookupHint')}</span>
+          </div>
+          <div class="control end">
+            <button
+              type="button"
+              class="switch"
+              role="switch"
+              aria-checked={settings.lyricsLookup}
+              aria-labelledby="label-lyrics"
+              onclick={() => change({ lyricsLookup: !settings.lyricsLookup })}
+            >
+              <i></i>
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <section aria-labelledby="settings-system">
       <h2 id="settings-system">{t('settings.system')}</h2>
       <div class="panel">
