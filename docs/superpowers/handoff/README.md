@@ -28,7 +28,8 @@ Each milestone branch is cut from the previous one. None is merged into `main` y
 | `PRISM-1` | M1 Foundation | done |
 | `PRISM-2` | M2 Everyday player, plus the up next panel, repeat and shuffle | done, owner hand check mostly confirmed |
 | `PRISM-3` | M3 Navidrome | Tasks 1-19 done; Task 20 (owner hand check) open |
-| `PRISM-4` | M4 Radio, cut from `PRISM-3` before the M3 hand check | Tasks 1-12 and the UI integration pass done; Task 13 (owner hand check) open |
+| `PRISM-4` | M4 Radio, cut from `PRISM-3` before the M3 hand check | done; checked by the owner in daily use on the Mac, plus UI fixes from that |
+| `PRISM-5` | M5 YouTube Music, cut from `PRISM-4` | done; Mac hand check done (sign-in, playback, controls), Windows hand check open |
 | `spike-ytm` | YouTube Music sign-in spike | reference only |
 
 Parallel work uses short-lived branches `PRISM-<milestone><task>` (for example `PRISM-312`) in worktrees under `../Prism-wt/`. They are merged with `--no-ff` into the milestone branch and then deleted.
@@ -69,7 +70,7 @@ Parallel work uses short-lived branches `PRISM-<milestone><task>` (for example `
    - the Radio view, live player surfaces, stations in Favorites, Home, Ctrl+K and Settings
 
    Open: Task 13, the owner hand check (see `ledgers/m4-progress.md`), and merging the M3 hand-check fixes from `PRISM-3` into `PRISM-4`.
-5. **M5 YouTube Music**: an embedded music.youtube.com view inside the main window (no extra window). The sign-in spike succeeded through the Google sign-in route.
+5. **M5 YouTube Music**: built on `PRISM-5` (plan `docs/superpowers/plans/2026-10-21-prism-m5-youtube-music.md`, ledger `ledgers/m5-progress.md`). An embedded music.youtube.com child view in the main window, Google sign-in in its own window, a bridge that reads and drives the page through one IPC command, one transport with exclusive playback, media keys and tray following the active player, the YouTube queue in Prism's queue panel, a per-window app command manifest. Checked on the Mac by the owner; the Windows hand check is open.
 6. **M6 Release v1.0.0**:
    - installer and versionless asset copies, plus auto-update
    - macOS build (NSPanel for the mini player)
