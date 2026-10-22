@@ -51,6 +51,13 @@ pub fn page() -> Option<&'static Url> {
         .as_ref()
 }
 
+/// Whether `url` is on the fake page's origin (scheme, host and port), without a user.
+pub fn on_page(url: &Url, page: Option<&Url>) -> bool {
+    page.is_some_and(|page| {
+        url.origin() == page.origin() && url.username().is_empty() && url.password().is_none()
+    })
+}
+
 /// The bridge's `ALLOW_DEV_HOST` for a view that loads `page`.
 pub fn bridge_flag(page: Option<&Url>) -> bool {
     cfg!(debug_assertions) && page.is_some()
@@ -66,14 +73,13 @@ pub fn capability(page: &Url) -> tauri::ipc::CapabilityBuilder {
         .permission("allow-ytm-report")
 }
 
-/// At startup, before any view exists: with the override, a page on `127.0.0.1` may report
-/// and the fake page gets its capability.
+/// At startup, before any view exists: with the override, the fake page gets its capability.
+/// (`ytm_report` accepts it through [`page`].)
 #[cfg(debug_assertions)]
 pub fn activate<R: tauri::Runtime, M: tauri::Manager<R>>(app: &M) {
     let Some(page) = page() else {
         return;
     };
-    super::allow_dev_host(true);
     if let Err(err) = app.add_capability(capability(page)) {
         eprintln!("the fake YouTube Music page gets no IPC: {err}");
     }
@@ -149,7 +155,6 @@ mod tests {
         {
             assert!(read_env().is_none());
             assert!(page().is_none());
-            assert!(!crate::ytm::dev_host());
         }
 
         // The startup read goes through the build's flag, and the variable is read in one
@@ -176,7 +181,60 @@ mod tests {
         let view = include_str!("view.rs");
         assert!(view.contains("let dev_page = super::dev::page();"));
         assert!(view.contains("super::bridge_script(super::dev::bridge_flag(dev_page))"));
-        assert!(!view.contains("bridge_script(super::dev_host())"));
+        // And `ytm_report` takes the same page.
+        let commands = include_str!("../commands.rs");
+        assert!(commands
+            .contains("ytm::report_allowed(webview.label(), url.as_ref(), ytm::dev::page())"));
+    }
+
+    #[test]
+    fn reports_count_from_the_dev_page_origin_only() {
+        let page = parse_dev_url(PAGE).unwrap();
+        let url = |raw: &str| Url::parse(raw).unwrap();
+        for good in [PAGE, "http://127.0.0.1:4100/index.html?x=1"] {
+            assert!(
+                crate::ytm::report_allowed("ytm", Some(&url(good)), Some(&page)),
+                "{good}"
+            );
+        }
+        for bad in [
+            "http://127.0.0.1:4101/",
+            "http://127.0.0.1:80/",
+            "https://127.0.0.1:4100/",
+            "http://localhost:4100/",
+            "http://demo:demo-pass@127.0.0.1:4100/",
+        ] {
+            assert!(
+                !crate::ytm::report_allowed("ytm", Some(&url(bad)), Some(&page)),
+                "{bad}"
+            );
+        }
+        // Without the override no loopback page reports at all, and other views never do.
+        assert!(!crate::ytm::report_allowed("ytm", Some(&url(PAGE)), None));
+        assert!(!crate::ytm::report_allowed(
+            "main",
+            Some(&url(PAGE)),
+            Some(&page)
+        ));
+    }
+
+    /// The fake page may call exactly what the real page may: the runtime capability and
+    /// `capabilities/ytm.json` grant the same permissions to the same view, remote only.
+    #[cfg(debug_assertions)]
+    #[test]
+    fn dev_capability_grants_what_ytm_json_grants() {
+        use tauri::ipc::RuntimeCapability;
+        use tauri::utils::acl::capability::CapabilityFile;
+        let page = parse_dev_url(PAGE).unwrap();
+        let CapabilityFile::Capability(built) = capability(&page).build() else {
+            panic!("one capability");
+        };
+        let built = serde_json::to_value(&built).unwrap();
+        let file: serde_json::Value =
+            serde_json::from_str(include_str!("../../capabilities/ytm.json")).unwrap();
+        assert_eq!(built["permissions"], file["permissions"]);
+        assert_eq!(built["webviews"], file["webviews"]);
+        assert_eq!(built["local"], file["local"]);
     }
 
     #[cfg(debug_assertions)]

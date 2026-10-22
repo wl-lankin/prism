@@ -37,38 +37,19 @@ pub fn bridge_script(allow_dev_host: bool) -> String {
     format!("{{ const ALLOW_DEV_HOST = {allow_dev_host};\n{BRIDGE}\n}}")
 }
 
-#[cfg(debug_assertions)]
-static DEV_HOST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// Debug builds only: lets a page on `http://127.0.0.1` report, for the fake YouTube Music
-/// page of dev runs.
-#[cfg(debug_assertions)]
-pub fn allow_dev_host(on: bool) {
-    DEV_HOST.store(on, std::sync::atomic::Ordering::SeqCst);
-}
-
-/// Whether a page on `http://127.0.0.1` may report; always false in release builds.
-pub fn dev_host() -> bool {
-    #[cfg(debug_assertions)]
-    {
-        DEV_HOST.load(std::sync::atomic::Ordering::SeqCst)
-    }
-    #[cfg(not(debug_assertions))]
-    {
-        false
-    }
-}
-
-/// A report counts only from the `ytm` view while it shows music.youtube.com over https
-/// (or, with `dev`, a page on `http://127.0.0.1`).
-pub fn report_allowed(label: &str, url: Option<&tauri::Url>, dev: bool) -> bool {
+/// A report counts only from the `ytm` view while it shows music.youtube.com over https, or
+/// the fake page `dev_page` of a dev run ([`dev::page`], `None` in release builds) on exactly
+/// its origin.
+pub fn report_allowed(
+    label: &str,
+    url: Option<&tauri::Url>,
+    dev_page: Option<&tauri::Url>,
+) -> bool {
     let Some(url) = url else {
         return false;
     };
-    let host = url.host_str();
-    let page = url.scheme() == "https" && host == Some(PAGE_HOST) && url.port().is_none();
-    let fake = dev && url.scheme() == "http" && host == Some("127.0.0.1");
-    label == VIEW_LABEL && (page || fake)
+    let page = url.scheme() == "https" && url.host_str() == Some(PAGE_HOST) && url.port().is_none();
+    label == VIEW_LABEL && (page || dev::on_page(url, dev_page))
 }
 
 /// The only script Prism sends into the page, by action name.
@@ -134,33 +115,6 @@ pub fn scripts(action: YtmAction) -> Vec<String> {
         }
         YtmAction::Volume(_) => Vec::new(),
     }
-}
-
-/// `ytm_control`'s arguments as an action. `seek` needs `position_ms`, `volume` needs
-/// `volume` (0..=1, clamped); the other actions ignore both.
-pub fn parse_action(
-    action: &str,
-    position_ms: Option<f64>,
-    volume: Option<f64>,
-) -> Result<YtmAction, String> {
-    Ok(match action {
-        "toggle" => YtmAction::Toggle,
-        "play" => YtmAction::Play,
-        "pause" => YtmAction::Pause,
-        "next" => YtmAction::Next,
-        "prev" => YtmAction::Prev,
-        "seek" => match position_ms {
-            Some(ms) if ms.is_finite() && ms >= 0.0 => {
-                YtmAction::Seek((ms.round() as u64).min(report::MAX_MS))
-            }
-            _ => return Err("A seek needs a position in milliseconds.".to_string()),
-        },
-        "volume" => match volume {
-            Some(level) if level.is_finite() => YtmAction::Volume(level.clamp(0.0, 1.0) as f32),
-            _ => return Err("The volume must be a number between 0 and 1.".to_string()),
-        },
-        _ => return Err(format!("Unknown YouTube Music action: {action}")),
-    })
 }
 
 /// Runs a script in the YouTube Music view, if it exists. Must not block.
@@ -609,40 +563,13 @@ mod tests {
         assert!(lock(&f.page.0).is_empty());
 
         // A transport following the service hands control back to Prism.
-        use crate::shell::transport::{Active, Clock, PrismControl, Transport};
-        use std::time::Instant;
-        struct Quiet;
-        impl PrismControl for Quiet {
-            fn toggle(&self) -> Result<(), String> {
-                Ok(())
-            }
-            fn pause(&self) -> Result<(), String> {
-                Ok(())
-            }
-            fn next(&self) -> Result<(), String> {
-                Ok(())
-            }
-            fn prev(&self) -> Result<(), String> {
-                Ok(())
-            }
-            fn seek(&self, _: u64) -> Result<(), String> {
-                Ok(())
-            }
-            fn set_volume(&self, _: f32) -> Result<(), String> {
-                Ok(())
-            }
-        }
-        struct Now;
-        impl Clock for Now {
-            fn now(&self) -> Instant {
-                Instant::now()
-            }
-        }
+        use crate::shell::transport::tests::FakePrism;
+        use crate::shell::transport::{Active, SystemClock, Transport};
         let service = Arc::new(fixture().service);
         let transport = Arc::new(Transport::with_control(
-            Arc::new(Quiet),
+            Arc::new(FakePrism::default()),
             Arc::clone(&service) as Arc<dyn YtmControl>,
-            Arc::new(Now),
+            Arc::new(SystemClock),
         ));
         let weak = Arc::downgrade(&transport);
         service.follow(Arc::new(move |state| {
@@ -752,43 +679,15 @@ mod tests {
     }
 
     #[test]
-    fn control_actions_parse() {
-        assert_eq!(parse_action("toggle", None, None), Ok(YtmAction::Toggle));
-        assert_eq!(parse_action("prev", Some(5.0), None), Ok(YtmAction::Prev));
-        assert_eq!(
-            parse_action("seek", Some(1234.4), None),
-            Ok(YtmAction::Seek(1234))
-        );
-        assert_eq!(
-            parse_action("seek", Some(1e300), None),
-            Ok(YtmAction::Seek(report::MAX_MS))
-        );
-        assert!(parse_action("seek", None, None).is_err());
-        assert!(parse_action("seek", Some(-1.0), None).is_err());
-        assert!(parse_action("seek", Some(f64::NAN), None).is_err());
-        assert_eq!(
-            parse_action("volume", None, Some(0.25)),
-            Ok(YtmAction::Volume(0.25))
-        );
-        assert_eq!(
-            parse_action("volume", None, Some(3.0)),
-            Ok(YtmAction::Volume(1.0))
-        );
-        assert!(parse_action("volume", None, Some(f64::INFINITY)).is_err());
-        assert!(parse_action("volume", None, None).is_err());
-        assert!(parse_action("Toggle", None, None).is_err());
-        assert!(parse_action("eval", None, None).is_err());
-    }
-
-    #[test]
     fn report_from_another_webview_is_refused() {
         let url = |raw: &str| tauri::Url::parse(raw).unwrap();
         let page = url("https://music.youtube.com/watch?v=abc");
-        assert!(report_allowed("ytm", Some(&page), false));
-        assert!(report_allowed("ytm", Some(&page), true));
+        let fake = url("http://127.0.0.1:4321/");
+        assert!(report_allowed("ytm", Some(&page), None));
+        assert!(report_allowed("ytm", Some(&page), Some(&fake)));
         // Other webviews, even on the right page.
         for label in ["main", "mini", "ytm-signin", "YTM", ""] {
-            assert!(!report_allowed(label, Some(&page), false), "{label}");
+            assert!(!report_allowed(label, Some(&page), None), "{label}");
         }
         // The right view on another page.
         for other in [
@@ -802,27 +701,24 @@ mod tests {
             "http://127.0.0.1:4321/",
             "about:blank",
         ] {
-            assert!(!report_allowed("ytm", Some(&url(other)), false), "{other}");
+            assert!(!report_allowed("ytm", Some(&url(other)), None), "{other}");
         }
-        assert!(!report_allowed("ytm", None, false));
-        // The fake page only with the dev flag, and only over http on 127.0.0.1.
-        assert!(report_allowed(
+        assert!(!report_allowed("ytm", None, None));
+        // The fake page only on its own origin (more in `dev::tests`).
+        assert!(report_allowed("ytm", Some(&fake), Some(&fake)));
+        assert!(!report_allowed(
             "ytm",
-            Some(&url("http://127.0.0.1:4321/")),
-            true
+            Some(&url("http://127.0.0.1:4322/")),
+            Some(&fake)
         ));
         assert!(!report_allowed(
             "ytm",
             Some(&url("http://localhost:4321/")),
-            true
+            Some(&fake)
         ));
-        assert!(!report_allowed(
-            "main",
-            Some(&url("http://127.0.0.1:4321/")),
-            true
-        ));
+        assert!(!report_allowed("main", Some(&fake), Some(&fake)));
         #[cfg(not(debug_assertions))]
-        assert!(!dev_host());
+        assert!(dev::page().is_none());
     }
 
     #[test]

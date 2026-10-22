@@ -25,7 +25,7 @@ vi.mock('@tauri-apps/api/event', () => ({
 const invoke = vi.fn();
 vi.mock('@tauri-apps/api/core', () => ({ invoke: (...args: unknown[]) => invoke(...args) }));
 
-const { ytm, reportRect, hideView, control, signIn, signOut, initYtm, setOverlayOpen } = await import('./ytm.svelte');
+const { ytm, reportRect, hideView, signIn, signOut, initYtm, setOverlayOpen } = await import('./ytm.svelte');
 const { player, initPlayer } = await import('./player.svelte');
 const { openOverlay, closeOverlay, anyOverlay, setOverlayListener } = await import('./overlays.svelte');
 // YouTubeView sets this while it is mounted; here the store is driven without it.
@@ -218,11 +218,9 @@ it('setOverlayOpen is what the registry drives', () => {
   expect(ytm.hiddenForOverlay).toBe(false);
 });
 
-it('control, signIn and signOut use the pinned argument names', async () => {
-  await control('toggle');
+it('signIn and signOut use the pinned argument names', async () => {
   await signIn();
   await signOut();
-  expect(invoke).toHaveBeenCalledWith('ytm_control', { action: 'toggle' });
   expect(invoke).toHaveBeenCalledWith('ytm_sign_in', undefined);
   expect(invoke).toHaveBeenCalledWith('ytm_sign_out', undefined);
 });

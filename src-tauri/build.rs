@@ -72,7 +72,6 @@ const COMMANDS: &[&str] = &[
     "ytm_report",
     "ytm_show",
     "ytm_hide",
-    "ytm_control",
     "ytm_state",
     "ytm_sign_in",
     "ytm_sign_out",

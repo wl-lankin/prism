@@ -121,17 +121,13 @@ export const favoritesTracks = () => call<Track[]>('favorites_tracks');
 export const favoritesAlbums = () => call<Album[]>('favorites_albums');
 export const favoritesArtists = () => call<Artist[]>('favorites_artists');
 
-// YouTube Music. Views go through `stores/ytm.svelte.ts`, not these wrappers directly.
+// YouTube Music. Views go through `stores/ytm.svelte.ts`, not these wrappers directly. Play,
+// pause, next, previous, seek and volume use the `player*` commands, which reach whichever
+// player is active.
 
 /** Puts the YouTube Music view at `rect` (created on first use) and shows it. */
 export const ytmShow = (rect: YtmRect) => call<void>('ytm_show', { rect });
 export const ytmHide = () => call<void>('ytm_hide');
-/** `action` is a fixed word the backend knows (`toggle`, `play`, `pause`, `next`, `prev`,
- *  `seek` with `positionMs`, `volume` with `volume` 0..1). */
-export const ytmControl = (
-  action: string,
-  args: { positionMs?: number; volume?: number } = {},
-) => call<void>('ytm_control', { action, ...args });
 export const ytmState = () => call<YtmState>('ytm_state');
 export const ytmSignIn = () => call<void>('ytm_sign_in');
 export const ytmSignOut = () => call<void>('ytm_sign_out');
