@@ -5,10 +5,14 @@ use std::io::Read;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 
-use lofty::file::{FileType, TaggedFileExt};
-use lofty::id3::v2::{Frame, FrameFlags, SynchronizedTextFrame, TimestampFormat};
+use lofty::config::ParseOptions;
+use lofty::file::{FileType, TaggedFile, TaggedFileExt};
+use lofty::id3::v2::{
+    Frame, FrameFlags, Id3v2Tag, SyncTextContentType, SynchronizedTextFrame, TimestampFormat,
+};
 use lofty::mpeg::MpegFile;
 use lofty::prelude::AudioFile;
+use lofty::probe::Probe;
 use lofty::tag::ItemKey;
 
 use super::{lrc, Lyrics, LyricsSource};
@@ -53,6 +57,11 @@ fn find_sidecar(path: &Path) -> Option<PathBuf> {
     if exact.is_file() {
         return Some(exact);
     }
+    // macOS and Windows match the extension in any case already; only a case-sensitive
+    // filesystem needs the directory scan for `Song.LRC`.
+    if !cfg!(target_os = "linux") {
+        return None;
+    }
     let mut found: Vec<PathBuf> = std::fs::read_dir(dir)
         .ok()?
         .filter_map(Result::ok)
@@ -76,7 +85,26 @@ fn read_limited(path: &Path) -> Option<Vec<u8>> {
     (bytes.len() as u64 <= MAX_SIDECAR_BYTES).then_some(bytes)
 }
 
-/// UTF-16 with a BOM, else UTF-8 with replacement characters.
+/// Windows-1252 for 0x80..=0x9F; the rest of the encoding is Latin-1. Unassigned bytes map
+/// to U+FFFD, which the line cleaning keeps harmless.
+const CP1252_HIGH: [char; 32] = [
+    '\u{20AC}', '\u{FFFD}', '\u{201A}', '\u{0192}', '\u{201E}', '\u{2026}', '\u{2020}', '\u{2021}',
+    '\u{02C6}', '\u{2030}', '\u{0160}', '\u{2039}', '\u{0152}', '\u{FFFD}', '\u{017D}', '\u{FFFD}',
+    '\u{FFFD}', '\u{2018}', '\u{2019}', '\u{201C}', '\u{201D}', '\u{2022}', '\u{2013}', '\u{2014}',
+    '\u{02DC}', '\u{2122}', '\u{0161}', '\u{203A}', '\u{0153}', '\u{FFFD}', '\u{017E}', '\u{0178}',
+];
+
+fn windows_1252(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|&b| match b {
+            0x80..=0x9F => CP1252_HIGH[usize::from(b - 0x80)],
+            _ => char::from(b),
+        })
+        .collect()
+}
+
+/// UTF-16 with a BOM, UTF-8, else Windows-1252 (old LRC tools).
 fn decode_text(bytes: &[u8]) -> String {
     let utf16 = |rest: &[u8], big: bool| {
         let units: Vec<u16> = rest
@@ -94,19 +122,35 @@ fn decode_text(bytes: &[u8]) -> String {
     match bytes {
         [0xFF, 0xFE, rest @ ..] => utf16(rest, false),
         [0xFE, 0xFF, rest @ ..] => utf16(rest, true),
-        _ => String::from_utf8_lossy(bytes).into_owned(),
+        _ => match std::str::from_utf8(bytes) {
+            Ok(s) => s.to_string(),
+            Err(_) => windows_1252(bytes),
+        },
     }
 }
 
 fn read_embedded(path: &Path) -> Option<Lyrics> {
-    let tagged = lofty::read_from_path(path).ok()?;
+    let options = ParseOptions::new()
+        .read_properties(false)
+        .read_cover_art(false);
+    let probe = Probe::open(path)
+        .ok()?
+        .options(options)
+        .guess_file_type()
+        .ok()?;
+
+    let mut synced = None;
+    let tagged = if probe.file_type() == Some(FileType::Mpeg) {
+        // The generic tag view drops SYLT, so the MPEG file is read once and serves both.
+        let mut file = File::open(path).ok()?;
+        let mpeg = MpegFile::read_from(&mut file, options).ok()?;
+        synced = mpeg.id3v2().and_then(sylt_lyrics);
+        TaggedFile::from(mpeg)
+    } else {
+        probe.read().ok()?
+    };
 
     let mut plain: Option<Lyrics> = None;
-    let mut synced = if tagged.file_type() == FileType::Mpeg {
-        sylt_lyrics(path)
-    } else {
-        None
-    };
     for tag in tagged.tags() {
         for key in [ItemKey::UnsyncLyrics, ItemKey::Lyrics] {
             for text in tag.get_strings(key) {
@@ -125,12 +169,8 @@ fn read_embedded(path: &Path) -> Option<Lyrics> {
     synced.or(plain)
 }
 
-/// ID3 SYLT frames with millisecond timestamps. The generic tag view drops them, so the
-/// MPEG file is read again for its raw ID3v2 frames.
-fn sylt_lyrics(path: &Path) -> Option<Lyrics> {
-    let mut file = File::open(path).ok()?;
-    let mpeg = MpegFile::read_from(&mut file, lofty::config::ParseOptions::new()).ok()?;
-    let id3 = mpeg.id3v2()?;
+/// ID3 SYLT lyrics frames with millisecond timestamps.
+fn sylt_lyrics(id3: &Id3v2Tag) -> Option<Lyrics> {
     for frame in id3 {
         let Frame::Binary(binary) = frame else {
             continue;
@@ -141,19 +181,40 @@ fn sylt_lyrics(path: &Path) -> Option<Lyrics> {
         let Ok(sylt) = SynchronizedTextFrame::parse(&binary.data, FrameFlags::default()) else {
             continue;
         };
-        if sylt.timestamp_format != TimestampFormat::MS {
+        if sylt.timestamp_format != TimestampFormat::MS
+            || sylt.content_type != SyncTextContentType::Lyrics
+        {
             continue;
         }
-        let timed = sylt
-            .content
-            .into_iter()
-            .map(|(ms, text)| (u64::from(ms), text))
-            .collect();
-        if let Some(l) = Lyrics::synced(LyricsSource::Embedded, timed) {
+        if let Some(l) = Lyrics::synced(LyricsSource::Embedded, sylt_lines(sylt.content)) {
             return Some(l);
         }
     }
     None
+}
+
+/// Entries are lines, unless some entry starts with a line break: then they are syllables
+/// or words and a break starts the next line.
+fn sylt_lines(mut content: Vec<(u32, String)>) -> Vec<(u64, String)> {
+    content.sort_by_key(|(ms, _)| *ms);
+    let breaks = |t: &str| t.starts_with(['\n', '\r']);
+    if !content.iter().any(|(_, t)| breaks(t)) {
+        return content
+            .into_iter()
+            .map(|(ms, t)| (u64::from(ms), t))
+            .collect();
+    }
+    let mut lines: Vec<(u64, String)> = Vec::new();
+    for (ms, text) in content {
+        match lines.last_mut() {
+            Some((_, line)) if !breaks(&text) => line.push_str(&text),
+            _ => lines.push((
+                u64::from(ms),
+                text.trim_start_matches(['\n', '\r']).to_string(),
+            )),
+        }
+    }
+    lines
 }
 
 #[cfg(test)]
@@ -253,11 +314,6 @@ mod tests {
 
         std::fs::write(&lrc, b"\xEF\xBB\xBF[00:01.00]Bom\n").unwrap();
         assert_eq!(texts(&read(&path).synced.unwrap()), ["Bom"]);
-
-        // Invalid UTF-8 is replaced, not rejected.
-        std::fs::write(&lrc, b"[00:01.00]Gr\xFC\xDFe\n").unwrap();
-        let lossy = read(&path).synced.unwrap();
-        assert!(lossy.lines[0].text.starts_with("Gr"));
     }
 
     #[test]
@@ -339,7 +395,80 @@ mod tests {
         assert_eq!(read(&path), LocalLyrics::default());
     }
 
+    #[test]
+    fn id3_sylt_that_is_not_lyrics_is_skipped() {
+        let (_dir, path) = fixture_copy("tagged.mp3", "a.mp3");
+        write_sylt_with(
+            &path,
+            TimestampFormat::MS,
+            SyncTextContentType::Chord,
+            vec![(1_000, "Am".into()), (2_000, "G".into())],
+        );
+        assert_eq!(read(&path), LocalLyrics::default());
+    }
+
+    #[test]
+    fn word_synced_sylt_is_grouped_into_lines() {
+        let (_dir, path) = fixture_copy("tagged.mp3", "a.mp3");
+        write_sylt_with(
+            &path,
+            TimestampFormat::MS,
+            SyncTextContentType::Lyrics,
+            vec![
+                (1_000, "Eins ".into()),
+                (1_500, "zwei".into()),
+                (3_000, "\nDrei ".into()),
+                (3_400, "vier".into()),
+                (5_000, "\r\nFünf".into()),
+            ],
+        );
+        let synced = read(&path).synced.unwrap();
+        assert_eq!(texts(&synced), ["Eins zwei", "Drei vier", "Fünf"]);
+        let starts: Vec<_> = synced.lines.iter().map(|l| l.start_ms).collect();
+        assert_eq!(starts, [Some(1_000), Some(3_000), Some(5_000)]);
+    }
+
+    #[test]
+    fn sidecar_for_a_name_with_dots() {
+        let (dir, path) = fixture_copy("tagged.mp3", "01. Eins.Zwei.mp3");
+        std::fs::write(dir.path().join("01. Eins.Zwei.lrc"), "[00:01.00]Punkt").unwrap();
+        assert_eq!(texts(&read(&path).synced.unwrap()), ["Punkt"]);
+    }
+
+    #[test]
+    fn windows_1252_sidecar_is_decoded() {
+        let (dir, path) = fixture_copy("tagged.mp3", "song.mp3");
+        std::fs::write(
+            dir.path().join("song.lrc"),
+            b"[00:01.00]Gr\xFC\xDFe \xE4\xF6 \x80\n",
+        )
+        .unwrap();
+        assert_eq!(texts(&read(&path).synced.unwrap()), ["Grüße äö €"]);
+    }
+
+    #[test]
+    fn embedded_ape_lyrics_are_read() {
+        let (_dir, path) = fixture_copy("tagged.mp3", "a.mp3");
+        write_text_lyrics(&path, TagType::Ape, ItemKey::Lyrics, "Erste\nZweite");
+        let plain = read(&path).plain.unwrap();
+        assert_eq!(texts(&plain), ["Erste", "Zweite"]);
+    }
+
     fn write_sylt(path: &Path, format: TimestampFormat) {
+        write_sylt_with(
+            path,
+            format,
+            SyncTextContentType::Lyrics,
+            vec![(1_000, "Eins".into()), (2_500, "Zwei".into())],
+        );
+    }
+
+    fn write_sylt_with(
+        path: &Path,
+        format: TimestampFormat,
+        content_type: SyncTextContentType,
+        content: Vec<(u32, String)>,
+    ) {
         let mut mpeg = MpegFile::read_from(
             &mut File::open(path).unwrap(),
             lofty::config::ParseOptions::new(),
@@ -349,9 +478,9 @@ mod tests {
             TextEncoding::UTF8,
             *b"deu",
             format,
-            SyncTextContentType::Lyrics,
+            content_type,
             None,
-            vec![(1_000, "Eins".into()), (2_500, "Zwei".into())],
+            content,
         );
         let data = sylt.as_bytes(WriteOptions::default()).unwrap();
         let frame = BinaryFrame::new(FrameId::Valid("SYLT".into()), data);

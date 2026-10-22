@@ -5,6 +5,9 @@ use super::{Lyrics, LyricsSource};
 
 const METADATA_KEYS: [&str; 9] = ["ar", "ti", "al", "au", "by", "length", "re", "ve", "offset"];
 
+/// Room for repeated-tag lines beyond what `Lyrics::synced` keeps after sorting.
+const MAX_TIMED: usize = 4 * super::MAX_LINES;
+
 /// Timed lines become synced lyrics. Text without any time tag becomes plain lyrics.
 pub fn parse(text: &str, source: LyricsSource) -> Option<Lyrics> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
@@ -29,8 +32,15 @@ pub fn parse(text: &str, source: LyricsSource) -> Option<Lyrics> {
         if stamps.is_empty() {
             continue;
         }
-        let line_text = strip_word_tags(rest);
+        // Cut before repeating per tag: a hostile line must not multiply its text.
+        let line_text: String = strip_word_tags(rest)
+            .chars()
+            .take(super::MAX_LINE_CHARS)
+            .collect();
         for ms in stamps {
+            if timed.len() >= MAX_TIMED {
+                break;
+            }
             timed.push((ms, line_text.clone()));
         }
     }
@@ -40,7 +50,7 @@ pub fn parse(text: &str, source: LyricsSource) -> Option<Lyrics> {
     }
     let timed = timed
         .into_iter()
-        .map(|(ms, t)| ((ms - offset_ms).max(0) as u64, t))
+        .map(|(ms, t)| (ms.saturating_sub(offset_ms).max(0) as u64, t))
         .collect();
     Lyrics::synced(source, timed)
 }
@@ -130,7 +140,9 @@ fn strip_word_tags(s: &str) -> String {
     while let Some(start) = rest.find('<') {
         out.push_str(&rest[..start]);
         let after = &rest[start + 1..];
-        match after.find('>') {
+        // The longest tag, `<9999:59.999>`, closes within 11 bytes; a wider search is quadratic.
+        let end = after.bytes().take(12).position(|b| b == b'>');
+        match end {
             Some(end) if time_stamp(&after[..end]).is_some() => rest = &after[end + 1..],
             _ => {
                 out.push('<');
@@ -139,7 +151,7 @@ fn strip_word_tags(s: &str) -> String {
         }
     }
     out.push_str(rest);
-    out.trim().to_string()
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 #[cfg(test)]
@@ -275,5 +287,64 @@ mod tests {
             let l = parse(bad, LyricsSource::LrcFile).unwrap();
             assert!(!l.synced, "{bad}");
         }
+    }
+
+    #[test]
+    fn hostile_input_stays_small_and_fast() {
+        let start = std::time::Instant::now();
+        let line = format!("{}{}", "[0:01]".repeat(10_000), "x".repeat(100_000));
+        let l = parse(&line, LyricsSource::LrcFile).unwrap();
+        assert!(l.lines.len() <= crate::lyrics::MAX_LINES);
+        assert!(l
+            .lines
+            .iter()
+            .all(|l| l.text.chars().count() <= crate::lyrics::MAX_LINE_CHARS));
+
+        let many = "[0:01]".repeat(200_000) + "y";
+        assert!(parse(&many, LyricsSource::LrcFile).unwrap().lines.len() <= 2000);
+
+        let angle = format!("[0:01]{}", "<".repeat(300_000));
+        parse(&angle, LyricsSource::LrcFile);
+        assert!(start.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn extreme_offsets_do_not_overflow() {
+        for offset in [
+            "-9223372036854775807",
+            "9223372036854775807",
+            "-9223372036854775808",
+        ] {
+            let l = parse(
+                &format!("[offset:{offset}]\n[00:01.00]a"),
+                LyricsSource::LrcFile,
+            )
+            .unwrap();
+            assert_eq!(l.lines.len(), 1);
+        }
+        let got = synced("[offset:-9223372036854775807]\n[00:01.00]a");
+        assert_eq!(got.len(), 1);
+        assert_eq!(
+            synced("[offset:9223372036854775807]\n[00:01.00]a"),
+            [row(0, "a")]
+        );
+    }
+
+    #[test]
+    fn word_tags_leave_single_spaces() {
+        let got = synced("[00:01.00]<00:01.00> Eins <00:01.50> zwei  <00:02.00>drei");
+        assert_eq!(got, [row(1_000, "Eins zwei drei")]);
+    }
+
+    #[test]
+    fn section_headings_stay_text_in_plain_lyrics() {
+        let l = parse(
+            "[Verse 1]\nEins\n[Verse 1: Name]\nZwei",
+            LyricsSource::LrcFile,
+        )
+        .unwrap();
+        assert!(!l.synced);
+        let texts: Vec<_> = l.lines.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(texts, ["[Verse 1]", "Eins", "[Verse 1: Name]", "Zwei"]);
     }
 }
