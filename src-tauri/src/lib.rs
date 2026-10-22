@@ -65,6 +65,8 @@ pub struct AppState {
     pub radio: Arc<RadioService>,
     /// What YouTube Music's page reports, and the commands into it.
     pub ytm: Arc<YtmService>,
+    /// The YouTube Music view in the main window and the Google sign-in window.
+    pub ytm_view: Arc<ytm::view::YtmView>,
     /// Which player the transport targets; keeps only one of them playing.
     pub transport: Arc<Transport>,
 }
@@ -211,7 +213,10 @@ fn library_resolver(library: &Library) -> Resolver {
 fn main_window_handle(app: &tauri::App) -> Option<usize> {
     #[cfg(target_os = "windows")]
     {
-        match app.get_webview_window("main").map(|window| window.hwnd()) {
+        match app
+            .get_window(shell::MAIN_LABEL)
+            .map(|window| window.hwnd())
+        {
             Some(Ok(hwnd)) => Some(hwnd.0 as usize),
             _ => None,
         }
@@ -422,8 +427,19 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
             }
         })
     });
+    // Before any YouTube Music view exists: a profile a sign-out could not remove.
+    if cfg!(windows) {
+        if let Err(err) = ytm::view::remove_pending(&data_dir) {
+            eprintln!("removing the old YouTube Music data failed: {err}");
+        }
+    }
+    let ytm_view = Arc::new(ytm::view::YtmView::new(
+        Arc::new(ytm::view::TauriHost::new(handle.clone(), data_dir.clone())),
+        Arc::clone(&ytm),
+    ));
     app.manage(AppState {
         ytm,
+        ytm_view,
         transport,
         navidrome,
         radio,
@@ -449,7 +465,7 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
         eprintln!("creating the tray icon failed: {err}");
     }
     #[cfg(target_os = "windows")]
-    if let Some(window) = app.get_webview_window(shell::MAIN_LABEL) {
+    if let Some(window) = app.get_window(shell::MAIN_LABEL) {
         shell::taskbar_win::attach(&handle, &window);
     }
 
@@ -602,6 +618,9 @@ pub fn run() {
             tauri::RunEvent::ExitRequested { .. } => {
                 if let Some(state) = app.try_state::<shell::ShellState>() {
                     state.set_quitting();
+                }
+                if let Some(state) = app.try_state::<AppState>() {
+                    state.ytm_view.destroy();
                 }
             }
             tauri::RunEvent::Exit => {

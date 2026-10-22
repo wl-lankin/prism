@@ -6,8 +6,11 @@
 //! volume sets one number, formatted by Rust, before its snippet runs.
 
 pub mod covers;
+pub mod policy;
 pub mod report;
+pub mod signin;
 pub mod state;
+pub mod view;
 
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
