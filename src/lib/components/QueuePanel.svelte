@@ -15,6 +15,7 @@
   import { visibleRange } from '../virtual';
   import Cover from './Cover.svelte';
   import Heart from './Heart.svelte';
+  import EmptyArt from './EmptyArt.svelte';
   import Icon from './Icon.svelte';
   import LivePill from './LivePill.svelte';
   import RowPlay from './RowPlay.svelte';
@@ -380,7 +381,7 @@
     </div>
   {:else if empty}
     <div class="empty">
-      <span class="empty-art" aria-hidden="true"><Icon name="queue" size={28} /></span>
+      <span class="empty-art"><EmptyArt kind="queue" width={112} /></span>
       <strong>{t('queue.emptyTitle')}</strong>
       <p>{t('queue.emptyLead')}</p>
     </div>
@@ -873,13 +874,7 @@
   .empty-art {
     display: grid;
     place-items: center;
-    width: 64px;
-    height: 64px;
     margin-bottom: 6px;
-    border-radius: 18px;
-    background: linear-gradient(145deg, #25252c, #18181d);
-    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
-    color: rgba(243, 243, 245, 0.4);
   }
 
   .empty strong {

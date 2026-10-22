@@ -15,6 +15,7 @@
   import Backdrop from './Backdrop.svelte';
   import Cover from './Cover.svelte';
   import Heart from './Heart.svelte';
+  import EmptyArt from './EmptyArt.svelte';
   import Icon from './Icon.svelte';
   import LivePill from './LivePill.svelte';
   import NowPlayingBars from './NowPlayingBars.svelte';
@@ -246,7 +247,7 @@
 
   {#if idle || (!yt && !track)}
     <div class="empty">
-      <span class="empty-art" aria-hidden="true"><Icon name="songs" size={40} /></span>
+      <span class="empty-art"><EmptyArt kind="songs" /></span>
       <h1>{t('transport.idleTitle')}</h1>
       <p>{t('nowPlaying.emptyLead')}</p>
     </div>
@@ -776,13 +777,7 @@
   .empty-art {
     display: grid;
     place-items: center;
-    width: 92px;
-    height: 92px;
     margin-bottom: 8px;
-    border-radius: 22px;
-    background: linear-gradient(145deg, #25252c, #18181d);
-    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
-    color: rgba(243, 243, 245, 0.35);
   }
 
   .empty h1 {
