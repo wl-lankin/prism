@@ -146,6 +146,13 @@ function bundled() {
       repository: 'https://www.geojs.io',
     },
     {
+      id: 'lrclib',
+      name: 'LRCLIB',
+      version: '',
+      license: 'Free community API',
+      repository: 'https://lrclib.net',
+    },
+    {
       id: 'navidrome',
       name: 'Navidrome logo',
       version: '',
