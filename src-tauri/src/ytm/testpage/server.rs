@@ -380,8 +380,10 @@ mod tests {
             assert_eq!(data, (SAMPLE_RATE * SONG_SECONDS * 2) as usize);
             assert_eq!(wav.len(), 44 + data);
             let peak = wav[44..]
-                .chunks_exact(2)
-                .map(|s| i16::from_le_bytes([s[0], s[1]]).unsigned_abs())
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|s| i16::from_le_bytes(*s).unsigned_abs())
                 .max()
                 .unwrap();
             assert!(peak > 1000);
