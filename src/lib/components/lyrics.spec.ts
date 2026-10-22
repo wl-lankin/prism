@@ -103,6 +103,18 @@ const plain: Lyrics = {
   ],
 };
 
+const ytmPlaying = {
+  status: 'playing' as const,
+  title: 'Glass Tides',
+  artist: 'Lumen Field',
+  album: 'Low Light',
+  coverId: null,
+  positionMs: 0,
+  durationMs: 200_000,
+  canNext: false,
+  canPrev: false,
+};
+
 let target: HTMLElement;
 const mounted: ReturnType<typeof mount>[] = [];
 
@@ -150,6 +162,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers();
+  applyState({ ...ytm.state, status: 'idle' });
   for (const app of mounted.splice(0)) unmount(app);
   target.remove();
 });
@@ -205,12 +218,59 @@ describe('active line', () => {
     });
     show(LyricsView);
     await settle();
+    await vi.advanceTimersByTimeAsync(300);
     expect(calls('lyrics_for_youtube')).toHaveLength(1);
     expect(calls('lyrics_for_track')).toHaveLength(0);
     expect(activeText()).toBe('Third invented line');
     await vi.advanceTimersByTimeAsync(1900);
     expect(activeText()).toBe('Fourth invented line');
     applyState({ ...ytm.state, status: 'idle' });
+  });
+
+  it('does not jump ahead by the length of a pause when playback resumes', async () => {
+    vi.useFakeTimers({ toFake: ['requestAnimationFrame', 'cancelAnimationFrame', 'performance', 'setTimeout', 'clearTimeout'] });
+    play('a', 1000, 'playing');
+    show(LyricsView);
+    await settle();
+    await vi.advanceTimersByTimeAsync(100);
+    player.status = 'paused';
+    flushSync();
+    await vi.advanceTimersByTimeAsync(30_000);
+    player.status = 'playing';
+    flushSync();
+    await vi.advanceTimersByTimeAsync(20);
+    expect(activeText()).toBe('First invented line');
+  });
+
+  it('keeps the clicked line on YouTube Music while its ticker runs', async () => {
+    vi.useFakeTimers({ toFake: ['requestAnimationFrame', 'cancelAnimationFrame', 'performance', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
+    player.active = 'ytm';
+    applyState({ ...ytmPlaying, positionMs: 0 });
+    show(LyricsView);
+    await settle();
+    await vi.advanceTimersByTimeAsync(300);
+    lines()[2].click();
+    flushSync();
+    await vi.advanceTimersByTimeAsync(250);
+    expect(activeText()).toBe('Third invented line');
+  });
+
+  it('holds a seek until a report near it arrives, so the highlight does not bounce', async () => {
+    vi.useFakeTimers({ toFake: ['requestAnimationFrame', 'cancelAnimationFrame', 'performance', 'setTimeout', 'clearTimeout'] });
+    play('a', 0, 'playing');
+    show(LyricsView);
+    await settle();
+    lines()[2].click();
+    flushSync();
+    await vi.advanceTimersByTimeAsync(100);
+    player.positionMs = 300;
+    flushSync();
+    await vi.advanceTimersByTimeAsync(50);
+    expect(activeText()).toBe('Third invented line');
+    await vi.advanceTimersByTimeAsync(700);
+    player.positionMs = 350;
+    flushSync();
+    expect(activeText()).toBe('First invented line');
   });
 
   it('seeks to the start of a clicked line', async () => {
@@ -265,14 +325,43 @@ describe('following', () => {
     expect(scrollTo).toHaveBeenCalled();
   });
 
-  it('keeps the view still for a click on a line', async () => {
+  it('keeps the view still for a click on a line, even with a little jitter', async () => {
     play('a', 0);
     show(LyricsView);
     await settle();
-    lines()[1].dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+    const move = (clientY: number) =>
+      lines()[1].dispatchEvent(new PointerEvent('pointermove', { bubbles: true, buttons: 1, clientY }));
+    lines()[1].dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, buttons: 1, clientY: 100 }));
+    move(102);
     lines()[1].click();
     flushSync();
     expect(target.querySelector('.back')).toBeNull();
+    move(110);
+    flushSync();
+    expect(target.querySelector('.back')).not.toBeNull();
+  });
+
+  it('stops following for keyboard scrolling', async () => {
+    play('a', 0);
+    show(LyricsView);
+    await settle();
+    target.querySelector('.scroll')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'PageDown', bubbles: true }));
+    flushSync();
+    expect(target.querySelector('.back')).not.toBeNull();
+  });
+
+  it('has one tab stop, and the arrow keys move between lines', async () => {
+    play('a', 2500);
+    show(LyricsView);
+    await settle();
+    const stops = () => lines().filter((line) => line.tabIndex === 0);
+    expect(stops()).toEqual([lines()[1]]);
+    lines()[1].focus();
+    lines()[1].dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+    flushSync();
+    expect(document.activeElement).toBe(lines()[2]);
+    expect(stops()).toEqual([lines()[2]]);
+    expect(target.querySelector('.back')).not.toBeNull();
   });
 
   it('scrolls without animation under reduced motion', async () => {
@@ -430,7 +519,7 @@ describe('one answer per track', () => {
     await settle();
     expect(calls('lyrics_for_track').map((call) => call[1])).toEqual([{ trackId: 'a' }, { trackId: 'b' }]);
     expect(target.textContent).toContain('No lyrics found');
-    expect(lyricsState.key).toBe('track:b|online');
+    expect(lyricsState.key).toBe('track:b');
   });
 
   it('ignores a late answer for a track that no longer plays', async () => {
@@ -449,6 +538,46 @@ describe('one answer per track', () => {
     await settle();
     expect(target.textContent).toContain('No lyrics found');
     expect(lines()).toHaveLength(0);
+  });
+
+  it('asks nothing for half-updated YouTube Music metadata and once for the settled song', async () => {
+    vi.useFakeTimers({ toFake: ['requestAnimationFrame', 'cancelAnimationFrame', 'performance', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
+    player.active = 'ytm';
+    applyState({ ...ytmPlaying, durationMs: 0 });
+    show(LyricsView);
+    await settle();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(calls('lyrics_for_youtube')).toHaveLength(0);
+    applyState({ ...ytmPlaying, artist: '' });
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(calls('lyrics_for_youtube')).toHaveLength(0);
+
+    applyState({ ...ytmPlaying, durationMs: 200_400 });
+    await vi.advanceTimersByTimeAsync(299);
+    expect(calls('lyrics_for_youtube')).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(2);
+    expect(calls('lyrics_for_youtube')).toHaveLength(1);
+    expect(lyricsState.key).toBe('ytm:Glass Tides|Lumen Field|200');
+
+    // A song change: the new title arrives first, the artist 100 ms later.
+    applyState({ ...ytmPlaying, title: 'Other Song', durationMs: 180_000 });
+    await vi.advanceTimersByTimeAsync(100);
+    applyState({ ...ytmPlaying, title: 'Other Song', artist: 'Prism Band', durationMs: 180_000 });
+    await vi.advanceTimersByTimeAsync(400);
+    expect(calls('lyrics_for_youtube')).toHaveLength(2);
+    expect(lyricsState.key).toBe('ytm:Other Song|Prism Band|180');
+  });
+
+  it('keeps a found answer when only the online search is switched', async () => {
+    play('a');
+    show(LyricsView);
+    await settle();
+    settings.lyricsLookup = false;
+    await settle();
+    settings.lyricsLookup = true;
+    await settle();
+    expect(calls('lyrics_for_track')).toHaveLength(1);
+    expect(lines()).toHaveLength(4);
   });
 
   it('asks again after the online search is switched on', async () => {
@@ -537,6 +666,18 @@ describe('the side slot', () => {
 });
 
 describe('Now Playing', () => {
+  it('switches to the lyrics on YouTube Music too', async () => {
+    player.active = 'ytm';
+    applyState(ytmPlaying);
+    show(NowPlaying);
+    await settle();
+    expect(calls('lyrics_for_youtube')).toHaveLength(0);
+    [...target.querySelectorAll<HTMLElement>('[role="radio"]')].find((b) => b.textContent?.trim() === 'Lyrics')!.click();
+    await vi.waitFor(() => expect(calls('lyrics_for_youtube')).toHaveLength(1));
+    await settle();
+    expect(lines()).toHaveLength(4);
+  });
+
   it('switches its side column between the queue and the lyrics and remembers it', async () => {
     play('a', 0);
     show(NowPlaying);
