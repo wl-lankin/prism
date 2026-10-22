@@ -7,3 +7,5 @@ src-tauri/binaries/
 ffmpeg-build/
 .superpowers/
 demo/
+ffmpeg-build/
+src-tauri/binaries/
