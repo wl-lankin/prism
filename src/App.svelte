@@ -625,10 +625,13 @@
 {/if}
 
 <style>
+  /* `clip`, not `hidden`: a hidden overflow can still be scrolled by script (a focus or
+     scrollIntoView that reaches past the edge), which shifted the whole card left by the
+     sidebar's width for a moment when a view opened (owner, 2026-10-22). */
   :global(html),
   :global(body) {
     height: 100%;
-    overflow: hidden;
+    overflow: clip;
   }
 
   /* The window is transparent: only the app card and the Flow ring are painted. */
@@ -663,7 +666,8 @@
     border-radius: var(--corner);
     background: var(--surface);
     box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.07);
-    overflow: hidden;
+    /* Never scrollable, not even by script (see html, body). */
+    overflow: clip;
   }
 
   .glass .card {
@@ -687,7 +691,7 @@
   .content {
     flex: 1;
     min-height: 0;
-    overflow: hidden;
+    overflow: clip;
   }
 
   /* Over a backdrop view the title bar floats: the view starts at the card's top edge, so its
