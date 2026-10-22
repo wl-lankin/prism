@@ -84,6 +84,8 @@
     "allow-ytm-show",
     "allow-ytm-hide",
     "allow-ytm-state",
+    "allow-ytm-queue",
+    "allow-ytm-queue-play",
     "allow-ytm-sign-in",
     "allow-ytm-sign-out"
   ]

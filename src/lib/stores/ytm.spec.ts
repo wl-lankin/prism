@@ -25,7 +25,7 @@ vi.mock('@tauri-apps/api/event', () => ({
 const invoke = vi.fn();
 vi.mock('@tauri-apps/api/core', () => ({ invoke: (...args: unknown[]) => invoke(...args) }));
 
-const { ytm, reportRect, hideView, signIn, signOut, initYtm, setOverlayOpen, applyState } = await import('./ytm.svelte');
+const { ytm, reportRect, hideView, signIn, signOut, initYtm, setOverlayOpen, applyState, playQueueEntry } = await import('./ytm.svelte');
 const { player, initPlayer } = await import('./player.svelte');
 const { openOverlay, closeOverlay, anyOverlay, setOverlayListener } = await import('./overlays.svelte');
 // YouTubeView sets this while it is mounted; here the store is driven without it.
@@ -289,9 +289,45 @@ it('a second init replaces the first one instead of doubling the listeners', asy
 it('cleanup removes the listeners', async () => {
   const stop = await initYtm();
   expect(count('ytm://state')).toBe(1);
+  expect(count('ytm://queue')).toBe(1);
   expect(count('transport://active')).toBe(0);
   stop();
   expect(listeners).toHaveLength(0);
   stop();
-  expect(unlisten).toHaveBeenCalledTimes(1);
+  expect(unlisten).toHaveBeenCalledTimes(2);
+});
+
+it('follows ytm://queue and loads the initial queue', async () => {
+  const loaded = { items: [{ title: 'Eins', byline: 'Band', coverId: null, current: true }], available: true };
+  invoke.mockImplementation(async (command: string) => (command === 'ytm_queue' ? loaded : undefined));
+  const stop = await initYtm();
+  expect(ytm.queue).toEqual(loaded);
+  emit('ytm://queue', { items: [], available: false });
+  expect(ytm.queue).toEqual({ items: [], available: false });
+  stop();
+});
+
+it('a queue event that arrives before the initial queue wins', async () => {
+  let answer: (queue: unknown) => void = () => {};
+  invoke.mockImplementation((command: string) =>
+    command === 'ytm_queue' ? new Promise((resolve) => (answer = resolve)) : Promise.resolve(),
+  );
+  const pending = initYtm();
+  await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('ytm_queue', undefined));
+  const fresh = { items: [{ title: 'Neu', byline: '', coverId: null, current: false }], available: true };
+  emit('ytm://queue', fresh);
+  answer({ items: [], available: false });
+  const stop = await pending;
+  expect(ytm.queue).toEqual(fresh);
+  stop();
+});
+
+it('playQueueEntry sends the index and survives a refusal', async () => {
+  await playQueueEntry(4);
+  expect(invoke).toHaveBeenCalledWith('ytm_queue_play', { index: 4 });
+  const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+  invoke.mockRejectedValueOnce('no such queue entry');
+  await expect(playQueueEntry(9)).resolves.toBeUndefined();
+  expect(error).toHaveBeenCalled();
+  error.mockRestore();
 });

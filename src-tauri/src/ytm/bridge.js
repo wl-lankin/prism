@@ -13,9 +13,23 @@
     next: '.next-button',
     prev: '.previous-button',
     video: ['ytmusic-player video', '#movie_player video'],
+    // Queue entries are looked up only inside the player's queue element. YouTube Music may
+    // render it only once its player page was opened.
+    queue: 'ytmusic-player-queue',
+    queueItem: 'ytmusic-player-queue-item',
+    queueTitle: '.song-title',
+    queueByline: '.byline',
+    queueThumb: 'img',
+    queuePlay: 'ytmusic-play-button-renderer',
+    // Either mark on an entry makes it the current one.
+    queueCurrent: ['[selected]', '[play-button-state="playing"]', '[play-button-state="paused"]'],
   };
   var TEXT_MAX = 256;
   var URL_MAX = 2048;
+  var QUEUE_MAX = 200;
+  var QUEUE_GAP_MS = 500;
+  // Under Prism's cap for a queue report (512 KiB), with room for the report around the items.
+  var QUEUE_BYTES_MAX = 511 * 1024;
   var HEARTBEAT_MS = 1000;
   var EVENTS = ['play', 'pause', 'ended', 'durationchange', 'loadedmetadata', 'seeked'];
 
@@ -39,6 +53,11 @@
   var watchedVideo = null;
   var watchedBar = null;
   var observer = null;
+  var lastQueueKey = null;
+  var lastQueueAt = -Infinity;
+  var queueTimer = null;
+  var watchedQueue = null;
+  var queueObserver = null;
 
   function cap(value, max) {
     return typeof value === 'string' ? value.slice(0, max) : '';
@@ -181,6 +200,105 @@
     }
   }
 
+  function queueItems(queue) {
+    var items = [];
+    if (!queue) return items;
+    try {
+      var list = queue.querySelectorAll(SEL.queueItem);
+      for (var i = 0; i < list.length && items.length < QUEUE_MAX; i++) items.push(list[i]);
+    } catch (e) {
+      // A broken queue reads as an empty one.
+    }
+    return items;
+  }
+
+  function textOf(root, selector) {
+    var el = find(selector, root);
+    var text = el && typeof el.textContent === 'string' ? el.textContent : '';
+    return cap(text.replace(/\s+/g, ' ').trim(), TEXT_MAX);
+  }
+
+  function thumbOf(item) {
+    var img = find(SEL.queueThumb, item);
+    var src = img && typeof img.src === 'string' ? img.src : '';
+    return src.length <= URL_MAX && src.slice(0, 8).toLowerCase() === 'https://' ? src : '';
+  }
+
+  function isCurrent(item) {
+    for (var i = 0; i < SEL.queueCurrent.length; i++) {
+      try {
+        if (item.matches(SEL.queueCurrent[i])) return true;
+      } catch (e) {
+        // A selector this engine does not know.
+      }
+    }
+    return false;
+  }
+
+  function queueSnapshot(queue) {
+    var items = queueItems(queue).map(function (item) {
+      return {
+        title: textOf(item, SEL.queueTitle),
+        byline: textOf(item, SEL.queueByline),
+        thumb: thumbOf(item),
+        current: isCurrent(item),
+      };
+    });
+    return { v: 1, kind: 'queue', items: fit(items), hasQueue: !!queue };
+  }
+
+  var encoder = typeof TextEncoder === 'function' ? new TextEncoder() : null;
+
+  function bytes(text) {
+    return encoder ? encoder.encode(text).length : text.length * 3;
+  }
+
+  // A queue whose report would be larger than Prism takes loses its tail instead of being
+  // refused whole.
+  function fit(items) {
+    var total = 0;
+    for (var i = 0; i < items.length; i++) {
+      total += bytes(JSON.stringify(items[i])) + 1;
+      if (total > QUEUE_BYTES_MAX) return items.slice(0, i);
+    }
+    return items;
+  }
+
+  function watchQueue(queue) {
+    if (queue === watchedQueue) return;
+    if (queueObserver) queueObserver.disconnect();
+    watchedQueue = queue;
+    if (queue && typeof MutationObserver === 'function') {
+      queueObserver = queueObserver || new MutationObserver(queueSoon);
+      queueObserver.observe(queue, { attributes: true, childList: true, subtree: true, characterData: true });
+    }
+  }
+
+  function checkQueue() {
+    queueTimer = null;
+    try {
+      lastQueueAt = Date.now();
+      var queue = find(SEL.queue);
+      watchQueue(queue);
+      var report = queueSnapshot(queue);
+      var key = JSON.stringify(report);
+      if (key === lastQueueKey) return;
+      lastQueueKey = key;
+      send(report);
+    } catch (e) {
+      // Report nothing rather than throw into the page.
+    }
+  }
+
+  // The queue is read at most once per QUEUE_GAP_MS, however busy the page is; a change in
+  // between is read when the gap is over.
+  function queueSoon() {
+    if (queueTimer !== null) return;
+    var wait = Math.min(QUEUE_GAP_MS, lastQueueAt + QUEUE_GAP_MS - Date.now());
+    if (wait <= 0) checkQueue();
+    else queueTimer = setTimeout(checkQueue, wait);
+  }
+
   function click(selector) {
     var button = control(selector);
     if (enabled(button)) button.click();
@@ -223,6 +341,12 @@
         video = findVideo();
         if (video && level !== null) video.volume = Math.min(1, Math.max(0, level));
         break;
+      case 'queue':
+        var at = window.__prismQueueIndex;
+        if (typeof at !== 'number' || !Number.isInteger(at) || at < 0) break;
+        var entry = queueItems(find(SEL.queue))[at];
+        if (entry) (find(SEL.queuePlay, entry) || entry).click();
+        break;
       default:
         break;
     }
@@ -245,6 +369,7 @@
     } catch (e) {
       // Report nothing rather than throw into the page.
     }
+    queueSoon();
   }
 
   tick();

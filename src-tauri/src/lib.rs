@@ -90,6 +90,18 @@ fn ytm_emit(
     })
 }
 
+/// Sends YouTube Music's queue to the main and the mini page (never to the page itself).
+fn ytm_queue_emit(handle: tauri::AppHandle) -> ytm::QueueEmit {
+    use tauri::Emitter;
+    Arc::new(move |queue| {
+        for label in [shell::MAIN_LABEL, shell::mini::MINI_LABEL] {
+            if let Err(err) = handle.emit_to(label, ytm::EVENT_QUEUE, queue) {
+                eprintln!("emitting {} failed: {err}", ytm::EVENT_QUEUE);
+            }
+        }
+    })
+}
+
 /// Tells the main and the mini page, the OS media controls and the thumbnail toolbar which
 /// player the transport targets now.
 fn active_listener(
@@ -404,6 +416,7 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
         Arc::new(ytm::WebviewEval(handle.clone())),
         ytm_emit(handle.clone(), Arc::clone(&media), Arc::clone(&play_button)),
     ));
+    ytm.on_queue(ytm_queue_emit(handle.clone()));
     if let Err(err) = ytm::covers::attach(&thumbs, ytm.artwork()) {
         eprintln!("YouTube Music artwork is off: {err:#}");
     }
@@ -603,6 +616,8 @@ pub fn run() {
             commands::ytm_show,
             commands::ytm_hide,
             commands::ytm_state,
+            commands::ytm_queue,
+            commands::ytm_queue_play,
             commands::ytm_sign_in,
             commands::ytm_sign_out,
             window::window_vibrancy,

@@ -1,5 +1,5 @@
-import { onYtmState, ytmHide, ytmShow, ytmSignIn, ytmSignOut, ytmState } from '../ipc';
-import type { YtmRect, YtmState } from '../types';
+import { onYtmQueue, onYtmState, ytmHide, ytmQueue, ytmQueuePlay, ytmShow, ytmSignIn, ytmSignOut, ytmState } from '../ipc';
+import type { YtmQueue, YtmRect, YtmState } from '../types';
 
 const IDLE: YtmState = {
   status: 'idle',
@@ -19,6 +19,8 @@ const IDLE: YtmState = {
  *  per window. */
 export const ytm = $state({
   state: { ...IDLE } as YtmState,
+  /** YouTube Music's own queue, as its page shows it. */
+  queue: { items: [], available: false } as YtmQueue,
   shown: false,
   hiddenForOverlay: false,
   /** The position to draw: the page reports once a second, so while it plays this runs on
@@ -137,9 +139,18 @@ export async function signOut(): Promise<void> {
   }
 }
 
+/** Plays entry `index` of YouTube Music's queue in its page. */
+export async function playQueueEntry(index: number): Promise<void> {
+  try {
+    await ytmQueuePlay(index);
+  } catch (err) {
+    console.error('playing from the YouTube Music queue failed', err);
+  }
+}
+
 let stopCurrent: (() => void) | null = null;
 
-/** Follows `ytm://state` and loads the current state. An event
+/** Follows `ytm://state` and `ytm://queue` and loads both. An event
  *  that arrives while the initial answer is in flight is newer and wins. Resolves with the
  *  cleanup; a second call replaces the first one's listeners. */
 export async function initYtm(): Promise<() => void> {
@@ -171,6 +182,24 @@ export async function initYtm(): Promise<() => void> {
     if (!heard && !stopped && state) applyState(state);
   } catch (err) {
     console.error('loading the YouTube Music state failed', err);
+  }
+
+  let heardQueue = false;
+  try {
+    keep(
+      await onYtmQueue((queue) => {
+        heardQueue = true;
+        ytm.queue = queue;
+      }),
+    );
+  } catch (err) {
+    console.error('following the YouTube Music queue failed', err);
+  }
+  try {
+    const queue = await ytmQueue();
+    if (!heardQueue && !stopped && queue) ytm.queue = queue;
+  } catch (err) {
+    console.error('loading the YouTube Music queue failed', err);
   }
   return stop;
 }

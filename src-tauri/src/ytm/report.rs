@@ -14,6 +14,10 @@ use crate::radio::model::is_format_char;
 
 /// A report larger than this, serialized, is refused whole.
 pub const MAX_REPORT_BYTES: usize = 16 * 1024;
+/// The cap for a queue report: 200 entries of typical length are about 60 KiB, and the
+/// bridge leaves out the tail of a queue that would not fit.
+pub const MAX_QUEUE_REPORT_BYTES: usize = 512 * 1024;
+pub const MAX_QUEUE_ITEMS: usize = 200;
 pub const MAX_TEXT_CHARS: usize = 256;
 pub const MAX_ARTWORK_BYTES: usize = 2048;
 /// A position may run this far past the duration (the page rounds both on its own).
@@ -26,6 +30,26 @@ pub enum Report {
     State(PageState),
     /// The track ended; a state report follows.
     Ended,
+    Queue(PageQueue),
+}
+
+/// YouTube Music's queue as its page shows it, cleaned.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PageQueue {
+    pub items: Vec<PageQueueItem>,
+    /// The page has its queue element (YouTube Music may render it only once its player
+    /// page was opened). Without it there are no items.
+    pub has_queue: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PageQueueItem {
+    pub title: String,
+    pub byline: String,
+    /// An https URL on an artwork host; `None` for anything else.
+    pub thumb: Option<String>,
+    /// At most one entry is current.
+    pub current: bool,
 }
 
 /// One state report, cleaned.
@@ -79,14 +103,33 @@ struct RawState {
     available: bool,
 }
 
-/// Counts bytes and fails once more than [`MAX_REPORT_BYTES`] were written, so an oversized
-/// report is never serialized in full.
-struct Capped(usize);
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct RawQueue {
+    items: Vec<RawQueueItem>,
+    has_queue: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawQueueItem {
+    title: String,
+    byline: String,
+    thumb: String,
+    current: bool,
+}
+
+/// Counts bytes and fails once more than its cap were written, so an oversized report is
+/// never serialized in full.
+struct Capped {
+    written: usize,
+    cap: usize,
+}
 
 impl Write for Capped {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0 += buf.len();
-        if self.0 > MAX_REPORT_BYTES {
+        self.written += buf.len();
+        if self.written > self.cap {
             return Err(std::io::Error::other("too large"));
         }
         Ok(buf.len())
@@ -98,7 +141,12 @@ impl Write for Capped {
 }
 
 pub fn parse(value: Value) -> Result<Report, ReportError> {
-    if serde_json::to_writer(&mut Capped(0), &value).is_err() {
+    let cap = if value.get("kind").and_then(Value::as_str) == Some("queue") {
+        MAX_QUEUE_REPORT_BYTES
+    } else {
+        MAX_REPORT_BYTES
+    };
+    if serde_json::to_writer(&mut Capped { written: 0, cap }, &value).is_err() {
         return Err(ReportError::TooLarge);
     }
     let Value::Object(mut object) = value else {
@@ -116,8 +164,39 @@ pub fn parse(value: Value) -> Result<Report, ReportError> {
         "ended" if object.is_empty() => Ok(Report::Ended),
         "ended" => Err(ReportError::Shape("fields on an ended report".into())),
         "state" => state(object).map(Report::State),
+        "queue" => queue(object).map(Report::Queue),
         _ => Err(ReportError::Shape("unknown kind".into())),
     }
+}
+
+fn queue(object: Map<String, Value>) -> Result<PageQueue, ReportError> {
+    let raw: RawQueue = serde_json::from_value(Value::Object(object))
+        .map_err(|err| ReportError::Shape(err.to_string()))?;
+    if raw.items.len() > MAX_QUEUE_ITEMS {
+        return Err(ReportError::Shape("too many queue entries".into()));
+    }
+    if !raw.has_queue && !raw.items.is_empty() {
+        return Err(ReportError::Shape("queue entries without a queue".into()));
+    }
+    let mut seen_current = false;
+    let items = raw
+        .items
+        .into_iter()
+        .map(|item| {
+            let current = item.current && !seen_current;
+            seen_current |= current;
+            PageQueueItem {
+                title: clean(&item.title),
+                byline: clean(&item.byline),
+                thumb: artwork(&item.thumb),
+                current,
+            }
+        })
+        .collect();
+    Ok(PageQueue {
+        items,
+        has_queue: raw.has_queue,
+    })
 }
 
 fn state(object: Map<String, Value>) -> Result<PageState, ReportError> {
@@ -328,5 +407,175 @@ pub(crate) mod tests {
         assert_eq!(state.artist.chars().count(), MAX_TEXT_CHARS);
         let state = state_of(with("album", json!("  Testhausen  ")));
         assert_eq!(state.album, "Testhausen");
+    }
+
+    pub(crate) const THUMB: &str = "https://i.ytimg.com/vi/abc/default.jpg";
+
+    /// A queue report as the bridge sends it: three entries, the second one current.
+    pub(crate) fn queue_report() -> Value {
+        json!({
+            "v": 1,
+            "kind": "queue",
+            "hasQueue": true,
+            "items": [
+                { "title": "Eins", "byline": "Die Testband", "thumb": THUMB, "current": false },
+                { "title": "Zwei", "byline": "Die Testband", "thumb": "", "current": true },
+                { "title": "Drei", "byline": "", "thumb": THUMB, "current": false },
+            ],
+        })
+    }
+
+    fn queue_of(value: Value) -> PageQueue {
+        match parse(value) {
+            Ok(Report::Queue(queue)) => queue,
+            other => panic!("expected a queue, got {other:?}"),
+        }
+    }
+
+    fn item(title: &str, thumb: &str, current: bool) -> Value {
+        json!({ "title": title, "byline": "", "thumb": thumb, "current": current })
+    }
+
+    fn with_items(items: Vec<Value>) -> Value {
+        json!({ "v": 1, "kind": "queue", "hasQueue": true, "items": items })
+    }
+
+    #[test]
+    fn queue_report_is_strict_and_capped() {
+        let queue = queue_of(queue_report());
+        assert!(queue.has_queue);
+        let titles: Vec<&str> = queue.items.iter().map(|i| i.title.as_str()).collect();
+        assert_eq!(titles, ["Eins", "Zwei", "Drei"]);
+        assert_eq!(queue.items[0].thumb.as_deref(), Some(THUMB));
+        assert_eq!(queue.items[1].thumb, None);
+        assert_eq!(queue.items[0].byline, "Die Testband");
+        let current: Vec<bool> = queue.items.iter().map(|i| i.current).collect();
+        assert_eq!(current, [false, true, false]);
+
+        // No queue element on the page.
+        let none = queue_of(json!({ "v": 1, "kind": "queue", "hasQueue": false, "items": [] }));
+        assert_eq!(none, PageQueue::default());
+        // Entries without a queue element cannot be.
+        let mut bad = queue_report();
+        bad["hasQueue"] = json!(false);
+        assert!(matches!(parse(bad), Err(ReportError::Shape(_))));
+
+        // Shape: unknown, missing and mistyped fields refuse the whole report.
+        let mut extra = queue_report();
+        extra["onclick"] = json!("x");
+        assert!(matches!(parse(extra), Err(ReportError::Shape(_))));
+        let mut item_extra = queue_report();
+        item_extra["items"][0]["href"] = json!("https://evil.example/");
+        assert!(matches!(parse(item_extra), Err(ReportError::Shape(_))));
+        let mut missing = queue_report();
+        missing["items"][1]
+            .as_object_mut()
+            .unwrap()
+            .remove("current");
+        assert!(matches!(parse(missing), Err(ReportError::Shape(_))));
+        let mut no_flag = queue_report();
+        no_flag.as_object_mut().unwrap().remove("hasQueue");
+        assert!(matches!(parse(no_flag), Err(ReportError::Shape(_))));
+        for (field, value) in [
+            ("title", json!(5)),
+            ("current", json!("true")),
+            ("thumb", Value::Null),
+        ] {
+            let mut typed = queue_report();
+            typed["items"][0][field] = value;
+            assert!(
+                matches!(parse(typed), Err(ReportError::Shape(_))),
+                "{field}"
+            );
+        }
+        let mut not_a_list = queue_report();
+        not_a_list["items"] = json!({ "0": item("x", "", false) });
+        assert!(matches!(parse(not_a_list), Err(ReportError::Shape(_))));
+        let mut version = queue_report();
+        version["v"] = json!(2);
+        assert_eq!(parse(version), Err(ReportError::Version));
+
+        // At most 200 entries.
+        let full = with_items(
+            (0..MAX_QUEUE_ITEMS)
+                .map(|n| item(&format!("Lied {n}"), "", false))
+                .collect(),
+        );
+        assert_eq!(queue_of(full).items.len(), MAX_QUEUE_ITEMS);
+        let over = with_items(
+            (0..=MAX_QUEUE_ITEMS)
+                .map(|n| item(&format!("Lied {n}"), "", false))
+                .collect(),
+        );
+        assert!(matches!(parse(over), Err(ReportError::Shape(_))));
+
+        // A full queue fits its own cap, which is larger than a state's; past it, refused.
+        let long = with_items(
+            (0..MAX_QUEUE_ITEMS)
+                .map(|_| {
+                    json!({
+                        "title": "t".repeat(MAX_TEXT_CHARS),
+                        "byline": "b".repeat(MAX_TEXT_CHARS),
+                        "thumb": format!("https://i.ytimg.com/{}", "u".repeat(200)),
+                        "current": false,
+                    })
+                })
+                .collect(),
+        );
+        assert!(serde_json::to_string(&long).unwrap().len() > MAX_REPORT_BYTES);
+        assert_eq!(queue_of(long).items.len(), MAX_QUEUE_ITEMS);
+        let mut huge = queue_report();
+        huge["items"][0]["title"] = Value::String("x".repeat(MAX_QUEUE_REPORT_BYTES));
+        assert_eq!(parse(huge), Err(ReportError::TooLarge));
+        // A state report does not get the queue's cap by claiming it elsewhere.
+        let mut big_state = bridge_report();
+        big_state["title"] = Value::String("x".repeat(17 * 1024));
+        assert_eq!(parse(big_state), Err(ReportError::TooLarge));
+
+        // Strings cleaned and capped as in a state report.
+        let dirty = with_items(vec![json!({
+            "title": "  Test\u{0}lied\u{202E}  ",
+            "byline": "\u{e4}".repeat(300),
+            "thumb": "",
+            "current": false,
+        })]);
+        let cleaned = queue_of(dirty);
+        assert_eq!(cleaned.items[0].title, "Testlied");
+        assert_eq!(cleaned.items[0].byline.chars().count(), MAX_TEXT_CHARS);
+
+        // Thumbs: https on an artwork host only, else dropped (the entry stays).
+        for bad in [
+            "javascript:alert(1)",
+            "http://i.ytimg.com/vi/x/default.jpg",
+            "https://evil.example/a.jpg",
+            "https://i.ytimg.com:8443/a.jpg",
+            "https://user@i.ytimg.com/a.jpg",
+            "data:image/png;base64,AAAA",
+        ] {
+            let queue = queue_of(with_items(vec![item("x", bad, false)]));
+            assert_eq!(queue.items[0].thumb, None, "{bad}");
+            assert_eq!(queue.items[0].title, "x");
+        }
+        let long_thumb = format!("https://i.ytimg.com/{}", "a".repeat(MAX_ARTWORK_BYTES));
+        assert_eq!(
+            queue_of(with_items(vec![item("x", &long_thumb, false)])).items[0].thumb,
+            None
+        );
+        for good in [
+            "https://lh3.googleusercontent.com/abc=w60-h60",
+            "https://yt3.ggpht.com/a",
+        ] {
+            let queue = queue_of(with_items(vec![item("x", good, false)]));
+            assert_eq!(queue.items[0].thumb.as_deref(), Some(good));
+        }
+
+        // Only the first entry marked current counts.
+        let two = with_items(vec![
+            item("a", "", false),
+            item("b", "", true),
+            item("c", "", true),
+        ]);
+        let current: Vec<bool> = queue_of(two).items.iter().map(|i| i.current).collect();
+        assert_eq!(current, [false, true, false]);
     }
 }

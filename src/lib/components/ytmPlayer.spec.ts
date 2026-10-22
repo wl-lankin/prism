@@ -94,6 +94,7 @@ beforeEach(() => {
   player.active = 'ytm';
   Object.assign(player, { status: 'idle', track: null, positionMs: 0, durationMs: 0, queueLength: 0 });
   applyState({ ...playing });
+  ytm.queue = { items: [], available: false };
   target = document.createElement('div');
   document.body.append(target);
 });
@@ -274,21 +275,140 @@ describe('Now Playing with YouTube Music', () => {
     expect(target.querySelector('.artist')?.textContent?.trim()).toBe('Lumen Field');
     expect(target.querySelector('.quality')?.getAttribute('style')).toContain('--src-youtube');
     expect(target.querySelector('.quality')?.textContent?.trim()).toBe('YouTube Music');
-    expect(target.querySelector('.ytm-note')?.textContent).toContain('queue belongs to YouTube Music');
+    expect(target.querySelector('.ytm-note')?.textContent).toBe('Open the player in YouTube Music once to see its queue here.');
     expect(target.querySelector('[aria-label*="avorite"]')).toBeNull();
     expect(target.querySelector('[role="listbox"]')).toBeNull();
   });
+
+  it('shows the YouTube Music queue and plays an entry on click or Enter', async () => {
+    ytm.queue = ytQueue();
+    show(NowPlaying);
+    await settle();
+    expect(target.querySelector('.ytm-note')).toBeNull();
+    const rows = [...target.querySelectorAll<HTMLElement>('[role="option"]')];
+    expect(rows.map((row) => row.querySelector('.qtitle')?.textContent)).toEqual(['Eins', 'Glass Tides', 'Drei']);
+    expect(rows.map((row) => row.querySelector('.qartist')?.textContent)).toEqual(['Band A', 'Lumen Field', '']);
+    expect(rows[1].classList.contains('current')).toBe(true);
+    expect(rows[1].getAttribute('aria-current')).toBe('true');
+    expect(rows.filter((row) => row.getAttribute('aria-current'))).toHaveLength(1);
+    expect(target.querySelector('.pos')?.textContent).toContain('2');
+    // No hearts, no remove buttons, nothing to drag.
+    expect(target.querySelector('[aria-label*="avorite"]')).toBeNull();
+    expect(target.querySelector('.remove')).toBeNull();
+
+    rows[2].querySelector<HTMLElement>('.qtitle')!.click();
+    await settle();
+    expect(calls('ytm_queue_play')).toEqual([['ytm_queue_play', { index: 2 }]]);
+    // The current entry already plays.
+    rows[1].click();
+    await settle();
+    expect(calls('ytm_queue_play')).toHaveLength(1);
+
+    const list = target.querySelector<HTMLElement>('[role="listbox"]')!;
+    list.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }));
+    list.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }));
+    list.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }));
+    list.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await settle();
+    expect(calls('ytm_queue_play').at(-1)).toEqual(['ytm_queue_play', { index: 0 }]);
+  });
+
+  it('shows the Prism queue again once Prism plays', async () => {
+    ytm.queue = ytQueue();
+    player.active = 'prism';
+    show(NowPlaying);
+    await settle();
+    expect(target.textContent).not.toContain('Glass Tides');
+  });
 });
+
+function ytQueue() {
+  return {
+    available: true,
+    items: [
+      { title: 'Eins', byline: 'Band A', coverId: 'yt-00000000000000000001', current: false },
+      { title: 'Glass Tides', byline: 'Lumen Field', coverId: null, current: true },
+      { title: 'Drei', byline: '', coverId: null, current: false },
+    ],
+  };
+}
 
 describe('queue panel with YouTube Music', () => {
   it('queue_panel_explains_ytm', async () => {
     queuePanel.open = true;
     show(QueuePanel);
     await settle();
-    expect(target.querySelector('.empty p')?.textContent).toBe(
-      'The queue belongs to YouTube Music. Change it in the YouTube Music view.',
-    );
+    expect(target.querySelector('.empty p')?.textContent).toBe('Open the player in YouTube Music once to see its queue here.');
     expect(target.querySelector('[role="listbox"]')).toBeNull();
+  });
+
+  it('says the same in German', async () => {
+    setLang('de');
+    queuePanel.open = true;
+    show(QueuePanel);
+    await settle();
+    expect(target.querySelector('.empty p')?.textContent).toBe(
+      'Öffne einmal den Player in YouTube Music, dann erscheint die Warteschlange hier.',
+    );
+  });
+
+  it('lists the YouTube Music queue and plays an entry on click or Enter', async () => {
+    ytm.queue = ytQueue();
+    queuePanel.open = true;
+    show(QueuePanel);
+    await settle();
+    expect(target.querySelector('.panel > .empty')).toBeNull();
+    const rows = [...target.querySelectorAll<HTMLElement>('[role="option"]')];
+    expect(rows.map((row) => row.querySelector('.title')?.textContent)).toEqual(['Eins', 'Glass Tides', 'Drei']);
+    // The current entry is marked like Prism's current row.
+    expect(rows[1].classList.contains('current')).toBe(true);
+    expect(rows[1].querySelector('.artist')?.textContent).toBe('Now playing');
+    expect(rows[0].querySelector('.artist')?.textContent).toBe('Band A');
+    expect(rows[0].querySelector('img, .cover')).not.toBeNull();
+    expect(target.querySelector('.remove')).toBeNull();
+    expect(target.querySelector('[aria-label*="avorite"]')).toBeNull();
+    expect(target.querySelector('.row.upcoming')).toBeNull();
+
+    rows[0].click();
+    await settle();
+    expect(calls('ytm_queue_play')).toEqual([['ytm_queue_play', { index: 0 }]]);
+    // The row's play button plays it too.
+    rows[2].querySelector<HTMLButtonElement>('button.play')!.click();
+    await settle();
+    expect(calls('ytm_queue_play').at(-1)).toEqual(['ytm_queue_play', { index: 2 }]);
+    rows[1].click();
+    await settle();
+    expect(calls('ytm_queue_play')).toHaveLength(2);
+
+    const list = target.querySelector<HTMLElement>('[role="listbox"]')!;
+    // The last click selected the current entry; up and Enter play the one above it.
+    list.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }));
+    list.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await settle();
+    expect(calls('ytm_queue_play')).toHaveLength(3);
+    expect(calls('ytm_queue_play').at(-1)).toEqual(['ytm_queue_play', { index: 0 }]);
+    expect(rows[0].getAttribute('aria-selected')).toBe('true');
+    // Down to the current entry: Enter leaves it playing.
+    list.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+    list.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await settle();
+    expect(calls('ytm_queue_play')).toHaveLength(3);
+    // Prism's own queue commands are never used for it.
+    expect(calls('player_jump')).toHaveLength(0);
+    expect(calls('player_queue_range')).toHaveLength(0);
+  });
+
+  it('follows the queue as it changes', async () => {
+    ytm.queue = ytQueue();
+    queuePanel.open = true;
+    show(QueuePanel);
+    await settle();
+    ytm.queue = { available: true, items: [{ title: 'Neu', byline: 'X', coverId: null, current: true }] };
+    await settle();
+    expect([...target.querySelectorAll('[role="option"] .title')].map((el) => el.textContent)).toEqual(['Neu']);
+    ytm.queue = { available: false, items: [] };
+    await settle();
+    expect(target.querySelector('.empty p')?.textContent).toContain('Open the player');
   });
 
   it('keeps the normal heading, not a leftover Flow name', async () => {

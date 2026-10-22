@@ -73,6 +73,8 @@ const COMMANDS: &[&str] = &[
     "ytm_show",
     "ytm_hide",
     "ytm_state",
+    "ytm_queue",
+    "ytm_queue_play",
     "ytm_sign_in",
     "ytm_sign_out",
     "window_vibrancy",
