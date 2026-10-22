@@ -38,7 +38,13 @@
 - **README.** Logo and tagline, two screenshots (main window with demo albums, the mini player), download buttons to the versionless links, features, supported formats table, Navidrome setup note, YouTube Music note (sign-in in its own window; Prism never sees the password), radio note (Radio Browser, rough location from GeoJS, can be manual), macOS first launch note (right-click > Open or `xattr -dr com.apple.quarantine /Applications/Prism.app`), Windows SmartScreen note, credits line, MIT license.
 - **Branches into main.** At release, `PRISM-6` (which contains M1-M5) merges into `main` with `--no-ff`; the tag `v1.0.0` is made on that merge commit.
 
-## Owner answers needed before Wave B (defaults in brackets)
+## Owner answers (2026-10-22)
+
+1. No key existed on Windows. As for Session Buddy, Klecks and Orbo: a new pair `~/.tauri/prism-updater.key` (+ `.pub`, `.pass`, random password) on the Mac, and the secrets `TAURI_SIGNING_PRIVATE_KEY` / `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` set in `wl-lankin/prism` (done 2026-10-22).
+2. The open hand checks (M3 Navidrome, M5 Windows) come after the beta, before v1.0.0.
+3. A `v1.0.0-beta.1` first through the same pipeline, then 1.0.0.
+
+## Owner questions as first asked (defaults in brackets)
 
 1. Updater key: does `prism-updater.key` already exist on the Windows PC (the spec names `%USERPROFILE%\.tauri\prism-updater.key`)? [If not: generate a new pair on the Mac with `npm run tauri signer generate -- -w ~/.tauri/prism-updater.key`, the owner sets the two GitHub secrets.]
 2. The open hand checks before release: M3 Task 20 (Navidrome against the real server), M5 on Windows. [Both before tagging v1.0.0.]
