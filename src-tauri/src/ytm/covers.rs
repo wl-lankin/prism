@@ -22,8 +22,9 @@ use crate::thumbs::{RemoteCovers, ResizeError, ResizeGate};
 use super::lock;
 
 pub const YTM_COVER_PREFIX: &str = "yt-";
-/// Artwork URLs remembered at most.
-pub const MAX_ARTWORK: usize = 200;
+/// Artwork URLs remembered at most: room for a full queue's thumbnails (200) without pushing
+/// out the artwork of what plays.
+pub const MAX_ARTWORK: usize = 512;
 
 /// The hosts YouTube Music serves artwork from.
 const HOST_SUFFIXES: [&str; 2] = [".googleusercontent.com", ".ggpht.com"];

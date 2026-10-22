@@ -366,6 +366,21 @@ export interface YtmState {
   canPrev: boolean;
 }
 
+/** One entry of YouTube Music's own queue. */
+export interface YtmQueueItem {
+  title: string;
+  byline: string;
+  coverId: string | null;
+  current: boolean;
+}
+
+/** YouTube Music's own queue (`ytm://queue`). `available` is false until the page rendered
+ *  its queue (YouTube Music may do so only once its player was opened). */
+export interface YtmQueue {
+  items: YtmQueueItem[];
+  available: boolean;
+}
+
 /** Where the YouTube Music view goes, in logical pixels of the main window. */
 export interface YtmRect {
   x: number;

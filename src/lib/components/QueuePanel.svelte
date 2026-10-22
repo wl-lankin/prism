@@ -11,6 +11,7 @@
   import { findStation, toggleStationFavorite } from '../stores/radio.svelte';
   import { queuePanel, toggleQueuePanel } from '../stores/queue.svelte';
   import { ring } from '../stores/ring.svelte';
+  import { playQueueEntry, ytm } from '../stores/ytm.svelte';
   import type { FlowVariant, QueueItem } from '../types';
   import { visibleRange } from '../virtual';
   import Cover from './Cover.svelte';
@@ -18,6 +19,7 @@
   import EmptyArt from './EmptyArt.svelte';
   import Icon from './Icon.svelte';
   import LivePill from './LivePill.svelte';
+  import NowPlayingBars from './NowPlayingBars.svelte';
   import RowPlay from './RowPlay.svelte';
   import StationTile from './StationTile.svelte';
 
@@ -34,8 +36,50 @@
   const SCROLL_EDGE = 40;
 
   const open = $derived(queuePanel.open);
-  /** YouTube Music keeps its own queue; this panel only says so. */
+  /** YouTube Music keeps its own queue: the panel shows it as the page does (no moving, no
+   *  removing, no hearts), and a click plays an entry in the page. */
   const yt = $derived(player.active === 'ytm');
+  /** An empty queue shows the note, not an empty list. */
+  const ytQueue = $derived(yt && ytm.queue.available && ytm.queue.items.length > 0 ? ytm.queue.items : null);
+  const ytCurrent = $derived(ytQueue ? ytQueue.findIndex((item) => item.current) : -1);
+  let ytSelected = $state(-1);
+  let ytList = $state<HTMLDivElement>();
+
+  // A queue that got shorter drops a selection past its end.
+  $effect(() => {
+    if (ytSelected >= (ytQueue?.length ?? 0)) ytSelected = -1;
+  });
+
+  function playYt(index: number) {
+    ytSelected = index;
+    if (index !== ytCurrent) void playQueueEntry(index);
+  }
+
+  function onYtClick(event: MouseEvent) {
+    const row = (event.target as HTMLElement).closest<HTMLElement>('[data-index]');
+    if (row) playYt(Number(row.dataset.index));
+  }
+
+  function onYtKeydown(event: KeyboardEvent) {
+    const count = ytQueue?.length ?? 0;
+    if (count === 0) return;
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      const from = ytSelected >= 0 ? ytSelected : Math.max(0, ytCurrent);
+      ytSelected = Math.min(count - 1, Math.max(0, from + (event.key === 'ArrowDown' ? 1 : -1)));
+      ytList?.querySelector(`#ytq-${ytSelected}`)?.scrollIntoView({ block: 'nearest' });
+    } else if (event.key === 'Enter' && ytSelected >= 0 && ytSelected < count) {
+      event.preventDefault();
+      playYt(ytSelected);
+    }
+  }
+
+  // The current entry comes into view when the panel opens and when it changes.
+  $effect(() => {
+    const at = ytCurrent;
+    if (!open || at < 0 || !ytList) return;
+    ytList.querySelector(`#ytq-${at}`)?.scrollIntoView({ block: 'nearest' });
+  });
 
   // The sheet lies over the content, above the YouTube Music view while it is open.
   $effect(() => {
@@ -374,7 +418,46 @@
     </button>
   </header>
 
-  {#if yt}
+  {#if ytQueue}
+    <div class="scroll">
+      <div
+        class="list"
+        bind:this={ytList}
+        role="listbox"
+        tabindex="0"
+        aria-labelledby="upnext-heading"
+        aria-activedescendant={ytSelected >= 0 ? `ytq-${ytSelected}` : undefined}
+        onkeydown={onYtKeydown}
+        onclick={onYtClick}
+      >
+        {#each ytQueue as item, index (index)}
+          <div
+            id="ytq-{index}"
+            class="row yt"
+            class:current={item.current}
+            class:selected={ytSelected === index}
+            role="option"
+            aria-selected={ytSelected === index}
+            aria-current={item.current ? 'true' : undefined}
+            data-index={index}
+          >
+            <span class="num">
+              {#if item.current}
+                <NowPlayingBars playing={ytm.state.status === 'playing'} size={12} />
+              {:else}
+                <RowPlay number={index + 1} name={item.title} revealed={ytSelected === index} onplay={() => playYt(index)} />
+              {/if}
+            </span>
+            <Cover coverId={item.coverId} size={40} cache={96} radius="7px" />
+            <span class="name">
+              <span class="title">{item.title}</span>
+              <span class="artist">{item.current ? t('queue.nowPlaying') : item.byline}</span>
+            </span>
+          </div>
+        {/each}
+      </div>
+    </div>
+  {:else if yt}
     <div class="empty">
       <span class="empty-art" aria-hidden="true"><Icon name="queue" size={28} /></span>
       <p>{t('ytm.queueNote')}</p>
@@ -698,6 +781,11 @@
 
   .row.upcoming {
     cursor: grab;
+  }
+
+  /* A YouTube Music entry: number, cover and text only. */
+  .row.yt {
+    grid-template-columns: 26px 40px minmax(0, 1fr);
   }
 
   .row:hover {

@@ -60,6 +60,39 @@
         margin: 0;
         color: var(--muted);
       }
+      ytmusic-player-queue {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+        width: 220px;
+      }
+      ytmusic-player-queue-item {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 6px 8px;
+        border-radius: 6px;
+        cursor: pointer;
+      }
+      ytmusic-player-queue-item[selected] {
+        background: var(--panel);
+        box-shadow: inset 2px 0 0 var(--amber);
+      }
+      ytmusic-player-queue-item img {
+        width: 32px;
+        height: 32px;
+        border-radius: 4px;
+        flex: none;
+      }
+      .queue-text {
+        display: flex;
+        flex-direction: column;
+        min-width: 0;
+      }
+      .queue-text .byline {
+        color: var(--muted);
+        font-size: 12px;
+      }
       ytmusic-player-bar {
         display: flex;
         align-items: center;
@@ -102,6 +135,32 @@
         <p id="artist">Demo Artist 1</p>
       </div>
       <video id="player-video" preload="auto" playsinline></video>
+      <ytmusic-player-queue>
+        <ytmusic-player-queue-item selected>
+          <img alt="" />
+          <span class="queue-text">
+            <span class="song-title">Demo Song 1</span>
+            <span class="byline">Demo Artist 1</span>
+          </span>
+          <ytmusic-play-button-renderer></ytmusic-play-button-renderer>
+        </ytmusic-player-queue-item>
+        <ytmusic-player-queue-item>
+          <img alt="" />
+          <span class="queue-text">
+            <span class="song-title">Demo Song 2</span>
+            <span class="byline">Demo Artist 2</span>
+          </span>
+          <ytmusic-play-button-renderer></ytmusic-play-button-renderer>
+        </ytmusic-player-queue-item>
+        <ytmusic-player-queue-item>
+          <img alt="" />
+          <span class="queue-text">
+            <span class="song-title">Demo Song 3</span>
+            <span class="byline">Demo Artist 3</span>
+          </span>
+          <ytmusic-play-button-renderer></ytmusic-play-button-renderer>
+        </ytmusic-player-queue-item>
+      </ytmusic-player-queue>
     </ytmusic-player>
     <ytmusic-player-bar>
       <button class="previous-button" type="button" aria-label="Previous">Prev</button>

@@ -38,6 +38,25 @@ impl YtmState {
     }
 }
 
+/// Payload of `ytm://queue`: YouTube Music's own queue, as its page shows it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct YtmQueue {
+    pub items: Vec<YtmQueueItem>,
+    /// The page shows its queue; false until YouTube Music rendered it (or without a view).
+    pub available: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct YtmQueueItem {
+    pub title: String,
+    pub byline: String,
+    /// A `yt-` cover id, like the artwork's; `None` without a thumbnail.
+    pub cover_id: Option<String>,
+    pub current: bool,
+}
+
 /// A command for YouTube Music's page.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum YtmAction {
@@ -82,5 +101,26 @@ mod tests {
             "unavailable"
         );
         assert_eq!(YtmState::default().status, YtmStatus::Idle);
+    }
+
+    #[test]
+    fn queue_serializes_in_camel_case() {
+        let queue = YtmQueue {
+            items: vec![YtmQueueItem {
+                title: "Song".into(),
+                byline: "Band".into(),
+                cover_id: Some("yt-0123456789abcdef0123".into()),
+                current: true,
+            }],
+            available: true,
+        };
+        assert_eq!(
+            serde_json::to_value(&queue).unwrap(),
+            serde_json::json!({
+                "items": [{ "title": "Song", "byline": "Band", "coverId": "yt-0123456789abcdef0123", "current": true }],
+                "available": true,
+            })
+        );
+        assert!(!YtmQueue::default().available);
     }
 }

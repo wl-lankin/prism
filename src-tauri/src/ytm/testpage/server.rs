@@ -313,6 +313,24 @@ mod tests {
             assert!(bar.contains(control), "{control}");
             assert_eq!(html.matches(control).count(), 1, "{control}");
         }
+        // The queue: one entry per song, each with its play button, the first one current.
+        let queue = inside(&html, "<ytmusic-player-queue>", "</ytmusic-player-queue>");
+        assert_eq!(html.matches("<ytmusic-player-queue>").count(), 1);
+        assert_eq!(queue.matches("<ytmusic-player-queue-item").count(), SONGS);
+        assert_eq!(
+            queue.matches("<ytmusic-play-button-renderer>").count(),
+            SONGS
+        );
+        assert_eq!(
+            queue
+                .matches("<ytmusic-player-queue-item selected>")
+                .count(),
+            1
+        );
+        for k in 1..=SONGS {
+            assert!(queue.contains(&format!("<span class=\"song-title\">Demo Song {k}</span>")));
+            assert!(queue.contains(&format!("<span class=\"byline\">Demo Artist {k}</span>")));
+        }
         assert_eq!(html.matches("<video").count(), 1);
         assert!(html.contains("<script src=\"player.js\"></script>"));
 

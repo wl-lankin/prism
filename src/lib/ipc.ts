@@ -33,6 +33,7 @@ import type {
   StationQueryArgs,
   Track,
   YtmRect,
+  YtmQueue,
   YtmState,
 } from './types';
 
@@ -129,6 +130,9 @@ export const favoritesArtists = () => call<Artist[]>('favorites_artists');
 export const ytmShow = (rect: YtmRect) => call<void>('ytm_show', { rect });
 export const ytmHide = () => call<void>('ytm_hide');
 export const ytmState = () => call<YtmState>('ytm_state');
+export const ytmQueue = () => call<YtmQueue>('ytm_queue');
+/** Plays entry `index` of YouTube Music's queue; rejects when the queue has no such entry. */
+export const ytmQueuePlay = (index: number) => call<void>('ytm_queue_play', { index });
 export const ytmSignIn = () => call<void>('ytm_sign_in');
 export const ytmSignOut = () => call<void>('ytm_sign_out');
 
@@ -273,6 +277,8 @@ export const onRadioNowPlaying = (cb: (now: NowPlaying) => void): Promise<Unlist
   listen<NowPlaying>('radio://now-playing', (event) => cb(event.payload));
 export const onYtmState = (cb: (state: YtmState) => void): Promise<UnlistenFn> =>
   listen<YtmState>('ytm://state', (event) => cb(event.payload));
+export const onYtmQueue = (cb: (queue: YtmQueue) => void): Promise<UnlistenFn> =>
+  listen<YtmQueue>('ytm://queue', (event) => cb(event.payload));
 export const onActivePlayer = (cb: (active: ActivePlayer) => void): Promise<UnlistenFn> =>
   listen<ActivePlayer>('transport://active', (event) => cb(event.payload));
 export const onScanProgress = (cb: (progress: ScanProgress) => void): Promise<UnlistenFn> =>

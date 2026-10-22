@@ -622,6 +622,7 @@ mod tests {
             "ytm_hide",
             "ytm_sign_in",
             "ytm_sign_out",
+            "ytm_queue_play",
         ];
         for name in &mini {
             assert!(

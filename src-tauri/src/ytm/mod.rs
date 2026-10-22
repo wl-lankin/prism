@@ -2,8 +2,8 @@
 //! commands Prism sends into the page.
 //!
 //! The page is untrusted. It reaches Prism only through `ytm_report` (see [`report_allowed`]
-//! and [`report::parse`]), and Prism talks back only with the fixed [`SNIPPETS`]; a seek or a
-//! volume sets one number, formatted by Rust, before its snippet runs.
+//! and [`report::parse`]), and Prism talks back only with the fixed [`SNIPPETS`]; a seek, a
+//! volume or a queue entry sets one number, formatted by Rust, before its snippet runs.
 
 pub mod agent;
 pub mod covers;
@@ -21,14 +21,16 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
 use covers::Artwork;
-use report::{PageState, Report};
-use state::{YtmAction, YtmControl, YtmState, YtmStatus};
+use report::{PageQueue, PageState, Report};
+use state::{YtmAction, YtmControl, YtmQueue, YtmQueueItem, YtmState, YtmStatus};
 
 /// The label of the child web view that shows music.youtube.com.
 pub const VIEW_LABEL: &str = "ytm";
 pub const PAGE_HOST: &str = "music.youtube.com";
 /// Payload: [`YtmState`]. Sent to the main and the mini page, never to the YouTube Music view.
 pub const EVENT_STATE: &str = "ytm://state";
+/// Payload: [`YtmQueue`]. Sent like [`EVENT_STATE`].
+pub const EVENT_QUEUE: &str = "ytm://queue";
 
 const BRIDGE: &str = include_str!("bridge.js");
 
@@ -54,7 +56,7 @@ pub fn report_allowed(
 }
 
 /// The only script Prism sends into the page, by action name.
-pub const SNIPPETS: [(&str, &str); 7] = [
+pub const SNIPPETS: [(&str, &str); 8] = [
     (
         "toggle",
         "window.dispatchEvent(new CustomEvent('prism-ytm', { detail: 'toggle' }));",
@@ -82,6 +84,10 @@ pub const SNIPPETS: [(&str, &str); 7] = [
     (
         "volume",
         "window.dispatchEvent(new CustomEvent('prism-ytm', { detail: 'volume' }));",
+    ),
+    (
+        "queue",
+        "window.dispatchEvent(new CustomEvent('prism-ytm', { detail: 'queue' }));",
     ),
 ];
 
@@ -118,6 +124,15 @@ pub fn scripts(action: YtmAction) -> Vec<String> {
     }
 }
 
+/// The scripts that play entry `index` of the page's queue: the index as an integer
+/// literal, then the fixed snippet.
+pub fn queue_scripts(index: u32) -> Vec<String> {
+    vec![
+        format!("window.__prismQueueIndex = {index};"),
+        snippet("queue").into(),
+    ]
+}
+
 /// Runs a script in the YouTube Music view, if it exists. Must not block.
 pub trait PageEval: Send + Sync {
     fn eval(&self, script: &str);
@@ -142,6 +157,8 @@ impl PageEval for WebviewEval {
 pub type StateEmit = Arc<dyn Fn(&YtmState) + Send + Sync>;
 /// Called with every state a report gives, unchanged ones included (for the transport).
 pub type StateFollower = Arc<dyn Fn(&YtmState) + Send + Sync>;
+/// Called with the queue whenever it changes (for `ytm://queue`).
+pub type QueueEmit = Arc<dyn Fn(&YtmQueue) + Send + Sync>;
 
 /// Reports the page may send per second on average; the excess is dropped.
 pub const REPORTS_PER_SEC: f64 = 20.0;
@@ -181,6 +198,7 @@ impl Bucket {
 
 struct Inner {
     state: YtmState,
+    queue: YtmQueue,
     /// `playing` of the last report let through.
     playing: bool,
     bucket: Bucket,
@@ -194,6 +212,7 @@ pub struct YtmService {
     /// Held from a state's change to its emit and follow, so they never go out of order.
     order: Mutex<()>,
     follower: Mutex<Option<StateFollower>>,
+    queue_emit: Mutex<Option<QueueEmit>>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -210,12 +229,38 @@ impl YtmService {
             artwork: Arc::default(),
             inner: Mutex::new(Inner {
                 state: YtmState::default(),
+                queue: YtmQueue::default(),
                 playing: false,
                 bucket: Bucket::full(),
             }),
             order: Mutex::new(()),
             follower: Mutex::new(None),
+            queue_emit: Mutex::new(None),
         }
+    }
+
+    /// Replaces the queue's listener, called in order whenever the queue changes.
+    pub fn on_queue(&self, emit: QueueEmit) {
+        *lock(&self.queue_emit) = Some(emit);
+    }
+
+    pub fn queue(&self) -> YtmQueue {
+        lock(&self.inner).queue.clone()
+    }
+
+    /// Plays entry `index` of the page's queue; false (and nothing sent) when the queue
+    /// Prism knows has no such entry.
+    pub fn play_queue(&self, index: u32) -> bool {
+        let known = {
+            let inner = lock(&self.inner);
+            inner.queue.available && (index as usize) < inner.queue.items.len()
+        };
+        if known {
+            for script in queue_scripts(index) {
+                self.page.eval(&script);
+            }
+        }
+        known
     }
 
     /// The artwork URLs behind the `yt-` cover ids.
@@ -242,9 +287,10 @@ impl YtmService {
 
     fn handle_at(&self, report: Report, now: Instant) {
         let _order = lock(&self.order);
-        let page = match report {
-            Report::State(page) => Some(page),
-            Report::Ended => None,
+        let (page, queue) = match report {
+            Report::State(page) => (Some(page), None),
+            Report::Ended => (None, None),
+            Report::Queue(queue) => (None, Some(queue)),
         };
         {
             let mut inner = lock(&self.inner);
@@ -263,6 +309,10 @@ impl YtmService {
             let next = self.derive(&page);
             self.apply(next);
         }
+        if let Some(queue) = queue {
+            let next = self.derive_queue(queue);
+            self.apply_queue(next);
+        }
     }
 
     /// Back to idle: the view is gone (sign-out, destroy), so control falls back to Prism.
@@ -270,6 +320,40 @@ impl YtmService {
         let _order = lock(&self.order);
         lock(&self.inner).playing = false;
         self.apply(YtmState::default());
+        self.apply_queue(YtmQueue::default());
+    }
+
+    /// Called with `order` held.
+    fn apply_queue(&self, next: YtmQueue) {
+        let changed = {
+            let mut inner = lock(&self.inner);
+            let changed = inner.queue != next;
+            inner.queue = next.clone();
+            changed
+        };
+        if !changed {
+            return;
+        }
+        let emit = lock(&self.queue_emit).clone();
+        if let Some(emit) = emit {
+            emit(&next);
+        }
+    }
+
+    fn derive_queue(&self, queue: PageQueue) -> YtmQueue {
+        YtmQueue {
+            items: queue
+                .items
+                .into_iter()
+                .map(|item| YtmQueueItem {
+                    cover_id: item.thumb.as_deref().map(|url| self.artwork.remember(url)),
+                    title: item.title,
+                    byline: item.byline,
+                    current: item.current,
+                })
+                .collect(),
+            available: queue.has_queue,
+        }
     }
 
     /// Called with `order` held.
@@ -326,7 +410,7 @@ impl YtmControl for YtmService {
 
 #[cfg(test)]
 mod tests {
-    use super::report::tests::{bridge_report, ART};
+    use super::report::tests::{bridge_report, queue_report, ART, THUMB};
     use super::*;
     use serde_json::json;
 
@@ -344,12 +428,14 @@ mod tests {
         page: Arc<Recorder>,
         emitted: Arc<Mutex<Vec<YtmState>>>,
         followed: Arc<Mutex<Vec<YtmState>>>,
+        queues: Arc<Mutex<Vec<YtmQueue>>>,
     }
 
     fn fixture() -> Fixture {
         let page = Arc::new(Recorder::default());
         let emitted: Arc<Mutex<Vec<YtmState>>> = Arc::default();
         let followed: Arc<Mutex<Vec<YtmState>>> = Arc::default();
+        let queues: Arc<Mutex<Vec<YtmQueue>>> = Arc::default();
         let service = YtmService::new(Arc::clone(&page) as Arc<dyn PageEval>, {
             let emitted = Arc::clone(&emitted);
             Arc::new(move |state| lock(&emitted).push(state.clone()))
@@ -358,11 +444,16 @@ mod tests {
             let followed = Arc::clone(&followed);
             Arc::new(move |state| lock(&followed).push(state.clone()))
         });
+        service.on_queue({
+            let queues = Arc::clone(&queues);
+            Arc::new(move |queue| lock(&queues).push(queue.clone()))
+        });
         Fixture {
             service,
             page,
             emitted,
             followed,
+            queues,
         }
     }
 
@@ -589,7 +680,7 @@ mod tests {
         let names: Vec<&str> = SNIPPETS.iter().map(|(name, _)| *name).collect();
         assert_eq!(
             names,
-            ["toggle", "play", "pause", "next", "prev", "seek", "volume"]
+            ["toggle", "play", "pause", "next", "prev", "seek", "volume", "queue"]
         );
         for (name, script) in SNIPPETS {
             assert_eq!(
@@ -677,6 +768,136 @@ mod tests {
                 snippet("pause")
             ]
         );
+
+        // A queue entry: an integer literal, then the fixed snippet.
+        for index in [0, 7, 199, u32::MAX] {
+            let sent = queue_scripts(index);
+            assert_eq!(sent.len(), 2);
+            let number = sent[0]
+                .strip_prefix("window.__prismQueueIndex = ")
+                .and_then(|rest| rest.strip_suffix(';'))
+                .unwrap();
+            assert!(number.chars().all(|ch| ch.is_ascii_digit()), "{number}");
+            assert_eq!(number.parse::<u32>().unwrap(), index);
+            assert_eq!(sent[1], snippet("queue"));
+            assert!(fixed.contains(&sent[1].as_str()));
+        }
+    }
+
+    fn queue_with(items: serde_json::Value) -> Report {
+        let mut value = queue_report();
+        value["items"] = items;
+        report::parse(value).unwrap()
+    }
+
+    #[test]
+    fn queue_follows_reports_and_emits_on_change() {
+        let f = fixture();
+        assert_eq!(f.service.queue(), YtmQueue::default());
+
+        f.service.handle(report::parse(queue_report()).unwrap());
+        let queue = f.service.queue();
+        assert!(queue.available);
+        let titles: Vec<&str> = queue.items.iter().map(|i| i.title.as_str()).collect();
+        assert_eq!(titles, ["Eins", "Zwei", "Drei"]);
+        assert_eq!(queue.items[0].byline, "Die Testband");
+        assert_eq!(queue.items[0].cover_id, Some(covers::cover_id(THUMB)));
+        assert_eq!(queue.items[1].cover_id, None);
+        assert_eq!(queue.items[2].cover_id, queue.items[0].cover_id);
+        let current: Vec<bool> = queue.items.iter().map(|i| i.current).collect();
+        assert_eq!(current, [false, true, false]);
+        // The thumb is served under its cover id like the artwork.
+        let raw = covers::ytm_cover_raw(queue.items[0].cover_id.as_deref().unwrap()).unwrap();
+        assert_eq!(f.service.artwork().url_of(raw).as_deref(), Some(THUMB));
+        assert_eq!(*lock(&f.queues), std::slice::from_ref(&queue));
+
+        // The same queue again: no event. The state and the transport are not touched.
+        f.service.handle(report::parse(queue_report()).unwrap());
+        assert_eq!(lock(&f.queues).len(), 1);
+        assert!(lock(&f.emitted).is_empty());
+        assert!(lock(&f.followed).is_empty());
+        assert_eq!(f.service.state(), YtmState::default());
+
+        // A state report leaves the queue alone.
+        f.service.handle(report_with(json!({})));
+        assert_eq!(f.service.queue(), queue);
+        assert_eq!(lock(&f.queues).len(), 1);
+
+        // The current entry moved on.
+        f.service.handle(queue_with(json!([
+            { "title": "Eins", "byline": "", "thumb": "", "current": false },
+            { "title": "Zwei", "byline": "", "thumb": "", "current": false },
+            { "title": "Drei", "byline": "", "thumb": "", "current": true },
+        ])));
+        assert!(f.service.queue().items[2].current);
+        assert_eq!(lock(&f.queues).len(), 2);
+
+        // The page lost its queue element.
+        f.service.handle(
+            report::parse(json!({ "v": 1, "kind": "queue", "hasQueue": false, "items": [] }))
+                .unwrap(),
+        );
+        assert_eq!(f.service.queue(), YtmQueue::default());
+        assert_eq!(lock(&f.queues).len(), 3);
+
+        // The view goes: the queue goes with it.
+        f.service.handle(report::parse(queue_report()).unwrap());
+        f.service.reset();
+        assert_eq!(f.service.queue(), YtmQueue::default());
+        assert_eq!(lock(&f.queues).last(), Some(&YtmQueue::default()));
+        let count = lock(&f.queues).len();
+        f.service.reset();
+        assert_eq!(lock(&f.queues).len(), count);
+
+        assert!(lock(&f.page.0).is_empty());
+    }
+
+    #[test]
+    fn queue_reports_share_the_rate_limit() {
+        let f = fixture();
+        let at = Instant::now();
+        for n in 0..10 {
+            f.service.handle_at(
+                queue_with(json!([{ "title": format!("Lied {n}"), "byline": "", "thumb": "", "current": false }])),
+                at,
+            );
+        }
+        assert_eq!(lock(&f.queues).len(), 10);
+        // Out of tokens: another queue report and a state report that is no play change are
+        // dropped alike.
+        f.service
+            .handle_at(report::parse(queue_report()).unwrap(), at);
+        assert_eq!(lock(&f.queues).len(), 10);
+        f.service
+            .handle_at(report_with(json!({ "playing": false })), at);
+        assert!(lock(&f.followed).is_empty());
+        // A start still counts.
+        f.service.handle_at(report_with(json!({})), at);
+        assert_eq!(lock(&f.followed).len(), 1);
+    }
+
+    #[test]
+    fn queue_play_sends_the_index_into_the_page() {
+        let f = fixture();
+        // Nothing to play before the page reported its queue.
+        assert!(!f.service.play_queue(0));
+        assert!(lock(&f.page.0).is_empty());
+
+        f.service.handle(report::parse(queue_report()).unwrap());
+        assert!(f.service.play_queue(2));
+        assert_eq!(
+            *lock(&f.page.0),
+            ["window.__prismQueueIndex = 2;", snippet("queue")]
+        );
+        // Past the end of the queue Prism knows: nothing goes out.
+        for index in [3, 200, u32::MAX] {
+            assert!(!f.service.play_queue(index));
+        }
+        assert_eq!(lock(&f.page.0).len(), 2);
+
+        f.service.reset();
+        assert!(!f.service.play_queue(0));
+        assert_eq!(lock(&f.page.0).len(), 2);
     }
 
     #[test]
@@ -720,6 +941,18 @@ mod tests {
         assert!(!report_allowed("main", Some(&fake), Some(&fake)));
         #[cfg(not(debug_assertions))]
         assert!(dev::page().is_none());
+    }
+
+    /// The bridge keeps its queue reports inside what `report::parse` takes.
+    #[test]
+    fn bridge_queue_caps_match_the_report_caps() {
+        assert!(BRIDGE.contains(&format!("var QUEUE_MAX = {};", report::MAX_QUEUE_ITEMS)));
+        assert!(BRIDGE.contains("var QUEUE_BYTES_MAX = 255 * 1024;"));
+        const { assert!(255 * 1024 < report::MAX_QUEUE_REPORT_BYTES) };
+        assert!(BRIDGE.contains(&format!("var TEXT_MAX = {};", report::MAX_TEXT_CHARS)));
+        assert!(BRIDGE.contains(&format!("var URL_MAX = {};", report::MAX_ARTWORK_BYTES)));
+        assert!(BRIDGE.contains("case 'queue':"));
+        assert!(BRIDGE.contains("window.__prismQueueIndex"));
     }
 
     #[test]

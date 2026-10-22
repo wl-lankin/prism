@@ -24,6 +24,7 @@
     "allow-mini-layout",
     "allow-mini-menu",
     "allow-main-show",
-    "allow-ytm-state"
+    "allow-ytm-state",
+    "allow-ytm-queue"
   ]
 }

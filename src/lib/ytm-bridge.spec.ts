@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import source from '../../src-tauri/src/ytm/bridge.js?raw';
 import fakePage from '../../src-tauri/src/ytm/testpage/index.html?raw';
 
@@ -14,6 +14,9 @@ interface Meta {
 
 const clicks: Record<string, number> = {};
 let reports: Report[] = [];
+/** Queue reports go here, with the time each was sent, so the state tests count as before. */
+let queues: Report[] = [];
+let queueTimes: number[] = [];
 let session: { metadata: Meta | null; playbackState: string };
 let win: FakeWindow;
 let video: HTMLVideoElement | null;
@@ -24,7 +27,12 @@ function fakeWindow(): FakeWindow {
   target.__TAURI_INTERNALS__ = {
     invoke: (command: string, args: { report: Report }) => {
       expect(command).toBe('ytm_report');
-      reports.push(args.report);
+      if (args.report.kind === 'queue') {
+        queues.push(args.report);
+        queueTimes.push(Date.now());
+      } else {
+        reports.push(args.report);
+      }
       return Promise.resolve();
     },
   };
@@ -92,6 +100,8 @@ function states(): Report[] {
 beforeEach(() => {
   vi.useFakeTimers();
   reports = [];
+  queues = [];
+  queueTimes = [];
   for (const k of Object.keys(clicks)) delete clicks[k];
   session = {
     metadata: {
@@ -458,4 +468,242 @@ it('the_fake_dev_page_satisfies_the_bridge', () => {
   });
   command('next');
   expect(nexts).toBe(1);
+
+  const queue = queues.at(-1)!;
+  expect(queue.hasQueue).toBe(true);
+  expect(queue.items).toEqual([1, 2, 3].map((n) => ({ title: `Demo Song ${n}`, byline: `Demo Artist ${n}`, thumb: '', current: n === 1 })));
+});
+
+interface Entry {
+  title: string;
+  byline?: string;
+  thumb?: string;
+  /** How the item says it is the current one, if it is. */
+  mark?: 'selected' | 'playing' | 'paused' | 'default';
+  noPlayButton?: boolean;
+}
+
+/** Which element of which item got a click: `<index>:<tag>`. */
+let queueClicks: string[] = [];
+
+function queueItem(entry: Entry, index: number): HTMLElement {
+  const item = document.createElement('ytmusic-player-queue-item');
+  if (entry.mark === 'selected') item.setAttribute('selected', '');
+  else if (entry.mark) item.setAttribute('play-button-state', entry.mark);
+  const img = document.createElement('img');
+  if (entry.thumb !== undefined) img.setAttribute('src', entry.thumb);
+  item.appendChild(img);
+  if (!entry.noPlayButton) item.appendChild(document.createElement('ytmusic-play-button-renderer'));
+  const title = document.createElement('yt-formatted-string');
+  title.className = 'song-title';
+  title.textContent = entry.title;
+  item.appendChild(title);
+  const byline = document.createElement('yt-formatted-string');
+  byline.className = 'byline';
+  byline.textContent = entry.byline ?? '';
+  item.appendChild(byline);
+  item.addEventListener('click', (event) => queueClicks.push(`${index}:${(event.target as Element).tagName.toLowerCase()}`));
+  return item;
+}
+
+function buildQueue(entries: Entry[]): HTMLElement {
+  const queue = document.createElement('ytmusic-player-queue');
+  entries.forEach((entry, i) => queue.appendChild(queueItem(entry, i)));
+  document.body.appendChild(queue);
+  return queue;
+}
+
+const THUMB = 'https://i.ytimg.com/vi/abc/default.jpg';
+
+describe('the queue', () => {
+  beforeEach(() => {
+    queueClicks = [];
+  });
+
+  it('reads_the_queue_from_the_player_queue_only', () => {
+    const decoy = queueItem({ title: 'Decoy', mark: 'selected' }, 99);
+    document.body.prepend(decoy);
+    buildQueue([
+      { title: 'Eins', byline: 'Band A', thumb: THUMB },
+      { title: '  Zwei  ', byline: 'Band B \n  •  Album', thumb: 'http://i.ytimg.com/vi/x/default.jpg', mark: 'selected' },
+      { title: 'Drei', thumb: 'data:image/png;base64,AAAA' },
+    ]);
+    run();
+    expect(queues).toHaveLength(1);
+    expect(queues[0]).toEqual({
+      v: 1,
+      kind: 'queue',
+      hasQueue: true,
+      items: [
+        { title: 'Eins', byline: 'Band A', thumb: THUMB, current: false },
+        { title: 'Zwei', byline: 'Band B • Album', thumb: '', current: true },
+        { title: 'Drei', byline: '', thumb: '', current: false },
+      ],
+    });
+  });
+
+  it('knows_the_current_entry_by_either_mark', () => {
+    buildQueue([
+      { title: 'a', mark: 'selected' },
+      { title: 'b', mark: 'playing' },
+      { title: 'c', mark: 'paused' },
+      { title: 'd', mark: 'default' },
+      { title: 'e' },
+    ]);
+    run();
+    expect((queues[0].items as Report[]).map((item) => item.current)).toEqual([true, true, true, false, false]);
+  });
+
+  it('caps_the_queue_and_its_strings', () => {
+    const entries: Entry[] = Array.from({ length: 205 }, (_, i) => ({ title: `Lied ${i}` }));
+    entries[0] = { title: 'T'.repeat(1000), byline: 'B'.repeat(300), thumb: 'https://i.ytimg.com/' + 'u'.repeat(2048) };
+    entries[1] = { title: 'ok', thumb: 'https://i.ytimg.com/' + 'u'.repeat(2000) };
+    buildQueue(entries);
+    run();
+    const items = queues[0].items as Report[];
+    expect(items).toHaveLength(200);
+    expect((items[0].title as string).length).toBe(256);
+    expect((items[0].byline as string).length).toBe(256);
+    expect(items[0].thumb).toBe('');
+    expect((items[1].thumb as string).length).toBe(2020);
+    expect(items[199].title).toBe('Lied 199');
+  });
+
+  it('leaves_out_the_tail_that_would_not_fit_the_report_cap', () => {
+    // Quotes double when escaped, so these entries are about 3 KB each as JSON.
+    const entries: Entry[] = Array.from({ length: 200 }, (_, i) => ({
+      title: `${i}` + '"'.repeat(300),
+      byline: '"'.repeat(300),
+      thumb: 'https://i.ytimg.com/' + 'u'.repeat(2000),
+    }));
+    buildQueue(entries);
+    run();
+    const report = queues[0];
+    const items = report.items as Report[];
+    expect(items.length).toBeGreaterThan(50);
+    expect(items.length).toBeLessThan(200);
+    expect(new TextEncoder().encode(JSON.stringify(report)).length).toBeLessThanOrEqual(256 * 1024);
+    // The head of the queue is kept, in order.
+    expect((items[0].title as string).startsWith('0"')).toBe(true);
+    expect((items.at(-1)!.title as string).startsWith(`${items.length - 1}"`)).toBe(true);
+  });
+
+  it('sends_the_queue_on_start_and_then_only_changes', async () => {
+    const queue = buildQueue([{ title: 'Eins' }, { title: 'Zwei' }]);
+    run();
+    expect(queues).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(queues).toHaveLength(1);
+    // A mutation that changes nothing the report carries.
+    queue.firstElementChild!.setAttribute('aria-label', 'x');
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(queues).toHaveLength(1);
+    queue.appendChild(queueItem({ title: 'Drei' }, 2));
+    await vi.advanceTimersByTimeAsync(500);
+    expect(queues).toHaveLength(2);
+    expect((queues[1].items as Report[]).map((item) => item.title)).toEqual(['Eins', 'Zwei', 'Drei']);
+    // The state reports are not disturbed.
+    expect(states()).toHaveLength(1);
+  });
+
+  it('queue_reports_are_throttled', async () => {
+    const queue = buildQueue([{ title: 'Eins' }]);
+    const title = queue.querySelector('.song-title')!;
+    run();
+    expect(queues).toHaveLength(1);
+    // Right after the start report: the change waits until 500 ms have passed.
+    for (let n = 0; n < 10; n++) {
+      title.textContent = `Eins ${n}`;
+      await Promise.resolve();
+    }
+    await vi.advanceTimersByTimeAsync(499);
+    expect(queues).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(queues).toHaveLength(2);
+    expect((queues[1].items as Report[])[0].title).toBe('Eins 9');
+    // A change every 50 ms for 5 s: one report per 500 ms at most, and the last change arrives.
+    for (let n = 0; n < 100; n++) {
+      title.textContent = `Lauf ${n}`;
+      await vi.advanceTimersByTimeAsync(50);
+    }
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(queues.length).toBeGreaterThan(5);
+    expect(queues.length).toBeLessThanOrEqual(2 + 12);
+    for (let i = 1; i < queueTimes.length; i++) expect(queueTimes[i] - queueTimes[i - 1]).toBeGreaterThanOrEqual(500);
+    expect((queues.at(-1)!.items as Report[])[0].title).toBe('Lauf 99');
+  });
+
+  it('a_missing_queue_is_reported_and_followed_once_it_appears', async () => {
+    run();
+    expect(queues).toEqual([{ v: 1, kind: 'queue', items: [], hasQueue: false }]);
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(queues).toHaveLength(1);
+
+    const first = buildQueue([{ title: 'Eins', mark: 'selected' }]);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(queues).toHaveLength(2);
+    expect(queues[1]).toMatchObject({ hasQueue: true, items: [{ title: 'Eins', current: true }] });
+
+    // YouTube Music replaces the element: the new one is observed, the old one no more.
+    first.remove();
+    const second = buildQueue([{ title: 'Neu' }]);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(queues.at(-1)).toMatchObject({ hasQueue: true, items: [{ title: 'Neu' }] });
+    const count = queues.length;
+    first.querySelector('.song-title')!.textContent = 'Alt';
+    await vi.advanceTimersByTimeAsync(500);
+    expect(queues).toHaveLength(count);
+    second.querySelector('.song-title')!.textContent = 'Neuer';
+    await vi.advanceTimersByTimeAsync(500);
+    expect(queues).toHaveLength(count + 1);
+    expect((queues.at(-1)!.items as Report[])[0].title).toBe('Neuer');
+
+    second.remove();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(queues.at(-1)).toEqual({ v: 1, kind: 'queue', items: [], hasQueue: false });
+  });
+
+  it('a_broken_queue_never_throws_into_the_page', async () => {
+    const queue = buildQueue([{ title: 'Eins' }]);
+    Object.defineProperty(queue, 'querySelectorAll', { value: () => { throw new Error('boom'); } });
+    expect(() => run()).not.toThrow();
+    expect(queues[0]).toEqual({ v: 1, kind: 'queue', items: [], hasQueue: true });
+    win.__prismQueueIndex = 0;
+    expect(() => command('queue')).not.toThrow();
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(states()).toHaveLength(1);
+  });
+
+  it('queue_command_plays_the_entry_rust_chose', () => {
+    const decoy = queueItem({ title: 'Decoy' }, 99);
+    document.body.prepend(decoy);
+    buildQueue([{ title: 'Eins' }, { title: 'Zwei' }, { title: 'Drei', noPlayButton: true }]);
+    run();
+    command('queue');
+    expect(queueClicks).toEqual([]);
+    win.__prismQueueIndex = 1;
+    command('queue');
+    expect(queueClicks).toEqual(['1:ytmusic-play-button-renderer']);
+    win.__prismQueueIndex = 2;
+    command('queue');
+    expect(queueClicks.at(-1)).toBe('2:ytmusic-player-queue-item');
+    win.__prismQueueIndex = 0;
+    command('queue');
+    expect(queueClicks.at(-1)).toBe('0:ytmusic-play-button-renderer');
+    queueClicks = [];
+    for (const bad of [3, 200, -1, 1.5, '1', Number.NaN, Infinity, null, { valueOf: () => 1 }]) {
+      win.__prismQueueIndex = bad;
+      command('queue');
+    }
+    expect(queueClicks).toEqual([]);
+    // No other control is touched.
+    expect(Object.keys(clicks)).toHaveLength(0);
+  });
+
+  it('queue_command_without_a_queue_does_nothing', () => {
+    run();
+    win.__prismQueueIndex = 0;
+    expect(() => command('queue')).not.toThrow();
+    expect(queueClicks).toEqual([]);
+  });
 });

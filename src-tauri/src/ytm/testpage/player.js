@@ -21,6 +21,7 @@
   var title = document.getElementById('title');
   var artist = document.getElementById('artist');
   var time = document.getElementById('time');
+  var queue = document.querySelectorAll('ytmusic-player-queue ytmusic-player-queue-item');
   var index = 0;
 
   // The bridge only takes https artwork, so Prism drops this one: the fake page shows it itself.
@@ -68,6 +69,13 @@
     text(title, song.title);
     text(artist, song.artist);
     art.style.background = song.color;
+    for (var i = 0; i < queue.length; i++) {
+      if (i === index) {
+        if (!queue[i].hasAttribute('selected')) queue[i].setAttribute('selected', '');
+      } else if (queue[i].hasAttribute('selected')) {
+        queue[i].removeAttribute('selected');
+      }
+    }
     if ('mediaSession' in navigator && typeof MediaMetadata === 'function') {
       navigator.mediaSession.metadata = new MediaMetadata({
         title: song.title,
@@ -104,6 +112,15 @@
     }
     load(index - 1, !video.paused);
   }
+
+  // A click on a queue entry (its play button or the entry) plays that song, as on YouTube Music.
+  Array.prototype.forEach.call(queue, function (item, n) {
+    var thumb = item.querySelector('img');
+    if (thumb) thumb.src = artwork(SONGS[n].color);
+    item.addEventListener('click', function () {
+      load(n, true);
+    });
+  });
 
   toggle.addEventListener('click', onToggle);
   next.addEventListener('click', onNext);

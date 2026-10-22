@@ -33,7 +33,10 @@ use crate::shell;
 use crate::shell::mini::{self, MiniLayout};
 use crate::shell::transport::Active;
 use crate::shell::tray::TrayLabels;
-use crate::ytm::{self, state::YtmState};
+use crate::ytm::{
+    self,
+    state::{YtmQueue, YtmState},
+};
 use crate::AppState;
 
 /// Upper bound for `library_search` and `library_tracks_range` page sizes.
@@ -893,6 +896,22 @@ pub fn ytm_hide(state: State<'_, AppState>) -> Result<(), String> {
 #[tauri::command]
 pub fn ytm_state(state: State<'_, AppState>) -> Result<YtmState, String> {
     Ok(state.ytm.state())
+}
+
+/// YouTube Music's own queue, as its page shows it.
+#[tauri::command]
+pub fn ytm_queue(state: State<'_, AppState>) -> Result<YtmQueue, String> {
+    Ok(state.ytm.queue())
+}
+
+/// Plays entry `index` of YouTube Music's queue in the page.
+#[tauri::command]
+pub fn ytm_queue_play(state: State<'_, AppState>, index: u32) -> Result<(), String> {
+    if state.ytm.play_queue(index) {
+        Ok(())
+    } else {
+        Err("no such queue entry".into())
+    }
 }
 
 /// Opens Google's sign-in in its own window, or brings it to the front.

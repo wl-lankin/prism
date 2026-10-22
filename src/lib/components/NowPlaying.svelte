@@ -9,7 +9,7 @@
   import { player } from '../stores/player.svelte';
   import { currentTitle, findStation, toggleStationFavorite } from '../stores/radio.svelte';
   import { settings } from '../stores/settings.svelte';
-  import { ytm } from '../stores/ytm.svelte';
+  import { playQueueEntry, ytm } from '../stores/ytm.svelte';
   import type { FlowVariant, QueueItem, Track } from '../types';
   import { visibleRange } from '../virtual';
   import Backdrop from './Backdrop.svelte';
@@ -34,6 +34,48 @@
   /** YouTube Music answers the transport: this view shows its state, and the queue is its own. */
   const yt = $derived(player.active === 'ytm');
   const idle = $derived(yt ? ytmIdle(ytm.state) : player.status === 'idle' || !track);
+  /** YouTube Music's own queue, while its page shows one; a click plays an entry there. */
+  /** An empty queue shows the note, not an empty list. */
+  const ytQueue = $derived(yt && ytm.queue.available && ytm.queue.items.length > 0 ? ytm.queue.items : null);
+  const ytCurrent = $derived(ytQueue ? ytQueue.findIndex((item) => item.current) : -1);
+  let ytSelected = $state(-1);
+  let ytList = $state<HTMLDivElement>();
+
+  // A queue that got shorter drops a selection past its end.
+  $effect(() => {
+    if (ytSelected >= (ytQueue?.length ?? 0)) ytSelected = -1;
+  });
+
+  function playYt(index: number) {
+    ytSelected = index;
+    if (index !== ytCurrent) void playQueueEntry(index);
+  }
+
+  function onYtClick(event: MouseEvent) {
+    const row = (event.target as HTMLElement).closest<HTMLElement>('[data-index]');
+    if (row) playYt(Number(row.dataset.index));
+  }
+
+  function onYtKeydown(event: KeyboardEvent) {
+    const count = ytQueue?.length ?? 0;
+    if (count === 0) return;
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      const from = ytSelected >= 0 ? ytSelected : Math.max(0, ytCurrent);
+      ytSelected = Math.min(count - 1, Math.max(0, from + (event.key === 'ArrowDown' ? 1 : -1)));
+      ytList?.querySelector(`#ytnp-${ytSelected}`)?.scrollIntoView({ block: 'nearest' });
+    } else if (event.key === 'Enter' && ytSelected >= 0 && ytSelected < count) {
+      event.preventDefault();
+      playYt(ytSelected);
+    }
+  }
+
+  // The current entry comes into view when it changes.
+  $effect(() => {
+    const at = ytCurrent;
+    if (at < 0 || !ytList) return;
+    ytList.querySelector(`#ytnp-${at}`)?.scrollIntoView({ block: 'nearest' });
+  });
   const total = $derived(player.queueLength);
   const current = $derived(player.queueIndex);
   /** Dropped files ("file:" ids) are not in the library: no album, no artist page, no heart. */
@@ -272,7 +314,56 @@
           </span>
         </div>
       </header>
-      <p class="ytm-note">{t('ytm.queueNote')}</p>
+      {#if ytQueue}
+        <section class="queue" aria-labelledby="queue-heading">
+          <div class="qhead">
+            <h2 id="queue-heading">{t('nowPlaying.queue')}</h2>
+            {#if ytCurrent >= 0}
+              <span class="pos">{t('nowPlaying.position', { n: ytCurrent + 1, total: ytQueue.length })}</span>
+            {/if}
+          </div>
+          <div class="scroll">
+            <div
+              class="list"
+              bind:this={ytList}
+              role="listbox"
+              tabindex="0"
+              aria-labelledby="queue-heading"
+              aria-activedescendant={ytSelected >= 0 ? `ytnp-${ytSelected}` : undefined}
+              onkeydown={onYtKeydown}
+              onclick={onYtClick}
+            >
+              {#each ytQueue as item, index (index)}
+                <div
+                  id="ytnp-{index}"
+                  class="qrow yt"
+                  class:current={item.current}
+                  class:selected={ytSelected === index}
+                  role="option"
+                  aria-selected={ytSelected === index}
+                  aria-current={item.current ? 'true' : undefined}
+                  data-index={index}
+                >
+                  <span class="num">
+                    {#if item.current}
+                      <NowPlayingBars playing={ytm.state.status === 'playing'} size={12} />
+                    {:else}
+                      <RowPlay number={index + 1} name={item.title} revealed={ytSelected === index} onplay={() => playYt(index)} />
+                    {/if}
+                  </span>
+                  <Cover coverId={item.coverId} size={36} cache={96} radius="6px" />
+                  <span class="name">
+                    <span class="qtitle">{item.title}</span>
+                    <span class="qartist">{item.byline}</span>
+                  </span>
+                </div>
+              {/each}
+            </div>
+          </div>
+        </section>
+      {:else}
+        <p class="ytm-note">{t('ytm.queueNote')}</p>
+      {/if}
     </div>
   {:else if track}
     <div class="stage">
@@ -664,6 +755,15 @@
     transition:
       background-color var(--dur) ease-out,
       opacity var(--dur) ease-out;
+  }
+
+  /* A YouTube Music entry: number, cover and text only. */
+  .qrow.yt {
+    grid-template-columns: 28px 36px minmax(0, 1fr);
+  }
+
+  .qrow.yt.current {
+    cursor: default;
   }
 
   .qrow:hover {
