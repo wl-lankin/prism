@@ -54,8 +54,8 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Globali
 windows = { version = "0.62", features = ["Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_System_Com", "Win32_Foundation"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-# orderFrontRegardless for the mini player (shown without activating Prism); the same
-# versions Tauri uses.
+# orderFrontRegardless and the panel behaviour for the mini player (shown without activating
+# Prism); the same versions Tauri uses.
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSResponder", "NSWindow"] }
 
