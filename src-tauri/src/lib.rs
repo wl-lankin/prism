@@ -14,6 +14,7 @@ pub mod shell;
 pub mod startup;
 pub mod thumbs;
 pub mod tools;
+pub mod update;
 pub mod window;
 pub mod ytm;
 
@@ -69,6 +70,31 @@ pub struct AppState {
     pub ytm_view: Arc<ytm::view::YtmView>,
     /// Which player the transport targets; keeps only one of them playing.
     pub transport: Arc<Transport>,
+    /// Checks for, downloads and installs signed updates.
+    pub update: Arc<update::UpdateService>,
+}
+
+/// Starts the update service. Dev builds never check on their own (only "Check now").
+fn update_service(
+    handle: tauri::AppHandle,
+    settings: &Arc<SettingsStore>,
+) -> Arc<update::UpdateService> {
+    use tauri::Emitter;
+    let settings = Arc::clone(settings);
+    let emit_to = handle.clone();
+    update::UpdateService::spawn(
+        Arc::new(update::PluginChecker::new(handle)),
+        Arc::new(move || settings.get().auto_update),
+        Arc::new(move |state| {
+            if let Err(err) = emit_to.emit_to(shell::MAIN_LABEL, update::EVENT_STATE, state) {
+                eprintln!("emitting {} failed: {err}", update::EVENT_STATE);
+            }
+        }),
+        update::UpdateOptions {
+            schedule: !cfg!(debug_assertions),
+            ..update::UpdateOptions::default()
+        },
+    )
 }
 
 /// Sends YouTube Music's state to the main and the mini page (never to the page itself), the
@@ -448,7 +474,9 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
     ));
     // A store a sign-out could not remove.
     ytm_view.remove_left_behind();
+    let update = update_service(handle.clone(), &settings);
     app.manage(AppState {
+        update,
         ytm,
         ytm_view,
         transport,
@@ -527,6 +555,8 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec![shell::shortcut::AUTOSTART_ARG]),
         ))
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| match setup(app) {
             Ok(()) => Ok(()),
             Err(err) => fail_with(&err),
@@ -620,6 +650,9 @@ pub fn run() {
             commands::ytm_queue_play,
             commands::ytm_sign_in,
             commands::ytm_sign_out,
+            commands::update_state,
+            commands::update_check,
+            commands::update_restart,
             window::window_vibrancy,
             startup::startup_notice,
         ])
@@ -640,6 +673,8 @@ pub fn run() {
                     state.settings.flush();
                     state.navidrome.shutdown();
                     state.radio.shutdown();
+                    // Last: on Windows the installer takes over and this ends the process.
+                    state.update.install_on_quit();
                 }
             }
             #[cfg(target_os = "macos")]

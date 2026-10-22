@@ -38,6 +38,7 @@
   import { failureText, initNavidrome, navidrome } from './lib/stores/navidrome.svelte';
   import { initRadio, radio } from './lib/stores/radio.svelte';
   import { initYtm, ytm } from './lib/stores/ytm.svelte';
+  import { initUpdate } from './lib/stores/update.svelte';
   import { closeOverlay, openOverlay } from './lib/stores/overlays.svelte';
   import { ytmIdle } from './lib/format';
   import { go, nav, overlays, type View } from './lib/stores/nav.svelte';
@@ -155,6 +156,18 @@
     initNavidrome()
       .then((cleanup) => (gone ? cleanup() : (stop = cleanup)))
       .catch((err) => console.error('loading the Navidrome status failed', err));
+    return () => {
+      gone = true;
+      stop?.();
+    };
+  });
+
+  $effect(() => {
+    let stop: (() => void) | undefined;
+    let gone = false;
+    initUpdate()
+      .then((cleanup) => (gone ? cleanup() : (stop = cleanup)))
+      .catch((err) => console.error('loading the update state failed', err));
     return () => {
       gone = true;
       stop?.();

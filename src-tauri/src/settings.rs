@@ -142,6 +142,8 @@ pub struct Settings {
     /// Read by the radio service per request, so it needs no [`Change`].
     #[serde(deserialize_with = "lenient_radio_location")]
     pub radio_location: RadioLocation,
+    /// Download updates in the background and install them on quit; off only announces them.
+    pub auto_update: bool,
 }
 
 /// The patch keys only connect and disconnect may write.
@@ -195,6 +197,7 @@ impl Default for Settings {
             navidrome_user: None,
             navidrome_quality: StreamQuality::Original,
             radio_location: RadioLocation::Auto,
+            auto_update: true,
         }
     }
 }
@@ -244,6 +247,7 @@ pub enum Change {
     StartWithSystem(bool),
     Repeat(RepeatMode),
     Shuffle(bool),
+    AutoUpdate(bool),
 }
 
 /// The differences from `before` to `after` that something has to follow (the language is
@@ -282,6 +286,9 @@ pub fn changes(before: &Settings, after: &Settings) -> Vec<Change> {
     }
     if after.shuffle != before.shuffle {
         changes.push(Change::Shuffle(after.shuffle));
+    }
+    if after.auto_update != before.auto_update {
+        changes.push(Change::AutoUpdate(after.auto_update));
     }
     changes
 }
@@ -731,6 +738,25 @@ mod tests {
         assert_eq!(settings.mini_on_top, defaults.mini_on_top);
         assert_eq!(settings.mini_shortcut, defaults.mini_shortcut);
         assert_eq!(settings.start_with_system, defaults.start_with_system);
+        assert!(settings.auto_update, "updates install by default");
+    }
+
+    #[test]
+    fn auto_update_is_saved_and_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let store = SettingsStore::load(&path);
+        assert!(store.get().auto_update);
+        let mut seen = Vec::new();
+        store
+            .update(json!({ "autoUpdate": false }), |changes| {
+                seen.extend_from_slice(changes)
+            })
+            .unwrap();
+        assert_eq!(seen, vec![Change::AutoUpdate(false)]);
+        let raw: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(raw["autoUpdate"], false);
+        assert!(!SettingsStore::load(&path).get().auto_update);
     }
 
     #[test]

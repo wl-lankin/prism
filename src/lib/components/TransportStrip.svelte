@@ -9,6 +9,7 @@
   import { settings } from '../stores/settings.svelte';
   import { QUEUE_TOGGLE_ID } from '../queue';
   import { queuePanel, toggleQueuePanel } from '../stores/queue.svelte';
+  import { restartToUpdate, update } from '../stores/update.svelte';
   import Cover from './Cover.svelte';
   import Heart from './Heart.svelte';
   import Icon from './Icon.svelte';
@@ -151,6 +152,16 @@
   </div>
 
   <div class="right">
+    {#if update.status === 'ready'}
+      <button
+        type="button"
+        class="update-pill"
+        title={t('update.restartTitle', { version: update.version ?? '' })}
+        onclick={() => restartToUpdate()}
+      >
+        <span>{t('update.restart')}</span>
+      </button>
+    {/if}
     {#if !yt}<PlayModes />{/if}
     <button
       type="button"
@@ -357,6 +368,52 @@
 
   .volume {
     width: 104px;
+  }
+
+  /* Leftmost in the right-aligned group, so it appears without moving anything else. */
+  .update-pill {
+    flex: 0 1 auto;
+    min-width: 0;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    height: 26px;
+    margin-right: 4px;
+    padding: 0 11px;
+    border: 0;
+    border-radius: 13px;
+    background: rgba(255, 255, 255, 0.05);
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+    color: var(--text);
+    font: inherit;
+    font-size: 11.5px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background-color var(--dur) ease-out;
+  }
+
+  .update-pill::before {
+    content: '';
+    flex: none;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, var(--spec-1), var(--spec-4));
+  }
+
+  .update-pill span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .update-pill:hover {
+    background: rgba(255, 255, 255, 0.09);
+  }
+
+  .update-pill:focus-visible {
+    outline: 2px solid var(--spec-4);
+    outline-offset: 2px;
   }
 
   .btn.toggle {

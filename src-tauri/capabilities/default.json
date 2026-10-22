@@ -87,6 +87,9 @@
     "allow-ytm-queue",
     "allow-ytm-queue-play",
     "allow-ytm-sign-in",
-    "allow-ytm-sign-out"
+    "allow-ytm-sign-out",
+    "allow-update-state",
+    "allow-update-check",
+    "allow-update-restart"
   ]
 }
