@@ -33,6 +33,7 @@ use crate::shell;
 use crate::shell::mini::{self, MiniLayout};
 use crate::shell::transport::Active;
 use crate::shell::tray::TrayLabels;
+use crate::update::UpdateState;
 use crate::ytm::{
     self,
     state::{YtmQueue, YtmState},
@@ -529,6 +530,10 @@ pub async fn settings_set(app: AppHandle, patch: serde_json::Value) -> Result<Se
                     Change::Crossfade(mode, ms) => state.player.set_crossfade(*mode, *ms),
                     Change::Repeat(mode) => state.player.set_repeat(*mode),
                     Change::Shuffle(on) => state.player.set_shuffle(*on),
+                    Change::AutoUpdate(on) => {
+                        state.update.auto_changed(*on);
+                        Ok(())
+                    }
                     // Applied above, before the save.
                     Change::MiniShortcut(_) | Change::StartWithSystem(_) => Ok(()),
                     other => shell::apply_setting(&app, other),
@@ -928,6 +933,37 @@ pub async fn ytm_sign_out(app: AppHandle) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || view.sign_out())
         .await
         .map_err(|err| err.to_string())
+}
+
+// Updates (main window only)
+
+#[tauri::command]
+pub fn update_state(state: State<'_, AppState>) -> UpdateState {
+    state.update.state()
+}
+
+/// "Check now": the answer arrives as `update://state`; a found update downloads.
+#[tauri::command]
+pub fn update_check(state: State<'_, AppState>) {
+    state.update.check_now();
+}
+
+/// "Restart to update": installs the ready update and starts Prism again.
+#[tauri::command]
+pub async fn update_restart(app: AppHandle) -> Result<(), String> {
+    let restart = app.clone();
+    blocking(move || {
+        let state = app_state(&app).map_err(anyhow::Error::msg)?;
+        // On Windows the install ends the process before the exit handler runs.
+        state.settings.flush();
+        state
+            .update
+            .install_for_restart()
+            .map_err(anyhow::Error::msg)
+    })
+    .await?;
+    restart.request_restart();
+    Ok(())
 }
 
 #[cfg(test)]

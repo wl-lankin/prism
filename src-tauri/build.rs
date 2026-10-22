@@ -77,6 +77,9 @@ const COMMANDS: &[&str] = &[
     "ytm_queue_play",
     "ytm_sign_in",
     "ytm_sign_out",
+    "update_state",
+    "update_check",
+    "update_restart",
     "window_vibrancy",
     "startup_notice",
 ];

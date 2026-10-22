@@ -465,6 +465,29 @@ const en = {
   'radio.menu.label': 'Station actions',
   'radio.list.label': 'Stations',
   'radio.play.failed': '{name} could not be played: {message}',
+
+  // Updates: Settings > Updates and the pill in the transport strip.
+  'settings.updates': 'Updates',
+  'settings.updates.version': 'Prism {version}',
+  'settings.updates.lastCheck': 'Last checked {when}',
+  'settings.updates.never': 'Not checked yet',
+  'settings.updates.checkNow': 'Check now',
+  'settings.updates.auto': 'Install updates automatically',
+  'settings.updates.autoHint': 'Updates download in the background and install when you quit Prism. When off, Prism only tells you about them.',
+  'settings.updates.notes': 'What is new in {version}',
+  'update.checking': 'Checking for updates...',
+  'update.upToDate': 'Prism is up to date.',
+  'update.available': 'Prism {version} is available.',
+  'update.availableNotice': 'Prism {version} is available. You can find it in Settings > Updates.',
+  'update.download': 'Download',
+  'update.downloading': 'Downloading Prism {version}...',
+  'update.downloadingPercent': 'Downloading Prism {version}, {percent}%',
+  'update.ready': 'Prism {version} is ready. It installs when you quit Prism.',
+  'update.readyRestart': 'Prism {version} is ready. Restart Prism to install it.',
+  'update.failed': 'The update could not be loaded. Prism stays as it is and tries again later.',
+  'update.restart': 'Restart to update',
+  'update.restartTitle': 'Install Prism {version} and restart',
+  'update.restartFailed': 'The update could not be installed. Prism stays as it is.',
 } as const;
 
 export type Key = keyof typeof en;
@@ -929,6 +952,28 @@ const de: Record<Key, string> = {
   'radio.menu.label': 'Senderaktionen',
   'radio.list.label': 'Sender',
   'radio.play.failed': '{name} konnte nicht abgespielt werden: {message}',
+
+  'settings.updates': 'Updates',
+  'settings.updates.version': 'Prism {version}',
+  'settings.updates.lastCheck': 'Zuletzt geprüft {when}',
+  'settings.updates.never': 'Noch nicht geprüft',
+  'settings.updates.checkNow': 'Jetzt prüfen',
+  'settings.updates.auto': 'Updates automatisch installieren',
+  'settings.updates.autoHint': 'Updates werden im Hintergrund geladen und beim Beenden von Prism installiert. Ist das aus, weist Prism nur auf neue Versionen hin.',
+  'settings.updates.notes': 'Neu in {version}',
+  'update.checking': 'Suche nach Updates...',
+  'update.upToDate': 'Prism ist auf dem neuesten Stand.',
+  'update.available': 'Prism {version} ist verfügbar.',
+  'update.availableNotice': 'Prism {version} ist verfügbar. Du findest es in den Einstellungen unter Updates.',
+  'update.download': 'Laden',
+  'update.downloading': 'Prism {version} wird geladen...',
+  'update.downloadingPercent': 'Prism {version} wird geladen, {percent} %',
+  'update.ready': 'Prism {version} ist bereit. Es wird installiert, wenn du Prism beendest.',
+  'update.readyRestart': 'Prism {version} ist bereit. Starte Prism neu, um es zu installieren.',
+  'update.failed': 'Das Update ließ sich nicht laden. Prism bleibt, wie es ist, und versucht es später erneut.',
+  'update.restart': 'Zum Aktualisieren neu starten',
+  'update.restartTitle': 'Prism {version} installieren und neu starten',
+  'update.restartFailed': 'Das Update ließ sich nicht installieren. Prism bleibt, wie es ist.',
 };
 
 /** The string tables, exported for tests. */

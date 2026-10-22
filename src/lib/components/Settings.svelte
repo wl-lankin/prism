@@ -22,6 +22,7 @@
   import { closeOverlay, openOverlay } from '../stores/overlays.svelte';
   import { settings, updateSettings } from '../stores/settings.svelte';
   import { signIn as ytmSignIn, signOut as ytmSignOut } from '../stores/ytm.svelte';
+  import { checkForUpdates, restartToUpdate, update, updateStatusText } from '../stores/update.svelte';
   import type {
     CrossfadeMode,
     Folder,
@@ -56,6 +57,7 @@
   let saveError = $state<string | null>(null);
   let version = $state('');
 
+  const updateLine = $derived(updateStatusText(update));
   const scan = $derived(library.scan);
   const busy = $derived(adding || rescanning || !!scan);
   const share = $derived(scan && scan.total > 0 ? Math.min(1, scan.done / scan.total) : 0);
@@ -1190,6 +1192,70 @@
       {#if systemError}<p class="error" role="alert">{systemError}</p>{/if}
     </section>
 
+    <section id="settings-section-updates" aria-labelledby="settings-updates">
+      <h2 id="settings-updates">{t('settings.updates')}</h2>
+      <div class="panel">
+        <div class="row">
+          <div class="row-text">
+            <span class="row-label">{t('settings.updates.version', { version })}</span>
+            <span class="hint update-status" aria-live="polite">{updateLine}</span>
+            <span class="hint">
+              {update.lastCheck ? t('settings.updates.lastCheck', { when: ago(update.lastCheck, now) }) : t('settings.updates.never')}
+            </span>
+          </div>
+          <div class="control end">
+            {#if update.status === 'ready'}
+              <button
+                type="button"
+                class="btn primary small"
+                title={t('update.restartTitle', { version: update.version ?? '' })}
+                onclick={() => restartToUpdate()}
+              >
+                {t('update.restart')}
+              </button>
+            {:else if update.status === 'available'}
+              <button type="button" class="btn ghost small" onclick={() => checkForUpdates()}>{t('update.download')}</button>
+            {:else}
+              <button
+                type="button"
+                class="btn ghost small"
+                disabled={update.status === 'checking' || update.status === 'downloading'}
+                onclick={() => checkForUpdates()}
+              >
+                {t('settings.updates.checkNow')}
+              </button>
+            {/if}
+          </div>
+        </div>
+        <div class="row">
+          <div class="row-text">
+            <span class="row-label" id="label-auto-update">{t('settings.updates.auto')}</span>
+            <span class="hint">{t('settings.updates.autoHint')}</span>
+          </div>
+          <div class="control end">
+            <button
+              type="button"
+              class="switch"
+              role="switch"
+              aria-checked={settings.autoUpdate}
+              aria-labelledby="label-auto-update"
+              onclick={() => change({ autoUpdate: !settings.autoUpdate })}
+            >
+              <i></i>
+            </button>
+          </div>
+        </div>
+        {#if update.notes && update.version}
+          <div class="row notes">
+            <div class="row-text">
+              <span class="row-label">{t('settings.updates.notes', { version: update.version })}</span>
+              <p class="hint release-notes">{update.notes}</p>
+            </div>
+          </div>
+        {/if}
+      </div>
+    </section>
+
     <section aria-labelledby="settings-language">
       <h2 id="settings-language">{t('settings.language')}</h2>
       <div class="panel">
@@ -1759,6 +1825,17 @@
   .control.end {
     display: flex;
     justify-content: flex-end;
+  }
+
+  .row.notes {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  /* The notes come from latest.json as plain text with line breaks. */
+  .release-notes {
+    margin: 4px 0 0;
+    max-width: 72ch;
+    white-space: pre-line;
   }
 
   .control.length {

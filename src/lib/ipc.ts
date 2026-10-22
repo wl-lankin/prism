@@ -32,6 +32,7 @@ import type {
   Station,
   StationQueryArgs,
   Track,
+  UpdateState,
   YtmRect,
   YtmQueue,
   YtmState,
@@ -135,6 +136,14 @@ export const ytmQueue = () => call<YtmQueue>('ytm_queue');
 export const ytmQueuePlay = (index: number) => call<void>('ytm_queue_play', { index });
 export const ytmSignIn = () => call<void>('ytm_sign_in');
 export const ytmSignOut = () => call<void>('ytm_sign_out');
+
+// Updates. Main window only.
+
+export const updateState = () => call<UpdateState>('update_state');
+/** Checks now; the answer arrives as `update://state`, and a found update downloads. */
+export const updateCheck = () => call<void>('update_check');
+/** Installs the ready update and starts Prism again. */
+export const updateRestart = () => call<void>('update_restart');
 
 // Radio. Views go through `stores/radio.svelte.ts`, not these wrappers directly. The directory calls (`radioSearch`, `radioCountries`, `radioRegions`, `radioTags`)
 // reject with a `RadioFailure`.
@@ -281,5 +290,7 @@ export const onYtmQueue = (cb: (queue: YtmQueue) => void): Promise<UnlistenFn> =
   listen<YtmQueue>('ytm://queue', (event) => cb(event.payload));
 export const onActivePlayer = (cb: (active: ActivePlayer) => void): Promise<UnlistenFn> =>
   listen<ActivePlayer>('transport://active', (event) => cb(event.payload));
+export const onUpdateState = (cb: (state: UpdateState) => void): Promise<UnlistenFn> =>
+  listen<UpdateState>('update://state', (event) => cb(event.payload));
 export const onScanProgress = (cb: (progress: ScanProgress) => void): Promise<UnlistenFn> =>
   listen<ScanProgress>('library://scan-progress', (event) => cb(event.payload));

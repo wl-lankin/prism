@@ -630,6 +630,8 @@ mod tests {
                 "{name}"
             );
             assert!(!forbidden.contains(&name.as_str()), "{name}");
+            // Checking, installing and restarting for an update are the main window's.
+            assert!(!name.starts_with("update_"), "{name}");
         }
     }
 

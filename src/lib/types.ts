@@ -182,6 +182,24 @@ export interface Settings {
   navidromeUser: string | null;
   navidromeQuality: StreamQuality;
   radioLocation: RadioLocation;
+  /** Download updates in the background and install them on quit; off only announces them. */
+  autoUpdate: boolean;
+}
+
+/** `available`: found while automatic updates are off. `ready`: downloaded and verified, it
+ *  installs on quit or on "Restart to update". */
+export type UpdateStatus = 'idle' | 'checking' | 'available' | 'downloading' | 'ready' | 'failed' | 'upToDate';
+
+export interface UpdateState {
+  status: UpdateStatus;
+  version: string | null;
+  notes: string | null;
+  /** 0..1 while downloading, when the size is known. */
+  progress: number | null;
+  /** ms since the epoch. */
+  lastCheck: number | null;
+  /** Quitting installs the ready update; otherwise only "Restart to update" does. */
+  installsOnQuit: boolean;
 }
 
 /** Where "Radio near you" looks: an IP lookup, or a country (and region) the user chose. */
