@@ -3,8 +3,10 @@
 # docs/releasing.md). Installed apps see the update once the draft is published.
 #
 # Trigger: push a tag like v1.0.0 (release) or v1.0.0-beta.1 (prerelease), or run it by hand
-# with a tag name. The bundle version always comes from src-tauri/tauri.conf.json (NSIS needs a
-# numeric version, so a beta tag still ships 1.0.0); the tag must match it up to the "-suffix".
+# with a tag name. The bundle version always comes from src-tauri/tauri.conf.json and must equal
+# the tag without the "v", so a beta tag v1.0.0-beta.1 needs version 1.0.0-beta.1 in
+# tauri.conf.json, Cargo.toml and package.json. NSIS accepts a prerelease version; only MSI
+# would not, and none is built.
 #
 # createUpdaterArtifacts lives in src-tauri/tauri.updater.conf.json, passed only here, because it
 # makes `tauri build` demand the signing key and source builds have none. The FFmpeg sidecars
@@ -27,6 +29,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
   prepare:
     runs-on: ubuntu-latest
@@ -46,11 +52,26 @@ jobs:
             exit 1
           fi
           version="$(jq -r .version src-tauri/tauri.conf.json)"
-          base="${TAG#v}"
-          base="${base%%-*}"
-          if [ "$base" != "$version" ]; then
+          if [ "${TAG#v}" != "$version" ]; then
             echo "::error::Tag $TAG does not match the app version $version in src-tauri/tauri.conf.json"
             exit 1
+          fi
+          pkg="$(jq -r .version package.json)"
+          crate="$(sed -n 's/^version = "\(.*\)"$/\1/p' src-tauri/Cargo.toml | head -1)"
+          if [ "$pkg" != "$version" ] || [ "$crate" != "$version" ]; then
+            echo "::error::Versions differ: tauri.conf.json $version, package.json $pkg, Cargo.toml $crate"
+            exit 1
+          fi
+          # A tag that already exists on origin must point at this commit (an annotated tag is
+          # compared by its peeled commit), so a rerun cannot build a different commit.
+          remote="$(git ls-remote --tags origin "refs/tags/$TAG" "refs/tags/$TAG^{}")"
+          if [ -n "$remote" ]; then
+            tagged="$(echo "$remote" | awk '/\^\{\}$/ { print $1 }')"
+            [ -n "$tagged" ] || tagged="$(echo "$remote" | awk 'NR == 1 { print $1 }')"
+            if [ "$tagged" != "$GITHUB_SHA" ]; then
+              echo "::error::Tag $TAG on origin points at $tagged, this run is on $GITHUB_SHA"
+              exit 1
+            fi
           fi
           # Fails early when CHANGELOG.md has no text for this version.
           bash .github/release-notes.sh "$TAG" >/dev/null
@@ -121,7 +142,7 @@ jobs:
             echo 'NOTES_EOF'
           } >> "$GITHUB_OUTPUT"
 
-      - uses: tauri-apps/tauri-action@v0
+      - uses: tauri-apps/tauri-action@v0.6.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -160,7 +181,20 @@ jobs:
           cp "copies/Prism_${VERSION}_universal.dmg" copies/Prism.dmg
           gh release upload "$TAG" copies/Prism-setup.exe copies/Prism.dmg --clobber
 
+      # LGPL 2.1 section 6: the source of the shipped FFmpeg goes with the binaries. The pinned
+      # tarball is fetched and checked against its SHA-256 by the same function the build uses.
+      - name: FFmpeg source and build recipe
+        run: |
+          . scripts/ffmpeg-config.sh
+          ffmpeg_fetch_source ffmpeg-src/dl ffmpeg-src/src
+          tar -czf prism-ffmpeg-build-scripts.tar.gz \
+            scripts/ffmpeg-config.sh scripts/build-ffmpeg.sh scripts/build-ffmpeg-windows.sh \
+            scripts/check-ffmpeg.sh scripts/stage-ffmpeg.sh docs/ffmpeg.md
+          gh release upload "$TAG" "ffmpeg-src/dl/ffmpeg-${FFMPEG_VERSION}.tar.xz" \
+            prism-ffmpeg-build-scripts.tar.gz --clobber
+
       - name: Verify the release has every asset
+        if: ${{ !cancelled() }}
         run: |
           mkdir check
           gh release view "$TAG" --json assets -q '.assets[] | "\(.name)\t\(.size)"' > check/assets.tsv

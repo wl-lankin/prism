@@ -13,12 +13,16 @@
 #   macOS universal: Prism_<v>_universal.dmg, Prism_universal.app.tar.gz (no version in the
 #                    name) and Prism_universal.app.tar.gz.sig
 #   both:            latest.json
-# plus the two versionless copies Prism-setup.exe and Prism.dmg made by the release workflow.
+# plus what the release workflow adds: the versionless copies Prism-setup.exe and Prism.dmg, and
+# the LGPL source: ffmpeg-<FFMPEG_VERSION>.tar.xz and prism-ffmpeg-build-scripts.tar.gz.
 set -euo pipefail
 
 version="${1:?usage: verify-release-assets.sh <version> <repo> <dir>}"
 repo="${2:?repo missing}"
 dir="${3:?dir missing}"
+
+# shellcheck source=/dev/null
+. "$(dirname "${BASH_SOURCE[0]}")/../scripts/ffmpeg-config.sh"
 
 setup="Prism_${version}_x64-setup.exe"
 dmg="Prism_${version}_universal.dmg"
@@ -40,6 +44,7 @@ expected=(
   "$tarball" "$tarball.sig"
   "Prism-setup.exe" "Prism.dmg"
   "latest.json"
+  "ffmpeg-${FFMPEG_VERSION}.tar.xz" "prism-ffmpeg-build-scripts.tar.gz"
 )
 for name in "${expected[@]}"; do
   size="$(size_of "$name")"

@@ -6,8 +6,10 @@ name: CI
 
 on:
   push:
-    branches: ["**"]
+    branches: [main, PRISM-6]
+    paths-ignore: ["docs/**", "**/*.md"]
   pull_request:
+    paths-ignore: ["docs/**", "**/*.md"]
 
 permissions:
   contents: read
@@ -62,6 +64,10 @@ jobs:
             echo "PRISM_FFMPEG=$GITHUB_WORKSPACE/ffmpeg-bin/ffmpeg${{ matrix.exe }}"
             echo "PRISM_FFPROBE=$GITHUB_WORKSPACE/ffmpeg-bin/ffprobe${{ matrix.exe }}"
           } >> "$GITHUB_ENV"
+          test -f "ffmpeg-bin/ffmpeg${{ matrix.exe }}"
+          test -f "ffmpeg-bin/ffprobe${{ matrix.exe }}"
+          "ffmpeg-bin/ffmpeg${{ matrix.exe }}" -version | head -1
+          "ffmpeg-bin/ffprobe${{ matrix.exe }}" -version | head -1
 
       - run: npm ci
 
