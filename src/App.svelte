@@ -17,8 +17,9 @@
   import YouTubeView from './lib/components/YouTubeView.svelte';
   import PlaylistsView from './lib/components/PlaylistsView.svelte';
   import PlaylistView from './lib/components/PlaylistView.svelte';
+  import LyricsPanel from './lib/components/LyricsPanel.svelte';
   import QueuePanel from './lib/components/QueuePanel.svelte';
-  import { loadQueuePanel, toggleQueuePanel } from './lib/stores/queue.svelte';
+  import { loadNowPlayingSide, loadQueuePanel, toggleLyricsPanel, toggleQueuePanel } from './lib/stores/queue.svelte';
   import { initPlaylists } from './lib/stores/playlists.svelte';
   import SearchPalette from './lib/components/SearchPalette.svelte';
   import Settings from './lib/components/Settings.svelte';
@@ -100,7 +101,10 @@
   $effect(() => initRing());
 
   // The queue panel opens as it was left.
-  $effect(() => loadQueuePanel());
+  $effect(() => {
+    loadQueuePanel();
+    loadNowPlayingSide();
+  });
 
   $effect(() => {
     let stop: (() => void) | undefined;
@@ -295,6 +299,11 @@
     if (event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 'q') {
       event.preventDefault();
       toggleQueuePanel();
+    }
+    // Ctrl+L opens and closes the lyrics; it shares the queue's slot.
+    if (event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 'l') {
+      event.preventDefault();
+      toggleLyricsPanel();
     }
   }
 
@@ -606,6 +615,7 @@
         {/key}
       </section>
       <QueuePanel />
+      <LyricsPanel />
     </main>
 
     <div class="transport">

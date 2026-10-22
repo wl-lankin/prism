@@ -3,6 +3,15 @@
 /** The localStorage key that remembers whether the queue panel is open. */
 export const QUEUE_PANEL_KEY = 'prism.queuePanel';
 
+/** The localStorage key that remembers whether the lyrics panel is open. */
+export const LYRICS_PANEL_KEY = 'prism.lyricsPanel';
+
+/** The localStorage key for Now Playing's side column: `queue` or `lyrics`. */
+export const NOW_PLAYING_SIDE_KEY = 'prism.nowPlayingSide';
+
+/** The id of the transport strip's lyrics toggle: focus returns there when the panel closes. */
+export const LYRICS_TOGGLE_ID = 'lyrics-toggle';
+
 /** The id of the transport strip's queue toggle: focus returns there when the panel closes. */
 export const QUEUE_TOGGLE_ID = 'queue-toggle';
 

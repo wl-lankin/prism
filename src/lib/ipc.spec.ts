@@ -18,6 +18,8 @@ it('maps every command onto its fixed name and argument keys', async () => {
     [() => ipc.playerSetVolume(0.3), 'player_set_volume', { v: 0.3 }],
     [ipc.playerState, 'player_state', undefined],
     [() => ipc.playerPlayFiles(['C:/x.flac']), 'player_play_files', { paths: ['C:/x.flac'] }],
+    [() => ipc.lyricsForTrack('local:1'), 'lyrics_for_track', { trackId: 'local:1' }],
+    [ipc.lyricsForYoutube, 'lyrics_for_youtube', undefined],
     [() => ipc.playerMove(4, 2), 'player_move', { from: 4, to: 2 }],
     [() => ipc.playerRemove(3), 'player_remove', { index: 3 }],
     [() => ipc.libraryAddFolder('C:\\Music'), 'library_add_folder', { path: 'C:\\Music' }],
