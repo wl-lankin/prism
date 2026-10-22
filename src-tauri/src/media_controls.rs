@@ -1096,6 +1096,7 @@ mod tests {
             duration_ms: 180_000,
             can_next: true,
             can_prev: true,
+            video_id: None,
         }
     }
 

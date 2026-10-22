@@ -30,6 +30,8 @@ pub struct YtmState {
     /// The page's next and previous buttons can be pressed.
     pub can_next: bool,
     pub can_prev: bool,
+    /// The playing video's id (11 of `A-Z a-z 0-9 _ -`), the key of its cached lyrics.
+    pub video_id: Option<String>,
 }
 
 impl YtmState {
