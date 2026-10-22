@@ -77,6 +77,8 @@ const COMMANDS: &[&str] = &[
     "ytm_queue_play",
     "ytm_sign_in",
     "ytm_sign_out",
+    "lyrics_for_track",
+    "lyrics_for_youtube",
     "update_state",
     "update_check",
     "update_restart",

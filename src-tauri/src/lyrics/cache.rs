@@ -15,7 +15,21 @@ pub enum Cached {
     Miss,
 }
 
+/// How long found lyrics from a web page count (YouTube Music): the page's answer must not
+/// stick forever.
+pub const FOUND_TTL_PAGE_SECS: i64 = 30 * 24 * 60 * 60;
+
 pub fn get(conn: &Connection, key: &str, now: i64) -> anyhow::Result<Cached> {
+    get_expiring(conn, key, now, None)
+}
+
+/// Like [`get`], and found lyrics older than `found_ttl` seconds count as `Miss`.
+pub fn get_expiring(
+    conn: &Connection,
+    key: &str,
+    now: i64,
+    found_ttl: Option<i64>,
+) -> anyhow::Result<Cached> {
     let row: Option<(Option<String>, i64)> = conn
         .query_row(
             "SELECT lyrics, checked_at FROM lyrics_cache WHERE key = ?1",
@@ -27,6 +41,9 @@ pub fn get(conn: &Connection, key: &str, now: i64) -> anyhow::Result<Cached> {
         None => Cached::Miss,
         Some((None, checked_at)) if now - checked_at <= MISS_TTL_SECS => Cached::Hit(None),
         Some((None, _)) => Cached::Miss,
+        Some((Some(_), checked_at)) if found_ttl.is_some_and(|ttl| now - checked_at > ttl) => {
+            Cached::Miss
+        }
         Some((Some(json), _)) => match serde_json::from_str(&json) {
             Ok(lyrics) => Cached::Hit(Some(lyrics)),
             Err(_) => Cached::Miss,
@@ -116,6 +133,25 @@ mod tests {
         assert_eq!(
             get(&conn, "k", 1_000 + MISS_TTL_SECS + 1).unwrap(),
             Cached::Miss
+        );
+    }
+
+    #[test]
+    fn found_lyrics_expire_when_a_limit_is_given() {
+        let conn = conn();
+        put(&conn, "k", Some(&sample()), 1_000).unwrap();
+        let limit = Some(FOUND_TTL_PAGE_SECS);
+        assert_eq!(
+            get_expiring(&conn, "k", 1_000 + FOUND_TTL_PAGE_SECS, limit).unwrap(),
+            Cached::Hit(Some(sample()))
+        );
+        assert_eq!(
+            get_expiring(&conn, "k", 1_000 + FOUND_TTL_PAGE_SECS + 1, limit).unwrap(),
+            Cached::Miss
+        );
+        assert_eq!(
+            get_expiring(&conn, "k", 1_000 + FOUND_TTL_PAGE_SECS + 1, None).unwrap(),
+            Cached::Hit(Some(sample()))
         );
     }
 

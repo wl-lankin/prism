@@ -88,6 +88,8 @@
     "allow-ytm-queue-play",
     "allow-ytm-sign-in",
     "allow-ytm-sign-out",
+    "allow-lyrics-for-track",
+    "allow-lyrics-for-youtube",
     "allow-update-state",
     "allow-update-check",
     "allow-update-restart"

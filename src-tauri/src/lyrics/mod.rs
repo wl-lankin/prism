@@ -8,6 +8,9 @@ pub mod cache;
 pub mod local;
 pub mod lrc;
 pub mod lrclib;
+pub mod service;
+
+pub use service::{LyricsAnswer, LyricsService};
 
 pub const MAX_LINES: usize = 2000;
 pub const MAX_LINE_CHARS: usize = 500;

@@ -568,7 +568,8 @@ describe('one answer per track', () => {
     expect(lyricsState.key).toBe('ytm:Other Song|Prism Band|180');
   });
 
-  it('keeps a found answer when only the online search is switched', async () => {
+  it('keeps an answer from another source when only the online search is switched', async () => {
+    lyricsAnswer = { status: 'found', lyrics: { ...synced, source: 'navidrome' } };
     play('a');
     show(LyricsView);
     await settle();
@@ -578,6 +579,18 @@ describe('one answer per track', () => {
     await settle();
     expect(calls('lyrics_for_track')).toHaveLength(1);
     expect(lines()).toHaveLength(4);
+  });
+
+  it('asks again when the online search is switched off and the answer came from lrclib', async () => {
+    play('a');
+    show(LyricsView);
+    await settle();
+    expect(lines()).toHaveLength(4);
+    lyricsAnswer = { status: 'none' };
+    settings.lyricsLookup = false;
+    await settle();
+    expect(calls('lyrics_for_track')).toHaveLength(2);
+    expect(lines()).toHaveLength(0);
   });
 
   it('asks again after the online search is switched on', async () => {
