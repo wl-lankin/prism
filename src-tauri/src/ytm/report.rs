@@ -16,7 +16,7 @@ use crate::radio::model::is_format_char;
 pub const MAX_REPORT_BYTES: usize = 16 * 1024;
 /// The cap for a queue report: 200 entries of typical length are about 60 KiB, and the
 /// bridge leaves out the tail of a queue that would not fit.
-pub const MAX_QUEUE_REPORT_BYTES: usize = 512 * 1024;
+pub const MAX_QUEUE_REPORT_BYTES: usize = 256 * 1024;
 pub const MAX_QUEUE_ITEMS: usize = 200;
 pub const MAX_TEXT_CHARS: usize = 256;
 pub const MAX_ARTWORK_BYTES: usize = 2048;

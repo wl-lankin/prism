@@ -35,10 +35,16 @@
   const yt = $derived(player.active === 'ytm');
   const idle = $derived(yt ? ytmIdle(ytm.state) : player.status === 'idle' || !track);
   /** YouTube Music's own queue, while its page shows one; a click plays an entry there. */
-  const ytQueue = $derived(yt && ytm.queue.available ? ytm.queue.items : null);
+  /** An empty queue shows the note, not an empty list. */
+  const ytQueue = $derived(yt && ytm.queue.available && ytm.queue.items.length > 0 ? ytm.queue.items : null);
   const ytCurrent = $derived(ytQueue ? ytQueue.findIndex((item) => item.current) : -1);
   let ytSelected = $state(-1);
   let ytList = $state<HTMLDivElement>();
+
+  // A queue that got shorter drops a selection past its end.
+  $effect(() => {
+    if (ytSelected >= (ytQueue?.length ?? 0)) ytSelected = -1;
+  });
 
   function playYt(index: number) {
     ytSelected = index;

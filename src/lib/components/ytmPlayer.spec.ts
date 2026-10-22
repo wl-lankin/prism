@@ -313,6 +313,24 @@ describe('Now Playing with YouTube Music', () => {
     expect(calls('ytm_queue_play').at(-1)).toEqual(['ytm_queue_play', { index: 0 }]);
   });
 
+  it('shows the note for an available but empty queue, and drops a selection past its end', async () => {
+    ytm.queue = { available: true, items: [] };
+    show(NowPlaying);
+    await settle();
+    expect(target.querySelector('[role="listbox"]')).toBeNull();
+    expect(target.querySelector('.ytm-note')).not.toBeNull();
+
+    ytm.queue = ytQueue();
+    await settle();
+    const list = target.querySelector<HTMLElement>('[role="listbox"]')!;
+    list.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+    await settle();
+    expect(list.getAttribute('aria-activedescendant')).toBe('ytnp-2');
+    ytm.queue = { available: true, items: ytQueue().items.slice(0, 2) };
+    await settle();
+    expect(target.querySelector('[role="listbox"]')!.getAttribute('aria-activedescendant')).toBeNull();
+  });
+
   it('shows the Prism queue again once Prism plays', async () => {
     ytm.queue = ytQueue();
     player.active = 'prism';
@@ -396,6 +414,33 @@ describe('queue panel with YouTube Music', () => {
     // Prism's own queue commands are never used for it.
     expect(calls('player_jump')).toHaveLength(0);
     expect(calls('player_queue_range')).toHaveLength(0);
+  });
+
+  it('shows the note for an available but empty queue', async () => {
+    ytm.queue = { available: true, items: [] };
+    queuePanel.open = true;
+    show(QueuePanel);
+    await settle();
+    expect(target.querySelector('[role="listbox"]')).toBeNull();
+    expect(target.querySelector('.empty p')?.textContent).toContain('Open the player');
+  });
+
+  it('drops a selection past the end of a shorter queue', async () => {
+    ytm.queue = ytQueue();
+    queuePanel.open = true;
+    show(QueuePanel);
+    await settle();
+    const list = target.querySelector<HTMLElement>('[role="listbox"]')!;
+    list.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+    await settle();
+    expect(list.getAttribute('aria-activedescendant')).toBe('ytq-2');
+    ytm.queue = { available: true, items: ytQueue().items.slice(0, 2) };
+    await settle();
+    expect(target.querySelector('[role="listbox"]')!.getAttribute('aria-activedescendant')).toBeNull();
+    expect(target.querySelector('[aria-selected="true"]')).toBeNull();
+    target.querySelector<HTMLElement>('[role="listbox"]')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await settle();
+    expect(calls('ytm_queue_play')).toHaveLength(0);
   });
 
   it('follows the queue as it changes', async () => {

@@ -947,8 +947,8 @@ mod tests {
     #[test]
     fn bridge_queue_caps_match_the_report_caps() {
         assert!(BRIDGE.contains(&format!("var QUEUE_MAX = {};", report::MAX_QUEUE_ITEMS)));
-        assert!(BRIDGE.contains("var QUEUE_BYTES_MAX = 511 * 1024;"));
-        const { assert!(511 * 1024 < report::MAX_QUEUE_REPORT_BYTES) };
+        assert!(BRIDGE.contains("var QUEUE_BYTES_MAX = 255 * 1024;"));
+        const { assert!(255 * 1024 < report::MAX_QUEUE_REPORT_BYTES) };
         assert!(BRIDGE.contains(&format!("var TEXT_MAX = {};", report::MAX_TEXT_CHARS)));
         assert!(BRIDGE.contains(&format!("var URL_MAX = {};", report::MAX_ARTWORK_BYTES)));
         assert!(BRIDGE.contains("case 'queue':"));

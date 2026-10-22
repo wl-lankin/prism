@@ -28,8 +28,8 @@
   var URL_MAX = 2048;
   var QUEUE_MAX = 200;
   var QUEUE_GAP_MS = 500;
-  // Under Prism's cap for a queue report (512 KiB), with room for the report around the items.
-  var QUEUE_BYTES_MAX = 511 * 1024;
+  // Under Prism's cap for a queue report (256 KiB), with room for the report around the items.
+  var QUEUE_BYTES_MAX = 255 * 1024;
   var HEARTBEAT_MS = 1000;
   var EVENTS = ['play', 'pause', 'ended', 'durationchange', 'loadedmetadata', 'seeked'];
 

@@ -580,9 +580,9 @@ describe('the queue', () => {
     run();
     const report = queues[0];
     const items = report.items as Report[];
-    expect(items.length).toBeGreaterThan(100);
+    expect(items.length).toBeGreaterThan(50);
     expect(items.length).toBeLessThan(200);
-    expect(new TextEncoder().encode(JSON.stringify(report)).length).toBeLessThanOrEqual(512 * 1024);
+    expect(new TextEncoder().encode(JSON.stringify(report)).length).toBeLessThanOrEqual(256 * 1024);
     // The head of the queue is kept, in order.
     expect((items[0].title as string).startsWith('0"')).toBe(true);
     expect((items.at(-1)!.title as string).startsWith(`${items.length - 1}"`)).toBe(true);
