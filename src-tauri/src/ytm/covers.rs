@@ -5,7 +5,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::io::Read;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 
 use reqwest::blocking::Client;
 use reqwest::redirect::Policy;
@@ -18,6 +18,8 @@ use crate::radio::covers::{
 };
 use crate::radio::directory::USER_AGENT;
 use crate::thumbs::{RemoteCovers, ResizeError, ResizeGate};
+
+use super::lock;
 
 pub const YTM_COVER_PREFIX: &str = "yt-";
 /// Artwork URLs remembered at most.
@@ -57,12 +59,6 @@ pub fn ytm_cover_raw(id: &str) -> Option<&str> {
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
     hex.then_some(raw)
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[derive(Default)]

@@ -155,10 +155,10 @@ pub fn player_seek(state: State<'_, AppState>, ms: u64) -> Result<(), String> {
 /// Only Prism's own volume is saved; YouTube Music's belongs to its page.
 #[tauri::command]
 pub fn player_set_volume(state: State<'_, AppState>, v: f32) -> Result<(), String> {
-    if state.transport.active() == Active::Prism {
+    if state.transport.set_volume(v)? == Active::Prism {
         state.settings.remember_volume(v);
     }
-    state.transport.set_volume(v)
+    Ok(())
 }
 
 /// The player the transport targets now, for windows that load later (`transport://active`
@@ -869,7 +869,7 @@ pub use crate::ytm::view::Rect as YtmRect;
 #[tauri::command]
 pub fn ytm_report(webview: tauri::Webview, report: serde_json::Value) -> Result<(), String> {
     let url = webview.url().ok();
-    if !ytm::report_allowed(webview.label(), url.as_ref(), ytm::dev_host()) {
+    if !ytm::report_allowed(webview.label(), url.as_ref(), ytm::dev::page()) {
         return Err(YTM_REFUSED.to_string());
     }
     let report = ytm::report::parse(report).map_err(|_| YTM_REFUSED.to_string())?;
@@ -888,21 +888,6 @@ pub fn ytm_show(state: State<'_, AppState>, rect: YtmRect) -> Result<(), String>
 #[tauri::command]
 pub fn ytm_hide(state: State<'_, AppState>) -> Result<(), String> {
     state.ytm_view.hide()
-}
-
-/// A command for the YouTube Music page itself, whichever player is active:
-/// `invoke('ytm_control', { action })` with `toggle`, `play`, `pause`, `next` or `prev`;
-/// `{ action: 'seek', positionMs }`; `{ action: 'volume', volume }` (0..=1).
-#[tauri::command]
-pub fn ytm_control(
-    state: State<'_, AppState>,
-    action: String,
-    position_ms: Option<f64>,
-    volume: Option<f64>,
-) -> Result<(), String> {
-    let action = ytm::parse_action(&action, position_ms, volume)?;
-    ytm::state::YtmControl::send(state.ytm.as_ref(), action);
-    Ok(())
 }
 
 #[tauri::command]

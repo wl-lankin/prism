@@ -332,7 +332,7 @@
           <div class="lines">
             <div class="sub" title={lines.sub}>{lines.sub}</div>
             <div class="source" style="--dot:var(--src-youtube)">
-              <span>{t('ytm.source')}</span>
+              <span>{t('source.youtube')}</span>
             </div>
           </div>
         {:else if track}

@@ -558,20 +558,8 @@ mod tests {
         }
     }
 
-    /// Allowed beyond what the page calls today: the YouTube Music view commands its store
-    /// will call, and two `ipc.ts` wrappers no code calls yet.
-    const MAIN_EXTRA: &[&str] = &[
-        "ytm_show",
-        "ytm_hide",
-        "ytm_control",
-        "ytm_state",
-        "ytm_sign_in",
-        "ytm_sign_out",
-        "player_append",
-        "radio_place",
-    ];
-    /// The mini player will show and drive YouTube Music.
-    const MINI_EXTRA: &[&str] = &["ytm_state", "ytm_control"];
+    /// Allowed beyond what the page calls today: two `ipc.ts` wrappers no code calls yet.
+    const MAIN_EXTRA: &[&str] = &["player_append", "radio_place"];
 
     /// The capability allows exactly what the page calls plus `extra`, so a new call fails
     /// here instead of at runtime, and a dropped one does not linger.
@@ -603,7 +591,7 @@ mod tests {
         let used = page_commands("App.svelte");
         assert!(used.contains("main_show") && used.contains("player_toggle"));
         assert!(!used.contains("library_search"));
-        assert_capability_matches(include_str!("../capabilities/mini.json"), used, MINI_EXTRA);
+        assert_capability_matches(include_str!("../capabilities/mini.json"), used, &[]);
     }
 
     /// The mini player plays and shows; it never manages the library, playlists, stations,

@@ -83,7 +83,6 @@
     "allow-startup-notice",
     "allow-ytm-show",
     "allow-ytm-hide",
-    "allow-ytm-control",
     "allow-ytm-state",
     "allow-ytm-sign-in",
     "allow-ytm-sign-out"

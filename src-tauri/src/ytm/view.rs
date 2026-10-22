@@ -5,14 +5,14 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use tauri::{AppHandle, Manager, Url};
 
 use super::policy::{self, Decision, From};
-use super::YtmService;
+use super::{lock, YtmService};
 
 pub const PAGE_URL: &str = "https://music.youtube.com/";
 /// Under Prism's data directory (Windows only): the view's own WebView2 profile, shared
@@ -27,8 +27,9 @@ pub const BROWSER_ARGS: &str =
 pub const HAND_OFF_SPACING: Duration = Duration::from_secs(1);
 /// The session's store is removed again this long after a first failure.
 pub const REMOVE_RETRY: Duration = Duration::from_millis(500);
-/// Windows: left next to the data directory when it could not be removed at sign-out; the
-/// next start removes the directory before any view exists.
+/// Left in Prism's data directory when the session's store (the Windows data directory, the
+/// macOS 14+ [`YTM_STORE`]) could not be removed at sign-out; the next start removes it
+/// before the view is created.
 pub const REMOVE_MARKER: &str = "ytm-webview.remove";
 /// macOS 14+: the view's and the sign-in window's own WKWebsiteDataStore (UUID
 /// 5f1c2b7e-9a43-4d2e-8b61-3c0e7a9d4f12), apart from the main page's default store. wry
@@ -67,20 +68,18 @@ fn own_store() -> bool {
     false
 }
 
-/// Windows, at start: removes a data directory a sign-out could not remove, then its marker.
-/// `data_dir` is Prism's data directory.
-pub fn remove_pending(data_dir: &Path) -> Result<(), String> {
+/// Whether a sign-out left [`REMOVE_MARKER`] in Prism's data directory `data_dir`.
+pub fn marked(data_dir: &Path) -> bool {
+    data_dir.join(REMOVE_MARKER).exists()
+}
+
+pub fn clear_marker(data_dir: &Path) -> Result<(), String> {
     let marker = data_dir.join(REMOVE_MARKER);
-    if !marker.exists() {
-        return Ok(());
+    match std::fs::remove_file(&marker) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(format!("{}: {err}", marker.display())),
     }
-    let dir = data_dir.join(DATA_DIR_NAME);
-    match std::fs::remove_dir_all(&dir) {
-        Ok(()) => {}
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-        Err(err) => return Err(format!("{}: {err}", dir.display())),
-    }
-    std::fs::remove_file(&marker).map_err(|err| format!("{}: {err}", marker.display()))
 }
 
 /// Where the view goes in the main window, in logical pixels (the placeholder's rect).
@@ -142,8 +141,10 @@ pub trait ViewHost: Send + Sync {
     /// Removes the session's own store once the view and the sign-in window are gone: the
     /// data directory on Windows, [`YTM_STORE`] on macOS 14+; nothing to do elsewhere.
     fn remove_store(&self) -> Result<(), String>;
-    /// The store could not be removed: leave a note for the next start (Windows).
+    /// The store could not be removed: leave a note ([`REMOVE_MARKER`]) for the next start.
     fn mark_for_removal(&self);
+    fn marked_for_removal(&self) -> bool;
+    fn clear_mark(&self) -> Result<(), String>;
     fn main_minimized(&self) -> bool;
     /// Runs `job` off the calling thread (the view is created there).
     fn spawn(&self, job: Box<dyn FnOnce() + Send>);
@@ -166,12 +167,6 @@ pub struct YtmView {
     /// Held while the view is created or signed out; never taken on the main thread.
     create: Mutex<()>,
     remove_retry: Duration,
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn log(what: &str, result: Result<(), String>) {
@@ -335,6 +330,26 @@ impl YtmView {
                 self.host.mark_for_removal();
             }
         }
+    }
+
+    /// At start: a store a sign-out left behind goes now, in the background. It holds the
+    /// lock the view's creation holds, and a view created first keeps the note for the next
+    /// start (a store in use cannot go).
+    pub fn remove_left_behind(self: &Arc<Self>) {
+        if !self.host.marked_for_removal() {
+            return;
+        }
+        let view = Arc::clone(self);
+        self.host.spawn(Box::new(move || {
+            let _create = lock(&view.create);
+            if view.host.exists() {
+                return;
+            }
+            match view.host.remove_store() {
+                Ok(()) => log("removing the YouTube Music note", view.host.clear_mark()),
+                Err(err) => eprintln!("removing the old YouTube Music data failed: {err}"),
+            }
+        }));
     }
 
     /// Whether a navigation may open the sign-in window or the system browser now: only
@@ -581,13 +596,21 @@ impl ViewHost for TauriHost {
     }
 
     fn mark_for_removal(&self) {
-        if !cfg!(windows) {
+        if !cfg!(windows) && !own_store() {
             return;
         }
         let marker = self.data_dir.join(REMOVE_MARKER);
         if let Err(err) = std::fs::write(&marker, b"") {
             eprintln!("noting {} for removal failed: {err}", marker.display());
         }
+    }
+
+    fn marked_for_removal(&self) -> bool {
+        marked(&self.data_dir)
+    }
+
+    fn clear_mark(&self) -> Result<(), String> {
+        clear_marker(&self.data_dir)
     }
 
     fn main_minimized(&self) -> bool {
@@ -623,7 +646,8 @@ pub(crate) fn finish_sign_in(app: &AppHandle, done: &Done) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shell::transport::{Active, Clock, PrismControl, Transport};
+    use crate::shell::transport::tests::FakePrism;
+    use crate::shell::transport::{Active, SystemClock, Transport};
     use crate::ytm::report::{self, tests::bridge_report};
     use crate::ytm::state::{YtmControl, YtmState, YtmStatus};
     use crate::ytm::PageEval;
@@ -636,6 +660,7 @@ mod tests {
         ops: Mutex<Vec<String>>,
         remove_failures: AtomicUsize,
         minimized: AtomicBool,
+        marked: AtomicBool,
     }
 
     impl FakeHost {
@@ -703,7 +728,16 @@ mod tests {
             Ok(())
         }
         fn mark_for_removal(&self) {
+            self.marked.store(true, Ordering::SeqCst);
             self.record("mark");
+        }
+        fn marked_for_removal(&self) -> bool {
+            self.marked.load(Ordering::SeqCst)
+        }
+        fn clear_mark(&self) -> Result<(), String> {
+            self.marked.store(false, Ordering::SeqCst);
+            self.record("unmark");
+            Ok(())
         }
         fn main_minimized(&self) -> bool {
             self.minimized.load(Ordering::SeqCst)
@@ -717,35 +751,6 @@ mod tests {
     struct NoPage;
     impl PageEval for NoPage {
         fn eval(&self, _: &str) {}
-    }
-
-    struct Quiet;
-    impl PrismControl for Quiet {
-        fn toggle(&self) -> Result<(), String> {
-            Ok(())
-        }
-        fn pause(&self) -> Result<(), String> {
-            Ok(())
-        }
-        fn next(&self) -> Result<(), String> {
-            Ok(())
-        }
-        fn prev(&self) -> Result<(), String> {
-            Ok(())
-        }
-        fn seek(&self, _: u64) -> Result<(), String> {
-            Ok(())
-        }
-        fn set_volume(&self, _: f32) -> Result<(), String> {
-            Ok(())
-        }
-    }
-
-    struct Now;
-    impl Clock for Now {
-        fn now(&self) -> Instant {
-            Instant::now()
-        }
     }
 
     struct Fixture {
@@ -765,9 +770,9 @@ mod tests {
             Arc::new(move |state| lock(&emitted).push(state.clone()))
         }));
         let transport = Arc::new(Transport::with_control(
-            Arc::new(Quiet),
+            Arc::new(FakePrism::default()),
             Arc::clone(&service) as Arc<dyn YtmControl>,
-            Arc::new(Now),
+            Arc::new(SystemClock),
         ));
         let weak = Arc::downgrade(&transport);
         service.follow(Arc::new(move |state| {
@@ -915,6 +920,12 @@ mod tests {
                 Ok(())
             }
             fn mark_for_removal(&self) {}
+            fn marked_for_removal(&self) -> bool {
+                false
+            }
+            fn clear_mark(&self) -> Result<(), String> {
+                Ok(())
+            }
             fn main_minimized(&self) -> bool {
                 false
             }
@@ -1066,21 +1077,49 @@ mod tests {
 
     #[test]
     fn a_store_left_behind_goes_at_the_next_start() {
+        // Nothing noted: nothing to do.
+        let f = fixture();
+        f.view.remove_left_behind();
+        assert!(f.host.take().is_empty());
+
+        // Both tries at sign-out failed: the note stays for the next start.
+        f.host.remove_failures.store(2, Ordering::SeqCst);
+        f.view.sign_out();
+        assert_eq!(f.host.take().last().map(String::as_str), Some("mark"));
+        assert!(f.host.marked_for_removal());
+
+        // The next start, before the view: the store goes, then the note.
+        let next = fixture();
+        next.host.marked.store(true, Ordering::SeqCst);
+        next.view.remove_left_behind();
+        assert_eq!(next.host.take(), ["spawn", "remove", "unmark"]);
+        assert!(!next.host.marked_for_removal());
+
+        // Still in use: the note stays for the start after.
+        next.host.marked.store(true, Ordering::SeqCst);
+        next.host.remove_failures.store(1, Ordering::SeqCst);
+        next.view.remove_left_behind();
+        assert_eq!(next.host.take(), ["spawn", "remove"]);
+        assert!(next.host.marked_for_removal());
+
+        // A view created first keeps its store; the note waits.
+        next.view.show(rect(0.0, 0.0, 10.0, 10.0)).unwrap();
+        next.host.take();
+        next.view.remove_left_behind();
+        assert_eq!(next.host.take(), ["spawn"]);
+        assert!(next.host.marked_for_removal());
+    }
+
+    #[test]
+    fn the_note_lives_in_the_data_directory() {
         let data = tempfile::tempdir().unwrap();
-        let dir = data.path().join(DATA_DIR_NAME);
-        std::fs::create_dir_all(dir.join("EBWebView/Default")).unwrap();
-        std::fs::write(dir.join("EBWebView/Default/Cookies"), b"x").unwrap();
-        // No marker: the directory stays.
-        remove_pending(data.path()).unwrap();
-        assert!(dir.exists());
+        assert!(!marked(data.path()));
         std::fs::write(data.path().join(REMOVE_MARKER), b"").unwrap();
-        remove_pending(data.path()).unwrap();
-        assert!(!dir.exists());
+        assert!(marked(data.path()));
+        clear_marker(data.path()).unwrap();
         assert!(!data.path().join(REMOVE_MARKER).exists());
-        // A marker without a directory is cleaned up too.
-        std::fs::write(data.path().join(REMOVE_MARKER), b"").unwrap();
-        remove_pending(data.path()).unwrap();
-        assert!(!data.path().join(REMOVE_MARKER).exists());
+        // Already gone is fine.
+        clear_marker(data.path()).unwrap();
     }
 
     #[test]

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { formatDuration, isLive, liveLines, qualityLabel, streamedFrom, ytmIdle, ytmLines } from '../format';
   import { t } from '../i18n';
-  import { playerNext, playerPrev, playerSeek, playerSetVolume, ytmControl } from '../ipc';
+  import { playerNext, playerPrev, playerSeek, playerSetVolume } from '../ipc';
   import { ytm } from '../stores/ytm.svelte';
   import { back, go, nav } from '../stores/nav.svelte';
   import { player } from '../stores/player.svelte';
@@ -91,12 +91,9 @@
         oncancel={() => (seeking = null)}
         oncommit={(v) => {
           seeking = null;
-          if (yt) {
-            ytm.state.positionMs = v * duration;
-            ytmControl('seek', { positionMs: Math.round(v * duration) }).catch(report('seeking'));
-            return;
-          }
-          player.positionMs = v * duration;
+          // The backend sends the seek to whichever player is active.
+          if (yt) ytm.state.positionMs = v * duration;
+          else player.positionMs = v * duration;
           playerSeek(v * duration).catch(report('seeking'));
         }}
       />
@@ -131,7 +128,7 @@
       {/if}
     </div>
     {#if yt && !idle}
-      <span class="quality" style="--dot:var(--src-youtube)">{t('ytm.source')}</span>
+      <span class="quality" style="--dot:var(--src-youtube)">{t('source.youtube')}</span>
     {:else if !idle && track}
       <span class="quality" style="--dot:var(--src-{track.source})" title={streamNote}>{quality}</span>
     {/if}

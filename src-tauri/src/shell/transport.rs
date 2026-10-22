@@ -280,46 +280,82 @@ impl Transport {
         self.announce(before, Active::Prism);
     }
 
-    fn route(
-        &self,
-        prism: impl FnOnce(&dyn PrismControl) -> Result<(), String>,
-        ytm: YtmAction,
-    ) -> Result<(), String> {
-        match self.active() {
-            Active::Prism => prism(self.prism.as_ref()),
+    /// Sends `command` to `active`, which the caller read once.
+    fn dispatch(&self, active: Active, command: Command) -> Result<(), String> {
+        if let Command::Volume(volume) = command {
+            if !volume.is_finite() {
+                return Err("The volume must be a number between 0 and 1.".to_string());
+            }
+        }
+        match active {
+            Active::Prism => match command {
+                Command::Toggle => self.prism.toggle(),
+                Command::Next => self.prism.next(),
+                Command::Prev => self.prism.prev(),
+                Command::Seek(ms) => self.prism.seek(ms),
+                Command::Volume(volume) => self.prism.set_volume(volume),
+            },
             Active::Ytm => {
-                self.ytm.send(ytm);
+                self.ytm.send(match command {
+                    Command::Toggle => YtmAction::Toggle,
+                    Command::Next => YtmAction::Next,
+                    Command::Prev => YtmAction::Prev,
+                    Command::Seek(ms) => YtmAction::Seek(ms),
+                    Command::Volume(volume) => YtmAction::Volume(volume.clamp(0.0, 1.0)),
+                });
                 Ok(())
             }
         }
     }
 
+    /// Reads the active player once, lets `pick` choose a command for it (from that player's
+    /// state), and sends the command to that same player, so a flip in between cannot send
+    /// one player's choice to the other. Answers the player it went to, `None` when `pick`
+    /// chose nothing.
+    pub fn route_with(
+        &self,
+        pick: impl FnOnce(Active) -> Option<Command>,
+    ) -> Result<Option<Active>, String> {
+        let active = self.active();
+        let Some(command) = pick(active) else {
+            return Ok(None);
+        };
+        self.dispatch(active, command).map(|()| Some(active))
+    }
+
     pub fn toggle(&self) -> Result<(), String> {
-        self.route(|prism| prism.toggle(), YtmAction::Toggle)
+        self.dispatch(self.active(), Command::Toggle)
     }
 
     pub fn next(&self) -> Result<(), String> {
-        self.route(|prism| prism.next(), YtmAction::Next)
+        self.dispatch(self.active(), Command::Next)
     }
 
     pub fn prev(&self) -> Result<(), String> {
-        self.route(|prism| prism.prev(), YtmAction::Prev)
+        self.dispatch(self.active(), Command::Prev)
     }
 
     pub fn seek(&self, ms: u64) -> Result<(), String> {
-        self.route(|prism| prism.seek(ms), YtmAction::Seek(ms))
+        self.dispatch(self.active(), Command::Seek(ms))
     }
 
-    /// `volume` is clamped to 0..=1; anything that is not a number is refused.
-    pub fn set_volume(&self, volume: f32) -> Result<(), String> {
-        if !volume.is_finite() {
-            return Err("The volume must be a number between 0 and 1.".to_string());
-        }
-        self.route(
-            |prism| prism.set_volume(volume),
-            YtmAction::Volume(volume.clamp(0.0, 1.0)),
-        )
+    /// `volume` is clamped to 0..=1; anything that is not a number is refused. Answers the
+    /// player that got it.
+    pub fn set_volume(&self, volume: f32) -> Result<Active, String> {
+        let active = self.active();
+        self.dispatch(active, Command::Volume(volume))
+            .map(|()| active)
     }
+}
+
+/// A transport command, for [`Transport::route_with`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Command {
+    Toggle,
+    Next,
+    Prev,
+    Seek(u64),
+    Volume(f32),
 }
 
 /// Feeds player events to the transport in `slot`. The player is spawned before the
@@ -706,11 +742,45 @@ pub(crate) mod tests {
             ]
         );
         assert_eq!(rig.prism.calls().len(), 5, "nothing more went to Prism");
+        assert_eq!(rig.transport.set_volume(0.2), Ok(Active::Ytm));
 
         // Prism starts again: the commands follow it back.
         rig.prism(PlayerStatus::Loading);
         rig.transport.next().unwrap();
         assert_eq!(rig.prism.calls().last(), Some(&Call::Next));
+    }
+
+    #[test]
+    fn a_flip_while_picking_does_not_reroute() {
+        let rig = Rig::new();
+        // The page takes over while the command is chosen from Prism's state: it still goes
+        // to Prism, the player it was chosen for.
+        let routed = rig.transport.route_with(|active| {
+            assert_eq!(active, Active::Prism);
+            rig.ytm_plays();
+            Some(Command::Next)
+        });
+        assert_eq!(routed, Ok(Some(Active::Prism)));
+        assert_eq!(rig.prism.calls(), vec![Call::Next]);
+        assert!(rig.ytm.sent().is_empty());
+
+        // And the other way round.
+        let routed = rig.transport.route_with(|active| {
+            assert_eq!(active, Active::Ytm);
+            rig.prism(PlayerStatus::Loading);
+            Some(Command::Seek(3_000))
+        });
+        assert_eq!(routed, Ok(Some(Active::Ytm)));
+        assert_eq!(rig.ytm.sent().last(), Some(&YtmAction::Seek(3_000)));
+        assert_eq!(rig.prism.calls(), vec![Call::Next]);
+
+        // Nothing chosen, nothing sent.
+        assert_eq!(rig.transport.route_with(|_| None), Ok(None));
+        assert_eq!(rig.prism.calls(), vec![Call::Next]);
+        assert!(rig
+            .transport
+            .route_with(|_| Some(Command::Volume(f32::NAN)))
+            .is_err());
     }
 
     #[test]

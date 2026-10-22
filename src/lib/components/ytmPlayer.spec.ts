@@ -228,16 +228,14 @@ describe('transport strip with YouTube Music', () => {
     expect(target.querySelector('.heart')).not.toBeNull();
   });
 
-  it('seeking goes through ytmControl', async () => {
+  it('seeking goes through the transport', async () => {
     show(TransportStrip);
     await settle();
     const slider = target.querySelector<HTMLElement>('[role="slider"][aria-label="Position"]')!;
     slider.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
     await settle();
-    const seek = calls('ytm_control').find((c) => (c[1] as { action: string }).action === 'seek');
-    expect(seek).toBeDefined();
-    expect((seek![1] as { positionMs: number }).positionMs).toBe(65_000);
-    expect(calls('player_seek')).toHaveLength(0);
+    expect(calls('player_seek')).toEqual([['player_seek', { ms: 65_000 }]]);
+    expect(ytm.state.positionMs).toBe(65_000);
   });
 
   it('next and previous go through the player commands', async () => {

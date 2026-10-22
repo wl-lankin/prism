@@ -427,18 +427,14 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
             }
         })
     });
-    // Before any YouTube Music view exists: a profile a sign-out could not remove.
-    if cfg!(windows) {
-        if let Err(err) = ytm::view::remove_pending(&data_dir) {
-            eprintln!("removing the old YouTube Music data failed: {err}");
-        }
-    }
     // Debug builds with `PRISM_YTM_URL`: the view loads the fake page instead.
     ytm::dev::activate(app.handle());
     let ytm_view = Arc::new(ytm::view::YtmView::new(
         Arc::new(ytm::view::TauriHost::new(handle.clone(), data_dir.clone())),
         Arc::clone(&ytm),
     ));
+    // A store a sign-out could not remove.
+    ytm_view.remove_left_behind();
     app.manage(AppState {
         ytm,
         ytm_view,
@@ -606,7 +602,6 @@ pub fn run() {
             commands::ytm_report,
             commands::ytm_show,
             commands::ytm_hide,
-            commands::ytm_control,
             commands::ytm_state,
             commands::ytm_sign_in,
             commands::ytm_sign_out,

@@ -24,7 +24,7 @@ use tauri::{AppHandle, Manager};
 
 use crate::library::model::Track;
 use crate::player::{is_live, EventSink, PlayerEvent, PlayerState, PlayerStatus};
-use crate::shell::transport::{Active, Transport};
+use crate::shell::transport::{Active, Command, Transport};
 use crate::ytm::state::{YtmState, YtmStatus};
 use crate::AppState;
 
@@ -215,14 +215,28 @@ pub fn media_action(
     }
 }
 
-/// Sends a media key's action through the transport, to the active player.
-pub fn apply(transport: &Transport, action: Action) -> Result<(), String> {
-    match action {
-        Action::Toggle => transport.toggle(),
-        Action::Next => transport.next(),
-        Action::Prev => transport.prev(),
-        Action::Seek(ms) => transport.seek(ms),
+impl Action {
+    fn command(self) -> Command {
+        match self {
+            Action::Toggle => Command::Toggle,
+            Action::Next => Command::Next,
+            Action::Prev => Command::Prev,
+            Action::Seek(ms) => Command::Seek(ms),
+        }
     }
+}
+
+/// Maps a media key for the active player and sends it through the transport to that same
+/// player (the active player is read once). `state` gives each player's state when asked.
+pub fn apply(
+    transport: &Transport,
+    event: &MediaControlEvent,
+    state: impl FnOnce() -> (PlayerState, YtmState),
+) -> Result<Option<Active>, String> {
+    transport.route_with(|active| {
+        let (prism, ytm) = state();
+        media_action(event, active, &prism, &ytm).map(Action::command)
+    })
 }
 
 /// The controls show YouTube Music while it is active and has a song loaded (an idle or
@@ -633,12 +647,8 @@ fn create(app: &AppHandle, hwnd: Option<usize>) -> Option<MediaControls> {
             let Some(state) = handle.try_state::<AppState>() else {
                 return;
             };
-            let active = state.transport.active();
-            let action = media_action(&event, active, &state.player.state(), &state.ytm.state());
-            let Some(action) = action else {
-                return;
-            };
-            if let Err(err) = apply(&state.transport, action) {
+            let states = || (state.player.state(), state.ytm.state());
+            if let Err(err) = apply(&state.transport, &event, states) {
                 eprintln!("a media key could not be applied: {err}");
             }
         }));
@@ -1224,17 +1234,22 @@ mod tests {
         use crate::ytm::state::YtmAction;
 
         let rig = Rig::new();
-        apply(&rig.transport, Action::Toggle).unwrap();
-        apply(&rig.transport, Action::Seek(5_000)).unwrap();
+        let prism = state(PlayerStatus::Playing, 1_000);
+        let page = ytm(YtmStatus::Playing);
+        let states = || (prism.clone(), page.clone());
+        let at = |ms| MediaControlEvent::SetPosition(MediaPosition(Duration::from_millis(ms)));
+        let press = |event: MediaControlEvent| apply(&rig.transport, &event, states);
+        assert_eq!(press(MediaControlEvent::Toggle), Ok(Some(Active::Prism)));
+        assert_eq!(press(at(5_000)), Ok(Some(Active::Prism)));
         assert_eq!(rig.prism.calls(), vec![Call::Toggle, Call::Seek(5_000)]);
         rig.ytm_plays();
-        for action in [
-            Action::Toggle,
-            Action::Next,
-            Action::Prev,
-            Action::Seek(7_000),
+        for event in [
+            MediaControlEvent::Toggle,
+            MediaControlEvent::Next,
+            MediaControlEvent::Previous,
+            at(7_000),
         ] {
-            apply(&rig.transport, action).unwrap();
+            assert_eq!(press(event), Ok(Some(Active::Ytm)));
         }
         assert_eq!(
             rig.ytm.sent(),
@@ -1246,6 +1261,10 @@ mod tests {
             ]
         );
         assert_eq!(rig.prism.calls().len(), 2);
+
+        // Mapped from the page's state: a Play while it plays does nothing.
+        assert_eq!(press(MediaControlEvent::Play), Ok(None));
+        assert_eq!(rig.ytm.sent().len(), 4);
     }
 
     #[test]

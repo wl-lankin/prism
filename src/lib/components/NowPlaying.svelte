@@ -267,7 +267,7 @@
         </p>
         <div class="source">
           <span class="quality" style="--dot:var(--src-youtube)" title={t('ytm.noHeart')}>
-            <span class="qtext">{t('ytm.source')}</span>
+            <span class="qtext">{t('source.youtube')}</span>
           </span>
         </div>
       </header>

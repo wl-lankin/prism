@@ -1,4 +1,4 @@
-import { onYtmState, ytmControl, ytmHide, ytmShow, ytmSignIn, ytmSignOut, ytmState } from '../ipc';
+import { onYtmState, ytmHide, ytmShow, ytmSignIn, ytmSignOut, ytmState } from '../ipc';
 import type { YtmRect, YtmState } from '../types';
 
 const IDLE: YtmState = {
@@ -85,15 +85,6 @@ export function setOverlayOpen(open: boolean): void {
   } else if (ytm.hiddenForOverlay) {
     ytm.hiddenForOverlay = false;
     if (wanted) send(wanted);
-  }
-}
-
-/** Sends a transport word (`toggle`, `play`, `pause`, `next`, `prev`) to the page. */
-export async function control(action: string): Promise<void> {
-  try {
-    await ytmControl(action);
-  } catch (err) {
-    console.error('controlling YouTube Music failed', err);
   }
 }
 

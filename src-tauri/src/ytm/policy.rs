@@ -141,10 +141,7 @@ pub fn decide(url: &Url, from: From) -> Decision {
 /// [`decide`] for the view. `dev_page` is the fake page of a debug run (`dev::page()`, always
 /// `None` in release builds): its exact origin stays as well.
 pub fn decide_view(url: &Url, dev_page: Option<&Url>) -> Decision {
-    let own = dev_page.is_some_and(|page| {
-        url.origin() == page.origin() && url.username().is_empty() && url.password().is_none()
-    });
-    if own {
+    if super::dev::on_page(url, dev_page) {
         Decision::Stay
     } else {
         decide(url, From::View)
