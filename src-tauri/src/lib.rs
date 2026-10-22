@@ -433,6 +433,8 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
             eprintln!("removing the old YouTube Music data failed: {err}");
         }
     }
+    // Debug builds with `PRISM_YTM_URL`: the view loads the fake page instead.
+    ytm::dev::activate(app.handle());
     let ytm_view = Arc::new(ytm::view::YtmView::new(
         Arc::new(ytm::view::TauriHost::new(handle.clone(), data_dir.clone())),
         Arc::clone(&ytm),

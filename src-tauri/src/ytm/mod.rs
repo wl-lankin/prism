@@ -6,10 +6,14 @@
 //! volume sets one number, formatted by Rust, before its snippet runs.
 
 pub mod covers;
+pub mod dev;
 pub mod policy;
 pub mod report;
 pub mod signin;
 pub mod state;
+#[cfg(test)]
+#[path = "testpage/server.rs"]
+mod testpage;
 pub mod view;
 
 use std::sync::{Arc, Mutex, MutexGuard};

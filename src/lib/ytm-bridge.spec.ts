@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import source from '../../src-tauri/src/ytm/bridge.js?raw';
+import fakePage from '../../src-tauri/src/ytm/testpage/index.html?raw';
 
 type Report = Record<string, unknown>;
 type FakeWindow = EventTarget & Record<string, unknown>;
@@ -417,4 +418,32 @@ it('works_wrapped_in_a_block', () => {
   const dev = fakeWindow();
   new Function('window', 'location', 'navigator', `{ const ALLOW_DEV_HOST = true;\n${source}\n}`)(dev, { host: '127.0.0.1:9', hostname: '127.0.0.1' }, { mediaSession: session });
   expect(dev.__prismBridge).toBe(true);
+});
+
+it('the_fake_dev_page_satisfies_the_bridge', () => {
+  const page = new DOMParser().parseFromString(fakePage, 'text/html');
+  page.querySelectorAll('script').forEach((script) => script.remove());
+  document.body.innerHTML = page.body.innerHTML;
+  let nexts = 0;
+  document.querySelector('ytmusic-player-bar .next-button')?.addEventListener('click', () => nexts++);
+  session.metadata = { title: 'Demo Song 1', artist: 'Demo Artist 1', album: 'Demo Album 1' };
+  const dev = { host: '127.0.0.1:4100', hostname: '127.0.0.1' };
+
+  const wrapped = (flag: boolean) => `{ const ALLOW_DEV_HOST = ${flag};\n${source}\n}`;
+  new Function('window', 'location', 'navigator', wrapped(false))(win, dev, { mediaSession: session });
+  expect(reports).toHaveLength(0);
+
+  const w = fakeWindow();
+  win = w;
+  new Function('window', 'location', 'navigator', wrapped(true))(w, dev, { mediaSession: session });
+  expect(states().at(-1)).toMatchObject({
+    available: true,
+    playing: false,
+    title: 'Demo Song 1',
+    artist: 'Demo Artist 1',
+    canNext: true,
+    canPrev: true,
+  });
+  command('next');
+  expect(nexts).toBe(1);
 });

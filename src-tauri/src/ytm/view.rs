@@ -383,7 +383,7 @@ pub(crate) fn open_outside(app: &AppHandle, url: &Url) {
 /// The view's navigation and new-window decisions, with their effects. Runs on the main
 /// thread inside the web view's callback, so the effects run later, elsewhere.
 fn act(app: &AppHandle, data_dir: &Path, url: &Url) -> bool {
-    match policy::decide(url, From::View) {
+    match policy::decide_view(url, super::dev::page()) {
         Decision::Stay => true,
         Decision::SignIn => {
             if may_hand_off(app, From::View) {
@@ -430,7 +430,12 @@ impl TauriHost {
     fn builder(&self) -> Result<tauri::webview::WebviewBuilder<tauri::Wry>, String> {
         use tauri::utils::config::BackgroundThrottlingPolicy;
         use tauri::webview::{NewWindowResponse, WebviewBuilder};
-        let url = Url::parse(PAGE_URL).map_err(|err| err.to_string())?;
+        // Debug builds with `PRISM_YTM_URL` only; `None` in release builds.
+        let dev_page = super::dev::page();
+        let url = match dev_page {
+            Some(page) => page.clone(),
+            None => Url::parse(PAGE_URL).map_err(|err| err.to_string())?,
+        };
         let on_navigation = {
             let (app, data_dir) = (self.app.clone(), self.data_dir.clone());
             move |url: &Url| act(&app, &data_dir, url)
@@ -440,14 +445,14 @@ impl TauriHost {
             move |url: Url, _features| {
                 // A YouTube Music page in a new window has no place to go; the rest is
                 // handed off as a navigation would be.
-                if policy::decide(&url, From::View) != Decision::Stay {
+                if policy::decide_view(&url, super::dev::page()) != Decision::Stay {
                     act(&app, &data_dir, &url);
                 }
                 NewWindowResponse::Deny
             }
         };
         let builder = WebviewBuilder::new(super::VIEW_LABEL, tauri::WebviewUrl::External(url))
-            .initialization_script(super::bridge_script(super::dev_host()))
+            .initialization_script(super::bridge_script(super::dev::bridge_flag(dev_page)))
             .background_throttling(BackgroundThrottlingPolicy::Disabled)
             .data_store_identifier(YTM_STORE)
             .on_navigation(on_navigation)
