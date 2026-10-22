@@ -73,6 +73,38 @@ pub struct AppState {
     pub transport: Arc<Transport>,
     /// Checks for, downloads and installs signed updates.
     pub update: Arc<update::UpdateService>,
+    /// Finds the lyrics of the playing track in files, Navidrome, LRCLIB and the YouTube
+    /// Music page.
+    pub lyrics: Arc<lyrics::LyricsService>,
+}
+
+/// The lyrics resolver, with LRCLIB at lrclib.net and the "Search lyrics online" setting
+/// read at every call.
+fn lyrics_service(
+    library: &Library,
+    dropped: &Arc<DroppedFiles>,
+    navidrome: &Arc<NavidromeService>,
+    ytm: &Arc<YtmService>,
+    settings: &Arc<SettingsStore>,
+) -> Arc<lyrics::LyricsService> {
+    let lrclib = match lyrics::lrclib::Lrclib::new(lyrics::lrclib::DEFAULT_BASE) {
+        Ok(client) => Some(client),
+        Err(err) => {
+            eprintln!("online lyrics are off: {err:#}");
+            None
+        }
+    };
+    let settings = Arc::clone(settings);
+    Arc::new(lyrics::LyricsService::new(
+        Arc::clone(&library.db),
+        lrclib,
+        Arc::new(lyrics::service::AppSources {
+            tracks: with_dropped(Arc::clone(dropped), library_resolver(library)),
+            navidrome: Arc::clone(navidrome),
+            ytm: Arc::clone(ytm),
+        }),
+        Arc::new(move || settings.get().lyrics_lookup),
+    ))
 }
 
 /// Starts the update service. Dev builds never check on their own (only "Check now").
@@ -476,7 +508,9 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
     // A store a sign-out could not remove.
     ytm_view.remove_left_behind();
     let update = update_service(handle.clone(), &settings);
+    let lyrics = lyrics_service(&library, &dropped, &navidrome, &ytm, &settings);
     app.manage(AppState {
+        lyrics,
         update,
         ytm,
         ytm_view,
@@ -651,6 +685,8 @@ pub fn run() {
             commands::ytm_queue_play,
             commands::ytm_sign_in,
             commands::ytm_sign_out,
+            commands::lyrics_for_track,
+            commands::lyrics_for_youtube,
             commands::update_state,
             commands::update_check,
             commands::update_restart,

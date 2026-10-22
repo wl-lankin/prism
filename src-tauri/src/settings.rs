@@ -144,6 +144,9 @@ pub struct Settings {
     pub radio_location: RadioLocation,
     /// Download updates in the background and install them on quit; off only announces them.
     pub auto_update: bool,
+    /// Ask lrclib.net for lyrics. Read by the lyrics service at every call, so it needs no
+    /// [`Change`].
+    pub lyrics_lookup: bool,
 }
 
 /// The patch keys only connect and disconnect may write.
@@ -198,6 +201,7 @@ impl Default for Settings {
             navidrome_quality: StreamQuality::Original,
             radio_location: RadioLocation::Auto,
             auto_update: true,
+            lyrics_lookup: true,
         }
     }
 }
@@ -739,6 +743,23 @@ mod tests {
         assert_eq!(settings.mini_shortcut, defaults.mini_shortcut);
         assert_eq!(settings.start_with_system, defaults.start_with_system);
         assert!(settings.auto_update, "updates install by default");
+    }
+
+    #[test]
+    fn lyrics_lookup_is_on_by_default_and_saved_as_camel_case() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let store = SettingsStore::load(&path);
+        assert!(store.get().lyrics_lookup);
+        let saved = store.set(json!({ "lyricsLookup": false })).unwrap();
+        assert!(!saved.lyrics_lookup);
+        assert!(!store.get().lyrics_lookup);
+        assert_eq!(
+            serde_json::to_value(store.get()).unwrap()["lyricsLookup"],
+            json!(false)
+        );
+        store.flush();
+        assert!(!SettingsStore::load(&path).get().lyrics_lookup);
     }
 
     #[test]

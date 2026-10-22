@@ -18,6 +18,7 @@ use crate::library::query::{self, SearchResult};
 use crate::library::scan::{lock, ScanReport};
 use crate::library::watch::{FolderWatcher, WatchState};
 use crate::library::{normalize, tauri_emitter, Library};
+use crate::lyrics::LyricsAnswer;
 use crate::navidrome::client::{NavidromeFailure, ServerInfo};
 use crate::navidrome::playlists::{self as remote_playlists, RemotePlaylist};
 use crate::navidrome::stars;
@@ -933,6 +934,27 @@ pub async fn ytm_sign_out(app: AppHandle) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || view.sign_out())
         .await
         .map_err(|err| err.to_string())
+}
+
+// Lyrics (main window only)
+
+/// Lyrics for a library, Navidrome or dropped-file track. Radio ids and unknown ids answer
+/// `none`.
+#[tauri::command]
+pub async fn lyrics_for_track(app: AppHandle, track_id: String) -> Result<LyricsAnswer, String> {
+    let service = Arc::clone(&app_state(&app)?.lyrics);
+    tauri::async_runtime::spawn_blocking(move || service.for_track(&track_id))
+        .await
+        .map_err(|err| format!("the lyrics task failed: {err}"))
+}
+
+/// Lyrics for the song YouTube Music plays now.
+#[tauri::command]
+pub async fn lyrics_for_youtube(app: AppHandle) -> Result<LyricsAnswer, String> {
+    let service = Arc::clone(&app_state(&app)?.lyrics);
+    tauri::async_runtime::spawn_blocking(move || service.for_youtube())
+        .await
+        .map_err(|err| format!("the lyrics task failed: {err}"))
 }
 
 // Updates (main window only)
