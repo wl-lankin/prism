@@ -42,6 +42,10 @@
     position: absolute;
     inset: 0 0 auto 0;
     overflow: hidden;
+    /* WebKit lets the scaled, blurred image escape `overflow: hidden` for the first frames
+       of its fade-in, painting over the sidebar (owner, 2026-10-22); paint containment
+       clips it from the first frame on. */
+    contain: paint;
     pointer-events: none;
     /* Runs from the card's top edge (behind the floating title bar, `--view-top`) and fades
        out into the list below, so it has no hard edge. Without a floating bar above it, it
