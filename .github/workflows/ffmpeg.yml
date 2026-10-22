@@ -1,0 +1,98 @@
+# Builds Prism's minimal LGPL FFmpeg for both platforms, checks it, and uploads the pair as an
+# artifact (ffmpeg-universal-apple-darwin, ffmpeg-x86_64-pc-windows-msvc) of the calling run.
+# Called by ci.yml (the tests run against these binaries) and release.yml (the installers bundle
+# them). The built files are cached by the hash of the scripts that make them, so a normal run
+# only restores the cache and re-runs the check (a few seconds).
+# The Windows pair is cross-built on Linux and only ever executed on windows-latest, by the check.
+
+name: FFmpeg
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  mac:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache the build
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: ffmpeg-build/out
+          key: ffmpeg-${{ runner.os }}-${{ hashFiles('scripts/ffmpeg-config.sh', 'scripts/build-ffmpeg.sh', 'scripts/build-ffmpeg-windows.sh') }}
+
+      - name: Build FFmpeg (universal)
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: bash scripts/build-ffmpeg.sh --no-stage
+
+      # Runs the arm64 slice. The x86_64 slice is only checked for being present.
+      - name: Check
+        run: bash scripts/check-ffmpeg.sh ffmpeg-build/out/universal-apple-darwin
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-universal-apple-darwin
+          path: |
+            ffmpeg-build/out/universal-apple-darwin/ffmpeg
+            ffmpeg-build/out/universal-apple-darwin/ffprobe
+          if-no-files-found: error
+          retention-days: 7
+
+  windows-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache the build
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: ffmpeg-build/out
+          key: ffmpeg-${{ runner.os }}-${{ hashFiles('scripts/ffmpeg-config.sh', 'scripts/build-ffmpeg.sh', 'scripts/build-ffmpeg-windows.sh') }}
+
+      - name: Build FFmpeg (Windows x64, cross-compiled)
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mingw-w64
+          bash scripts/build-ffmpeg-windows.sh --no-stage
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-x86_64-pc-windows-msvc-unchecked
+          path: |
+            ffmpeg-build/out/x86_64-pc-windows-msvc/ffmpeg.exe
+            ffmpeg-build/out/x86_64-pc-windows-msvc/ffprobe.exe
+          if-no-files-found: error
+          retention-days: 1
+
+  # The first place the .exe files run. Only a pair that passes is published as the real artifact.
+  windows:
+    needs: windows-build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ffmpeg-x86_64-pc-windows-msvc-unchecked
+          path: ffmpeg-win
+
+      - name: Check
+        shell: bash
+        run: bash scripts/check-ffmpeg.sh ffmpeg-win
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-x86_64-pc-windows-msvc
+          path: |
+            ffmpeg-win/ffmpeg.exe
+            ffmpeg-win/ffprobe.exe
+          if-no-files-found: error
+          retention-days: 7
