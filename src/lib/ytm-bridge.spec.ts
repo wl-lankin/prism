@@ -848,6 +848,7 @@ describe('lyrics', () => {
     expect(calls.map((call) => call.url)).toEqual(['/youtubei/v1/next?prettyPrint=false', '/youtubei/v1/browse?prettyPrint=false']);
     for (const call of calls) {
       expect(call.init.method).toBe('POST');
+      expect(call.init.mode).toBe('same-origin');
       expect(call.init.credentials).toBe('omit');
       expect(call.body.context).toEqual(CONTEXT);
     }
@@ -870,6 +871,40 @@ describe('lyrics', () => {
     ]);
     // No browse request without a lyrics tab.
     expect(calls.map((call) => call.url)).toEqual(['/youtubei/v1/next?prettyPrint=false', '/youtubei/v1/next?prettyPrint=false']);
+  });
+
+  // Tabs Prism cannot read (renamed page types, moved endpoints) are a shape it does not
+  // know: an error, never a miss for every song.
+  it('tabs_without_any_known_page_type_fail', async () => {
+    const tabs = (types: (string | null)[]) => ({
+      contents: {
+        singleColumnMusicWatchNextResultsRenderer: {
+          tabbedRenderer: {
+            watchNextTabbedResultsRenderer: {
+              tabs: types.map((type) => ({
+                tabRenderer: type === null ? { title: 'Up next' } : { title: 'x', endpoint: { browseEndpoint: { browseId: 'MPLYt_x', browseEndpointContextSupportedConfigs: { browseEndpointContextMusicConfig: { pageType: type } } } } },
+              })),
+            },
+          },
+        },
+      },
+    });
+    run();
+    for (const [i, types] of [[null], [null, 'MUSIC_PAGE_TYPE_LYRICS_V2', 'MUSIC_PAGE_TYPE_RELATED_V2'], []].entries()) {
+      override = (endpoint) => (endpoint === 'next' ? json(tabs(types)) : undefined);
+      await ask(i + 1);
+    }
+    // A known page type without a lyrics tab is a song without lyrics.
+    override = (endpoint) => (endpoint === 'next' ? json(tabs([null, 'MUSIC_PAGE_TYPE_TRACK_RELATED'])) : undefined);
+    await ask(9);
+    expect(lyricsReports.map((r) => [r.request, r.failed])).toEqual([
+      [1, true],
+      [2, true],
+      [3, true],
+      [9, false],
+    ]);
+    expect(lyricsReports.every((r) => r.text === null)).toBe(true);
+    expect(calls.every((call) => call.url.startsWith('/youtubei/v1/next'))).toBe(true);
   });
 
   // The tab promised lyrics, so a page without them is a shape Prism does not know: an
@@ -1000,6 +1035,21 @@ describe('lyrics', () => {
     expect((report.text as string).length).toBeGreaterThan(20 * 1024);
     expect(long.startsWith(report.text as string)).toBe(true);
     expect((report.provider as string).length).toBe(256);
+  });
+
+  it('a_cut_never_splits_a_surrogate_pair', async () => {
+    const astral = 'a'.repeat(255) + '\u{1F3B5}tail';
+    override = (endpoint) =>
+      endpoint === 'browse'
+        ? json({ contents: { sectionListRenderer: { contents: [{ musicDescriptionShelfRenderer: { description: { runs: [{ text: 'Eins' }] }, footer: { runs: [{ text: astral }] } } }] } } })
+        : undefined;
+    session.metadata!.title = astral;
+    run();
+    await ask(1);
+    expect(lyricsReports[0].provider).toBe('a'.repeat(255));
+    expect(states()[0].title).toBe('a'.repeat(255));
+    // A pair that fits whole is kept.
+    expect(lyricsReports[0].text).toBe('Eins');
   });
 
   it('gives_up_after_its_time_limit', async () => {

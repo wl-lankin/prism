@@ -1335,6 +1335,8 @@ mod tests {
         assert!(BRIDGE.contains("case 'lyrics':"));
         assert!(BRIDGE.contains("window.__prismLyricsRequest"));
         assert!(BRIDGE.contains("'/youtubei/v1/' + endpoint + '?prettyPrint=false'"));
+        assert!(BRIDGE.contains("mode: 'same-origin',"));
+        assert!(BRIDGE.contains("credentials: 'omit',"));
         // One request site, with a relative path: every request stays on the page's origin.
         assert_eq!(BRIDGE.matches("fetch(").count(), 1);
         assert!(!BRIDGE.contains("XMLHttpRequest"));

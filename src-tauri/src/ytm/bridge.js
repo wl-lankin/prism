@@ -43,6 +43,8 @@
   var TABS = ['contents', 'singleColumnMusicWatchNextResultsRenderer', 'tabbedRenderer', 'watchNextTabbedResultsRenderer', 'tabs'];
   var PAGE_TYPE = ['browseEndpointContextSupportedConfigs', 'browseEndpointContextMusicConfig', 'pageType'];
   var LYRICS_PAGE = 'MUSIC_PAGE_TYPE_TRACK_LYRICS';
+  // A tab of this type shows the tabs were read right, so a missing lyrics tab means no lyrics.
+  var RELATED_PAGE = 'MUSIC_PAGE_TYPE_TRACK_RELATED';
   var SECTIONS = ['contents', 'sectionListRenderer', 'contents'];
   var EVENTS = ['play', 'pause', 'ended', 'durationchange', 'loadedmetadata', 'seeked'];
 
@@ -72,8 +74,12 @@
   var watchedQueue = null;
   var queueObserver = null;
 
+  // A cut never leaves half a surrogate pair: Prism cannot read a report with one.
   function cap(value, max) {
-    return typeof value === 'string' ? value.slice(0, max) : '';
+    if (typeof value !== 'string') return '';
+    var text = value.slice(0, max);
+    var last = text.charCodeAt(text.length - 1);
+    return last >= 0xd800 && last <= 0xdbff ? text.slice(0, -1) : text;
   }
 
   function find(selector, root) {
@@ -422,20 +428,30 @@
       });
   }
 
-  // The lyrics tab's browse id; null when the song has no lyrics tab or it cannot be opened.
+  // The lyrics tab's browse id. Null when the song has no lyrics: an unselectable tab, or
+  // tabs of known types without a lyrics one. Tabs of no known type are a shape this bridge
+  // does not know (a failure, never a miss).
   function lyricsBrowseId(next) {
     var tabs = at(next, TABS);
     if (!Array.isArray(tabs)) throw new Error('shape');
+    var known = false;
     for (var i = 0; i < tabs.length; i++) {
       var tab = tabs[i] && tabs[i].tabRenderer;
       if (!tab || typeof tab !== 'object') continue;
+      // Skipped before its endpoint is read, as ytmusicapi does; it usually has none.
+      if (Object.prototype.hasOwnProperty.call(tab, 'unselectable')) {
+        known = true;
+        continue;
+      }
       var browse = at(tab, ['endpoint', 'browseEndpoint']);
-      if (at(browse, PAGE_TYPE) !== LYRICS_PAGE) continue;
-      if (Object.prototype.hasOwnProperty.call(tab, 'unselectable')) return null;
+      var type = at(browse, PAGE_TYPE);
+      if (type === RELATED_PAGE) known = true;
+      if (type !== LYRICS_PAGE) continue;
       var id = browse.browseId;
       if (typeof id !== 'string' || !BROWSE_ID.test(id)) throw new Error('shape');
       return id;
     }
+    if (!known) throw new Error('shape');
     return null;
   }
 
