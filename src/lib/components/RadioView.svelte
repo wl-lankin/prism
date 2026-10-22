@@ -24,6 +24,7 @@
     runSearch,
     searchMore,
   } from '../stores/radio.svelte';
+  import EmptyArt from './EmptyArt.svelte';
   import Icon from './Icon.svelte';
   import Segmented from './Segmented.svelte';
   import Select from './Select.svelte';
@@ -144,7 +145,7 @@
       <p class="note" role="status">{t('radio.near.loading')}</p>
     {:else if nearEmpty}
       <div class="empty">
-        <span class="emblem" aria-hidden="true"><Icon name="radio" size={26} /></span>
+        <div class="emblem"><EmptyArt kind="stations" /></div>
         <p class="lead">{radio.near.error ? t('radio.error.unreachable') : t('radio.near.empty')}</p>
         <button type="button" class="btn ghost" onclick={() => go('settings', 'radio')}>{t('sourceEmpty.openSettings')}</button>
       </div>
@@ -195,7 +196,10 @@
     {#if radio.search.error}
       <p class="note error" role="alert">{t('radio.error.unreachable')}</p>
     {:else if filtered && !waiting && !radio.search.loading && radio.search.stations.length === 0}
-      <p class="note">{t('radio.search.empty')}</p>
+      <div class="blank">
+        <div class="illus"><EmptyArt kind="search" accent="var(--src-radio)" /></div>
+        <p class="note">{t('radio.search.empty')}</p>
+      </div>
     {/if}
     <StationList stations={radio.search.stations} />
     {#if radio.search.more}
@@ -207,7 +211,10 @@
     {/if}
   {:else}
     {#if radio.saved.favorites.length === 0 && radio.saved.recent.length === 0}
-      <p class="note">{t('radio.saved.empty')}</p>
+      <div class="blank">
+        <div class="illus"><EmptyArt kind="stations" /></div>
+        <p class="note">{t('radio.saved.empty')}</p>
+      </div>
     {/if}
     {#if radio.saved.favorites.length > 0}
       <h2>{t('radio.saved.favorites')}</h2>
@@ -379,14 +386,16 @@
   }
 
   .emblem {
-    width: 64px;
-    height: 64px;
-    display: grid;
-    place-items: center;
-    margin-bottom: 20px;
-    border-radius: 50%;
-    color: var(--src-radio);
-    background: radial-gradient(circle, color-mix(in srgb, var(--src-radio) 22%, transparent) 0%, transparent 70%);
+    margin-bottom: 16px;
+  }
+
+  /* Search and saved without results: the art over the note, the back slab on the note's edge. */
+  .blank {
+    padding-top: 8px;
+  }
+
+  .illus {
+    margin: 0 0 10px -20px;
   }
 
   .lead {

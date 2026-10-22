@@ -1,10 +1,11 @@
 <script lang="ts">
   import { open } from '@tauri-apps/plugin-dialog';
+  import { sentences } from '../format';
   import { lang, t } from '../i18n';
   import { libraryAddFolder } from '../ipc';
   import { library, reloadLibrary } from '../stores/library.svelte';
+  import EmptyArt from './EmptyArt.svelte';
   import Icon from './Icon.svelte';
-  import PrismIllustration from './PrismIllustration.svelte';
 
   /** Shown while the library has no tracks: one action, adding a music folder, and the scan
    *  progress right under it. `compact`: a left-aligned section under other Home content
@@ -45,11 +46,11 @@
       <h2>{t('library.emptyTitle')}</h2>
     {:else}
       <div class="mark">
-        <PrismIllustration width={200} />
+        <EmptyArt kind="library" />
       </div>
       <h1>{t('library.emptyTitle')}</h1>
     {/if}
-    <p class="lead">{t('library.emptyLead')}</p>
+    <p class="lead">{#each sentences(t('library.emptyLead')) as sentence, i (i)}<span>{sentence} </span>{/each}</p>
 
     <button type="button" class="btn primary" disabled={busy} onclick={add}>
       <Icon name="folderAdd" size={18} />
@@ -90,9 +91,8 @@
     text-align: center;
   }
 
-  /* The logo sits on a soft pool of the spectrum, the one bit of color on this screen. */
   .mark {
-    margin-bottom: 30px;
+    margin-bottom: 18px;
   }
 
   h1 {
@@ -109,6 +109,11 @@
     line-height: 1.6;
     color: var(--text-dim);
     text-wrap: pretty;
+  }
+
+  /* One sentence per line (owner, 2026-10-21). */
+  .lead span {
+    display: block;
   }
 
   .progress {

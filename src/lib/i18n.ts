@@ -510,7 +510,7 @@ const de: Record<Key, string> = {
   'sourceEmpty.addFolder': 'Musikordner hinzufügen',
   'sourceEmpty.connectTitle': 'Verbinde deinen Navidrome-Server',
   'sourceEmpty.connectLead':
-    'Melde dich einmal an, und Prism führt einen Index deines Servers. So kannst du ihn auch offline durchstöbern und durchsuchen.',
+    'Melde dich einmal an, und Prism legt einen Index deines Servers an. So kannst du ihn auch offline durchstöbern und durchsuchen.',
   'sourceEmpty.openSettings': 'Einstellungen öffnen',
   'sourceEmpty.syncTitle': 'Deine Navidrome-Mediathek wird abgeglichen',
   'sourceEmpty.syncLead': 'Deine Musik erscheint hier, sobald sie ankommt. Beim ersten Mal dauert eine große Mediathek ein paar Minuten.',

@@ -5,6 +5,7 @@
   import { player } from '../stores/player.svelte';
   import { createPlaylist, playlists, remoteSeed, suggestName } from '../stores/playlists.svelte';
   import { saveScroll, savedScroll } from '../scroll';
+  import EmptyArt from './EmptyArt.svelte';
   import Icon from './Icon.svelte';
   import PlaylistCover from './PlaylistCover.svelte';
   import SourceBadge from './SourceBadge.svelte';
@@ -65,11 +66,7 @@
     <!-- The first load takes a moment; nothing flashes meanwhile. -->
   {:else if list.length === 0}
     <div class="empty">
-      <div class="stack" aria-hidden="true">
-        <span class="sheet s1"></span>
-        <span class="sheet s2"></span>
-        <span class="sheet s3"><Icon name="playlists" size={26} /></span>
-      </div>
+      <div class="illus"><EmptyArt kind="playlists" /></div>
       <h2>{remote.length ? t('playlists.emptyLocal') : t('playlists.empty')}</h2>
       <p class="lead">{t('playlists.emptyLead')}</p>
       <button type="button" class="btn primary" disabled={creating} onclick={newPlaylist}>
@@ -332,47 +329,15 @@
     text-overflow: ellipsis;
   }
 
-  /* No playlists: three sheets fanned out, an invitation to start the first. */
+  /* No playlists: an invitation to start the first. */
   .empty {
     max-width: 440px;
     padding: 20px 0 12px;
   }
 
-  .stack {
-    position: relative;
-    width: 92px;
-    height: 84px;
-    margin-bottom: 22px;
-  }
-
-  .sheet {
-    position: absolute;
-    left: 14px;
-    top: 6px;
-    width: 64px;
-    height: 64px;
-    border-radius: 12px;
-    background: linear-gradient(145deg, #2a2a31, #1a1a1f);
-    box-shadow:
-      inset 0 0 0 1px rgba(255, 255, 255, 0.07),
-      0 12px 24px -12px rgba(0, 0, 0, 0.9);
-  }
-
-  .s1 {
-    transform: rotate(-12deg) translate(-10px, 4px);
-    background: linear-gradient(145deg, color-mix(in srgb, var(--spec-4) 22%, #1f1f25), #18181d);
-  }
-
-  .s2 {
-    transform: rotate(9deg) translate(12px, 2px);
-    background: linear-gradient(145deg, color-mix(in srgb, var(--spec-3) 18%, #1f1f25), #18181d);
-  }
-
-  .s3 {
-    display: grid;
-    place-items: center;
-    color: var(--text);
-    background: linear-gradient(145deg, color-mix(in srgb, var(--spec-1) 24%, #26262d), #1b1b20);
+  /* The tilted back slab starts about 20 px into the artboard; pull it back to the text edge. */
+  .illus {
+    margin: 0 0 14px -20px;
   }
 
   h2 {
