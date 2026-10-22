@@ -115,6 +115,18 @@ afterEach(() => {
   document.body.innerHTML = '';
 });
 
+it('hides_the_page_player_bar_but_still_uses_its_buttons', () => {
+  play(true);
+  run();
+  const style = document.getElementById('prism-hide-bar');
+  expect(style?.textContent).toContain('ytmusic-player-bar{visibility:hidden');
+  // Once only, however often the heartbeat runs.
+  vi.advanceTimersByTime(3000);
+  expect(document.querySelectorAll('#prism-hide-bar')).toHaveLength(1);
+  // The hidden bar still answers the bridge.
+  expect(reports[0]).toMatchObject({ available: true, canNext: true });
+});
+
 it('reports_metadata_and_play_state', () => {
   play(true);
   (video as HTMLVideoElement).currentTime = 12.34;

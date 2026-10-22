@@ -25,7 +25,7 @@ vi.mock('@tauri-apps/api/event', () => ({
 const invoke = vi.fn();
 vi.mock('@tauri-apps/api/core', () => ({ invoke: (...args: unknown[]) => invoke(...args) }));
 
-const { ytm, reportRect, hideView, signIn, signOut, initYtm, setOverlayOpen } = await import('./ytm.svelte');
+const { ytm, reportRect, hideView, signIn, signOut, initYtm, setOverlayOpen, applyState } = await import('./ytm.svelte');
 const { player, initPlayer } = await import('./player.svelte');
 const { openOverlay, closeOverlay, anyOverlay, setOverlayListener } = await import('./overlays.svelte');
 // YouTubeView sets this while it is mounted; here the store is driven without it.
@@ -74,6 +74,22 @@ afterEach(async () => {
   ytm.state = idle;
   player.active = 'prism';
   vi.unstubAllGlobals();
+});
+
+it('the drawn position runs on between reports while playing, and stops when paused', () => {
+  vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'performance'] });
+  applyState({ ...idle, status: 'playing', positionMs: 10_000, durationMs: 60_000 });
+  expect(ytm.positionMs).toBe(10_000);
+  vi.advanceTimersByTime(500);
+  expect(ytm.positionMs).toBeGreaterThanOrEqual(10_400);
+  expect(ytm.positionMs).toBeLessThanOrEqual(10_500);
+  // Never past the end.
+  vi.advanceTimersByTime(120_000);
+  expect(ytm.positionMs).toBe(60_000);
+  applyState({ ...idle, status: 'paused', positionMs: 20_000, durationMs: 60_000 });
+  vi.advanceTimersByTime(1000);
+  expect(ytm.positionMs).toBe(20_000);
+  vi.useRealTimers();
 });
 
 it('rect_reports_are_throttled_to_frames', () => {

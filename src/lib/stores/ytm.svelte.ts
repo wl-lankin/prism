@@ -21,7 +21,39 @@ export const ytm = $state({
   state: { ...IDLE } as YtmState,
   shown: false,
   hiddenForOverlay: false,
+  /** The position to draw: the page reports once a second, so while it plays this runs on
+   *  between reports instead of jumping (owner, 2026-10-22). */
+  positionMs: 0,
 });
+
+/** How often the drawn position moves on while the page plays. */
+const TICK_MS = 100;
+let base = { positionMs: 0, at: 0 };
+let ticker: ReturnType<typeof setInterval> | undefined;
+
+function tick(): void {
+  const { durationMs } = ytm.state;
+  const now = base.positionMs + (performance.now() - base.at);
+  ytm.positionMs = durationMs > 0 ? Math.min(now, durationMs) : now;
+}
+
+/** Takes a state from the page and keeps the drawn position running while it plays. */
+export function applyState(state: YtmState): void {
+  ytm.state = state;
+  moveTo(state.positionMs);
+}
+
+/** Puts the drawn position at `ms` now (a report, or a seek by the user). */
+export function moveTo(ms: number): void {
+  base = { positionMs: ms, at: performance.now() };
+  ytm.positionMs = ms;
+  if (ytm.state.status === 'playing') {
+    ticker ??= setInterval(tick, TICK_MS);
+  } else if (ticker !== undefined) {
+    clearInterval(ticker);
+    ticker = undefined;
+  }
+}
 
 /** The latest rect the view asked for, and the one the backend has. */
 let wanted: YtmRect | null = null;
@@ -128,7 +160,7 @@ export async function initYtm(): Promise<() => void> {
     keep(
       await onYtmState((state) => {
         heard = true;
-        ytm.state = state;
+        applyState(state);
       }),
     );
   } catch (err) {
@@ -136,7 +168,7 @@ export async function initYtm(): Promise<() => void> {
   }
   try {
     const state = await ytmState();
-    if (!heard && !stopped && state) ytm.state = state;
+    if (!heard && !stopped && state) applyState(state);
   } catch (err) {
     console.error('loading the YouTube Music state failed', err);
   }

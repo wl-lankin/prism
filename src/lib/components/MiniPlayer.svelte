@@ -170,7 +170,7 @@
   const mode: RingMode = $derived((yt ? idle : status === 'idle') ? 'flow' : status === 'playing' ? 'pause' : 'play');
   const progress = $derived(
     yt
-      ? ytm.state.durationMs > 0 ? ytm.state.positionMs / ytm.state.durationMs : 0
+      ? ytm.state.durationMs > 0 ? ytm.positionMs / ytm.state.durationMs : 0
       : player.durationMs > 0 ? player.positionMs / player.durationMs : 0,
   );
   const live = $derived(!yt && !idle && isLive(track));

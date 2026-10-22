@@ -46,7 +46,7 @@ const { default: TrackMenu } = await import('./TrackMenu.svelte');
 const { default: StationMenu } = await import('./StationMenu.svelte');
 const { default: FlowMenu } = await import('./FlowMenu.svelte');
 const { player } = await import('../stores/player.svelte');
-const { ytm, reportRect, hideView, setOverlayOpen } = await import('../stores/ytm.svelte');
+const { ytm, reportRect, hideView, setOverlayOpen, applyState } = await import('../stores/ytm.svelte');
 const { overlayOpen, setOverlayListener } = await import('../stores/overlays.svelte');
 const { queuePanel } = await import('../stores/queue.svelte');
 const { notice } = await import('../stores/notice.svelte');
@@ -93,7 +93,7 @@ beforeEach(() => {
   queuePanel.open = false;
   player.active = 'ytm';
   Object.assign(player, { status: 'idle', track: null, positionMs: 0, durationMs: 0, queueLength: 0 });
-  ytm.state = { ...playing };
+  applyState({ ...playing });
   target = document.createElement('div');
   document.body.append(target);
 });
@@ -235,11 +235,12 @@ describe('transport strip with YouTube Music', () => {
     slider.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
     await settle();
     expect(calls('player_seek')).toEqual([['player_seek', { ms: 65_000 }]]);
-    expect(ytm.state.positionMs).toBe(65_000);
+    // The drawn position jumps at once; the page's own report follows.
+    expect(ytm.positionMs).toBe(65_000);
   });
 
   it('next and previous go through the player commands', async () => {
-    ytm.state = { ...playing, canPrev: true };
+    applyState({ ...playing, canPrev: true });
     show(TransportStrip);
     await settle();
     byLabel('Next')!.click();
@@ -249,7 +250,7 @@ describe('transport strip with YouTube Music', () => {
   });
 
   it('shows no seek value without a duration', async () => {
-    ytm.state = { ...playing, durationMs: 0, positionMs: 0 };
+    applyState({ ...playing, durationMs: 0, positionMs: 0 });
     show(TransportStrip);
     await settle();
     expect(target.querySelector<HTMLElement>('[role="slider"][aria-label="Position"]')?.getAttribute('aria-disabled')).toBe('true');

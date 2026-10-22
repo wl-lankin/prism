@@ -2,7 +2,7 @@
   import { formatDuration, isLive, liveLines, qualityLabel, streamedFrom, ytmIdle, ytmLines } from '../format';
   import { t } from '../i18n';
   import { playerNext, playerPrev, playerSeek, playerSetVolume } from '../ipc';
-  import { ytm } from '../stores/ytm.svelte';
+  import { moveTo, ytm } from '../stores/ytm.svelte';
   import { back, go, nav } from '../stores/nav.svelte';
   import { player } from '../stores/player.svelte';
   import { currentTitle } from '../stores/radio.svelte';
@@ -43,7 +43,7 @@
 
   // While the seek bar is dragged it shows the drag position, not the engine's.
   let seeking = $state<number | null>(null);
-  const position = $derived(seeking ?? (yt ? ytm.state.positionMs : player.positionMs));
+  const position = $derived(seeking ?? (yt ? ytm.positionMs : player.positionMs));
 
   let lastVolume = 0.8;
   const muted = $derived(player.volume <= 0.001);
@@ -92,7 +92,7 @@
         oncommit={(v) => {
           seeking = null;
           // The backend sends the seek to whichever player is active.
-          if (yt) ytm.state.positionMs = v * duration;
+          if (yt) moveTo(v * duration);
           else player.positionMs = v * duration;
           playerSeek(v * duration).catch(report('seeking'));
         }}

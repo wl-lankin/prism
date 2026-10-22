@@ -304,7 +304,7 @@
   const progress = $derived(
     yt
       ? ytm.state.durationMs > 0
-        ? ytm.state.positionMs / ytm.state.durationMs
+        ? ytm.positionMs / ytm.state.durationMs
         : 0
       : player.durationMs > 0
         ? player.positionMs / player.durationMs

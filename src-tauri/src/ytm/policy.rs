@@ -59,6 +59,22 @@ const QUIET_DOMAINS: [&str; 6] = [
 /// the YouTube redirects that carry the session over).
 const SIGN_IN_DOMAINS: [&str; 4] = ["google.com", "youtube.com", "gstatic.com", "googleapis.com"];
 
+/// A host under one of Google's country domains (`google.de`, `google.co.uk`,
+/// `google.com.au`). Google sets its sign-in cookies there too at the end of a sign-in; a
+/// blocked hop ends on "Something went wrong" (owner check, 2026-10-22).
+fn under_google_country(host: &str) -> bool {
+    let labels: Vec<&str> = host.split('.').collect();
+    let Some(at) = labels.iter().rposition(|label| *label == "google") else {
+        return false;
+    };
+    let country = |label: &str| label.len() == 2 && label.bytes().all(|b| b.is_ascii_lowercase());
+    match &labels[at + 1..] {
+        [cc] => country(cc),
+        [second, cc] => matches!(*second, "co" | "com") && country(cc),
+        _ => false,
+    }
+}
+
 fn under(host: &str, domain: &str) -> bool {
     host == domain
         || host
@@ -127,7 +143,10 @@ pub fn decide(url: &Url, from: From) -> Decision {
             }
         }
         From::SignIn => {
-            if default_port && SIGN_IN_DOMAINS.iter().any(|domain| under(&host, domain)) {
+            if default_port
+                && (SIGN_IN_DOMAINS.iter().any(|domain| under(&host, domain))
+                    || under_google_country(&host))
+            {
                 Decision::Stay
             } else if QUIET_DOMAINS.iter().any(|domain| under(&host, domain)) {
                 Decision::Block
@@ -224,6 +243,37 @@ mod tests {
         ] {
             assert!(!sign_in_done(&url(raw)), "{raw}");
         }
+    }
+
+    #[test]
+    fn sign_in_keeps_google_country_domains() {
+        for raw in [
+            "https://accounts.google.de/accounts/SetSID?ssdc=1",
+            "https://www.google.de/",
+            "https://accounts.google.co.uk/accounts/SetSID",
+            "https://accounts.google.com.au/accounts/SetSID",
+            "https://ACCOUNTS.GOOGLE.DE/accounts/SetSID",
+        ] {
+            assert_eq!(decide(&url(raw), From::SignIn), Decision::Stay, "{raw}");
+        }
+        for raw in [
+            "https://google.de.example.org/",
+            "https://accounts.google.evil/",
+            "https://accounts.google.co.evil.uk/",
+            "https://notgoogle.de/",
+            "https://accounts.google.de:8443/",
+            "http://accounts.google.de/",
+        ] {
+            assert_ne!(decide(&url(raw), From::SignIn), Decision::Stay, "{raw}");
+        }
+        // The view still sends country sign-in pages nowhere new.
+        assert_ne!(
+            decide(
+                &url("https://accounts.google.de/accounts/SetSID"),
+                From::View
+            ),
+            Decision::Stay
+        );
     }
 
     #[test]

@@ -19,6 +19,22 @@
   var HEARTBEAT_MS = 1000;
   var EVENTS = ['play', 'pause', 'ended', 'durationchange', 'loadedmetadata', 'seeked'];
 
+  // Prism's own transport plays and steers, so the page's player bar is hidden (owner,
+  // 2026-10-22). It stays in the DOM: the bridge still reads it and clicks its buttons.
+  var HIDE_BAR_CSS =
+    'ytmusic-player-bar{visibility:hidden!important;pointer-events:none!important;' +
+    'height:0!important;min-height:0!important;overflow:hidden!important;}' +
+    'ytmusic-app-layout{--ytmusic-player-bar-height:0px!important;}';
+
+  function hideBar() {
+    var root = document.head || document.documentElement;
+    if (!root || document.getElementById('prism-hide-bar')) return;
+    var style = document.createElement('style');
+    style.id = 'prism-hide-bar';
+    style.textContent = HIDE_BAR_CSS;
+    root.appendChild(style);
+  }
+
   var lastKey = null;
   var watchedVideo = null;
   var watchedBar = null;
@@ -222,6 +238,9 @@
 
   function tick() {
     try {
+      // The script runs before the page has a head; the style goes in on the first tick
+      // that finds one.
+      hideBar();
       evaluate(true);
     } catch (e) {
       // Report nothing rather than throw into the page.
