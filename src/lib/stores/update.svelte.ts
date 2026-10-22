@@ -11,6 +11,7 @@ export const update: UpdateState = $state({
   notes: null,
   progress: null,
   lastCheck: null,
+  installsOnQuit: false,
 });
 
 /** The version the notice already announced, so a check every 6 hours does not repeat it. */
@@ -87,7 +88,7 @@ export function updateStatusText(state: UpdateState): string | null {
         ? t('update.downloading', { version })
         : t('update.downloadingPercent', { version, percent: Math.round(state.progress * 100) });
     case 'ready':
-      return t('update.ready', { version });
+      return t(state.installsOnQuit ? 'update.ready' : 'update.readyRestart', { version });
     case 'failed':
       return t('update.failed');
     default:

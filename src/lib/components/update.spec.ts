@@ -2,7 +2,14 @@ import { flushSync, mount, tick, unmount } from 'svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { UpdateState } from '../types';
 
-const IDLE: UpdateState = { status: 'idle', version: null, notes: null, progress: null, lastCheck: null };
+const IDLE: UpdateState = {
+  status: 'idle',
+  version: null,
+  notes: null,
+  progress: null,
+  lastCheck: null,
+  installsOnQuit: false,
+};
 let backend: UpdateState = { ...IDLE };
 let restartFails = false;
 
@@ -88,6 +95,7 @@ const ready: UpdateState = {
   notes: 'Fixes for Testhausen\nFaster scans',
   progress: null,
   lastCheck: Date.now(),
+  installsOnQuit: true,
 };
 
 describe('update store', () => {
@@ -240,6 +248,31 @@ describe('Settings > Updates', () => {
     restart.click();
     await settle();
     expect(invoke).toHaveBeenCalledWith('update_restart', undefined);
+  });
+
+  it('says a restart installs it when quitting would not', async () => {
+    Object.assign(update, { ...ready, installsOnQuit: false });
+    await mountSettings();
+    expect(section().querySelector('.update-status')?.textContent).toBe(
+      'Prism 1.0.1 is ready. Restart Prism to install it.',
+    );
+    expect([...section().querySelectorAll('button')].some((b) => b.textContent?.trim() === 'Restart to update')).toBe(
+      true,
+    );
+    // The backend sends a new state when the setting changes.
+    const stop = await initUpdate();
+    emit({ ...ready, installsOnQuit: true });
+    expect(section().querySelector('.update-status')?.textContent).toBe(
+      'Prism 1.0.1 is ready. It installs when you quit Prism.',
+    );
+    stop();
+
+    setLang('de');
+    Object.assign(update, { ...ready, installsOnQuit: false });
+    flushSync();
+    expect(section().querySelector('.update-status')?.textContent).toBe(
+      'Prism 1.0.1 ist bereit. Starte Prism neu, um es zu installieren.',
+    );
   });
 
   it('speaks German', async () => {

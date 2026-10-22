@@ -198,6 +198,8 @@ export interface UpdateState {
   progress: number | null;
   /** ms since the epoch. */
   lastCheck: number | null;
+  /** Quitting installs the ready update; otherwise only "Restart to update" does. */
+  installsOnQuit: boolean;
 }
 
 /** Where "Radio near you" looks: an IP lookup, or a country (and region) the user chose. */

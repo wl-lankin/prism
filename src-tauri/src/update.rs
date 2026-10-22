@@ -52,6 +52,8 @@ pub struct UpdateState {
     pub progress: Option<f32>,
     /// When the last check finished, in ms since the epoch.
     pub last_check: Option<i64>,
+    /// Quitting installs the ready update (else only "Restart to update" does).
+    pub installs_on_quit: bool,
 }
 
 /// An update the checker found.
@@ -108,8 +110,10 @@ enum Outcome {
 enum Wake {
     /// The user asked: checks even when the probe says offline, and downloads what it finds.
     Check,
-    /// "Install updates automatically" was turned on: fetch an update that only was announced.
-    Download,
+    /// "Install updates automatically" changed: fetch an update that only was announced (when
+    /// on) and tell the UI whether quitting installs. Handled on the update thread because
+    /// the change arrives while the settings are locked, and reading the flag locks them.
+    AutoChanged(bool),
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -167,7 +171,7 @@ impl UpdateService {
                         Ok(Wake::Check) => {
                             service.run_check(true);
                         }
-                        Ok(Wake::Download) => service.download_announced(),
+                        Ok(Wake::AutoChanged(on)) => service.follow_auto(on),
                         Err(RecvTimeoutError::Timeout) => {
                             let wait = match service.run_check(false) {
                                 Outcome::Done => options.every,
@@ -206,9 +210,21 @@ impl UpdateService {
 
     /// Follows "Install updates automatically".
     pub fn auto_changed(&self, on: bool) {
+        self.send(Wake::AutoChanged(on));
+    }
+
+    fn follow_auto(&self, on: bool) {
         if on {
-            self.send(Wake::Download);
+            self.download_announced();
         }
+        self.set(|_| {});
+    }
+
+    /// Whether [`UpdateService::install_on_quit`] would install now.
+    fn would_install_on_quit(&self, status: UpdateStatus) -> bool {
+        status == UpdateStatus::Ready
+            && !*lock(&self.installed)
+            && (*lock(&self.asked) || (self.auto)())
     }
 
     fn send(&self, wake: Wake) {
@@ -218,9 +234,16 @@ impl UpdateService {
     }
 
     fn set(&self, change: impl FnOnce(&mut UpdateState)) {
-        let snapshot = {
+        let status = {
             let mut state = lock(&self.state);
             change(&mut state);
+            state.status
+        };
+        // Outside the state lock: the auto flag reads the settings.
+        let installs_on_quit = self.would_install_on_quit(status);
+        let snapshot = {
+            let mut state = lock(&self.state);
+            state.installs_on_quit = installs_on_quit;
             state.clone()
         };
         (self.emit)(&snapshot);
@@ -266,6 +289,7 @@ impl UpdateService {
                         notes: found.notes,
                         progress: None,
                         last_check: Some(now_ms()),
+                        installs_on_quit: false,
                     };
                 });
                 *lock(&self.asked) = by_user;
@@ -317,7 +341,7 @@ impl UpdateService {
     /// Prism is quitting: a ready update is installed now, if "Install updates automatically"
     /// is on or the user fetched it. Returns whether one was.
     pub fn install_on_quit(&self) -> bool {
-        if !(self.auto)() && !*lock(&self.asked) {
+        if !self.would_install_on_quit(self.state().status) {
             return false;
         }
         self.install(false).is_ok()
@@ -691,6 +715,7 @@ mod tests {
             notes: None,
             progress: Some(0.5),
             last_check: Some(1),
+            installs_on_quit: false,
         };
         assert_eq!(
             serde_json::to_value(&state).unwrap(),
@@ -699,9 +724,81 @@ mod tests {
                 "version": "1.0.1",
                 "notes": null,
                 "progress": 0.5,
-                "lastCheck": 1
+                "lastCheck": 1,
+                "installsOnQuit": false
             })
         );
+    }
+
+    #[test]
+    fn installs_on_quit_says_what_quitting_does() {
+        let auto = Arc::new(AtomicBool::new(true));
+        let checker = FakeChecker::answering(vec![Ok(Some(found("1.0.1")))]);
+        let h = harness_with(Arc::clone(&checker), Arc::clone(&auto));
+        assert!(!h.service.state().installs_on_quit);
+        h.service.run_check(false);
+        assert!(
+            h.service.state().installs_on_quit,
+            "downloaded with auto on"
+        );
+
+        auto.store(false, Ordering::SeqCst);
+        h.service.follow_auto(false);
+        assert!(!h.service.state().installs_on_quit);
+        assert!(!h.service.install_on_quit());
+
+        auto.store(true, Ordering::SeqCst);
+        h.service.follow_auto(true);
+        assert!(h.service.state().installs_on_quit);
+        assert!(h.service.install_on_quit());
+    }
+
+    #[test]
+    fn installs_on_quit_is_true_for_what_the_user_fetched() {
+        let checker = FakeChecker::answering(vec![Ok(Some(found("1.0.1"))), Ok(None)]);
+        let h = harness(Arc::clone(&checker), false);
+        h.service.run_check(false);
+        assert_eq!(h.service.state().status, Available);
+        assert!(!h.service.state().installs_on_quit);
+        // Download (Check now) on the announced update.
+        let checker2 = FakeChecker::answering(vec![Ok(Some(found("1.0.1")))]);
+        let h2 = harness(Arc::clone(&checker2), false);
+        h2.service.run_check(true);
+        assert!(h2.service.state().installs_on_quit);
+        assert!(h2.service.install_on_quit());
+    }
+
+    /// The setting change reaches the service while the settings are locked; the new state
+    /// goes out from the update thread.
+    #[test]
+    fn changing_auto_emits_a_new_state() {
+        let auto = Arc::new(AtomicBool::new(true));
+        let flag = Arc::clone(&auto);
+        let seen: Arc<Mutex<Vec<bool>>> = Arc::default();
+        let record = Arc::clone(&seen);
+        let checker = FakeChecker::answering(vec![Ok(Some(found("1.0.1")))]);
+        let service = UpdateService::spawn(
+            Arc::clone(&checker) as Arc<dyn Checker>,
+            Arc::new(move || flag.load(Ordering::SeqCst)),
+            Arc::new(move |state: &UpdateState| lock(&record).push(state.installs_on_quit)),
+            UpdateOptions {
+                schedule: false,
+                ..UpdateOptions::default()
+            },
+        );
+        service.check_now();
+        wait_for(&service, Ready);
+        assert_eq!(lock(&seen).last(), Some(&true));
+        // Check now counts as asked; an automatic download does not.
+        *lock(&service.asked) = false;
+        auto.store(false, Ordering::SeqCst);
+        service.auto_changed(false);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while lock(&seen).last() != Some(&false) {
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(!service.state().installs_on_quit);
     }
 
     #[test]
