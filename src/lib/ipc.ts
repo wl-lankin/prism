@@ -292,5 +292,5 @@ export const onActivePlayer = (cb: (active: ActivePlayer) => void): Promise<Unli
   listen<ActivePlayer>('transport://active', (event) => cb(event.payload));
 export const onUpdateState = (cb: (state: UpdateState) => void): Promise<UnlistenFn> =>
   listen<UpdateState>('update://state', (event) => cb(event.payload));
-export const onScanProgress =(cb: (progress: ScanProgress) => void): Promise<UnlistenFn> =>
+export const onScanProgress = (cb: (progress: ScanProgress) => void): Promise<UnlistenFn> =>
   listen<ScanProgress>('library://scan-progress', (event) => cb(event.payload));

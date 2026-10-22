@@ -22,6 +22,8 @@ pub const ENDPOINT: &str =
 
 pub const FIRST_CHECK: Duration = Duration::from_secs(60);
 pub const CHECK_EVERY: Duration = Duration::from_secs(6 * 60 * 60);
+/// After a scheduled check that was skipped (offline) or failed.
+pub const RETRY_AFTER: Duration = Duration::from_secs(15 * 60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -81,6 +83,7 @@ pub struct UpdateOptions {
     pub schedule: bool,
     pub first: Duration,
     pub every: Duration,
+    pub retry: Duration,
 }
 
 impl Default for UpdateOptions {
@@ -89,8 +92,17 @@ impl Default for UpdateOptions {
             schedule: true,
             first: FIRST_CHECK,
             every: CHECK_EVERY,
+            retry: RETRY_AFTER,
         }
     }
+}
+
+/// How a check went, for when the next scheduled one runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Outcome {
+    Done,
+    /// Skipped while offline, or the check or the download failed.
+    RetrySoon,
 }
 
 enum Wake {
@@ -121,6 +133,9 @@ pub struct UpdateService {
     state: Mutex<UpdateState>,
     /// Set once an install ran, so quitting after "Restart to update" does not install twice.
     installed: Mutex<bool>,
+    /// The found update was fetched because the user asked (Check now, Download), so it
+    /// installs on quit even with "Install updates automatically" off.
+    asked: Mutex<bool>,
     wake: Mutex<Option<Sender<Wake>>>,
 }
 
@@ -149,11 +164,16 @@ impl UpdateService {
                         return;
                     };
                     match message {
-                        Ok(Wake::Check) => service.run_check(true),
+                        Ok(Wake::Check) => {
+                            service.run_check(true);
+                        }
                         Ok(Wake::Download) => service.download_announced(),
                         Err(RecvTimeoutError::Timeout) => {
-                            service.run_check(false);
-                            due = Some(Instant::now() + options.every);
+                            let wait = match service.run_check(false) {
+                                Outcome::Done => options.every,
+                                Outcome::RetrySoon => options.retry,
+                            };
+                            due = Some(Instant::now() + wait);
                         }
                         Err(RecvTimeoutError::Disconnected) => return,
                     }
@@ -170,6 +190,7 @@ impl UpdateService {
             emit,
             state: Mutex::new(UpdateState::default()),
             installed: Mutex::new(false),
+            asked: Mutex::new(false),
             wake: Mutex::new(None),
         }
     }
@@ -205,13 +226,13 @@ impl UpdateService {
         (self.emit)(&snapshot);
     }
 
-    fn run_check(&self, by_user: bool) {
+    fn run_check(&self, by_user: bool) -> Outcome {
         let status = self.state().status;
         if matches!(status, UpdateStatus::Ready | UpdateStatus::Downloading) {
-            return;
+            return Outcome::Done;
         }
         if !by_user && !self.checker.online() {
-            return;
+            return Outcome::RetrySoon;
         }
         self.set(|state| {
             state.status = UpdateStatus::Checking;
@@ -247,10 +268,16 @@ impl UpdateService {
                         last_check: Some(now_ms()),
                     };
                 });
+                *lock(&self.asked) = by_user;
                 if download {
                     self.download();
                 }
             }
+        }
+        if self.state().status == UpdateStatus::Failed {
+            Outcome::RetrySoon
+        } else {
+            Outcome::Done
         }
     }
 
@@ -287,8 +314,12 @@ impl UpdateService {
         }
     }
 
-    /// Prism is quitting: a ready update is installed now. Returns whether one was.
+    /// Prism is quitting: a ready update is installed now, if "Install updates automatically"
+    /// is on or the user fetched it. Returns whether one was.
     pub fn install_on_quit(&self) -> bool {
+        if !(self.auto)() && !*lock(&self.asked) {
+            return false;
+        }
         self.install(false).is_ok()
     }
 
@@ -321,6 +352,36 @@ impl UpdateService {
     }
 }
 
+/// Whether a scheduled check is worth running. Only clear signs of no network count as
+/// offline: no name resolution, or every address timing out or unreachable. Any other probe
+/// error (a refused or reset connection, as behind a proxy that blocks direct routes) still
+/// runs the check, which knows the system's proxy settings better than a bare socket.
+fn probe_online(
+    addrs: std::io::Result<Vec<std::net::SocketAddr>>,
+    connect: impl Fn(&std::net::SocketAddr) -> std::io::Result<()>,
+) -> bool {
+    use std::io::ErrorKind;
+    let Ok(addrs) = addrs else {
+        return false;
+    };
+    let mut offline = true;
+    for addr in &addrs {
+        match connect(addr) {
+            Ok(()) => return true,
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    ErrorKind::TimedOut
+                        | ErrorKind::NetworkDown
+                        | ErrorKind::NetworkUnreachable
+                        | ErrorKind::HostUnreachable
+                ) => {}
+            Err(_) => offline = false,
+        }
+    }
+    !offline
+}
+
 /// The real checker: `tauri-plugin-updater` with the endpoint and the public key from
 /// `tauri.conf.json`.
 pub struct PluginChecker {
@@ -342,10 +403,12 @@ impl PluginChecker {
 impl Checker for PluginChecker {
     fn online(&self) -> bool {
         use std::net::{TcpStream, ToSocketAddrs};
-        let Ok(mut addrs) = ("github.com", 443).to_socket_addrs() else {
-            return false;
-        };
-        addrs.any(|addr| TcpStream::connect_timeout(&addr, Duration::from_secs(5)).is_ok())
+        probe_online(
+            ("github.com", 443)
+                .to_socket_addrs()
+                .map(|addrs| addrs.collect()),
+            |addr| TcpStream::connect_timeout(addr, Duration::from_secs(5)).map(drop),
+        )
     }
 
     fn check(&self) -> Result<Option<Found>, String> {
@@ -453,6 +516,10 @@ mod tests {
     }
 
     fn harness(checker: Arc<FakeChecker>, auto: bool) -> Harness {
+        harness_with(checker, Arc::new(AtomicBool::new(auto)))
+    }
+
+    fn harness_with(checker: Arc<FakeChecker>, auto: Arc<AtomicBool>) -> Harness {
         let seen: Arc<Mutex<Vec<UpdateStatus>>> = Arc::default();
         let record = Arc::clone(&seen);
         let emit: StateEmit = Arc::new(move |state: &UpdateState| {
@@ -462,7 +529,11 @@ mod tests {
             }
         });
         Harness {
-            service: UpdateService::new(checker, Arc::new(move || auto), emit),
+            service: UpdateService::new(
+                checker,
+                Arc::new(move || auto.load(Ordering::SeqCst)),
+                emit,
+            ),
             seen,
         }
     }
@@ -639,6 +710,137 @@ mod tests {
         assert!(options.schedule);
         assert_eq!(options.first, Duration::from_secs(60));
         assert_eq!(options.every, Duration::from_secs(21_600));
+        assert_eq!(options.retry, Duration::from_secs(900));
+    }
+
+    /// Scheduled checks with a long regular interval and a short retry, so only the retry
+    /// can bring a second check within the test.
+    fn spawn_scheduled(checker: &Arc<FakeChecker>) -> Arc<UpdateService> {
+        UpdateService::spawn(
+            Arc::clone(checker) as Arc<dyn Checker>,
+            Arc::new(|| true),
+            Arc::new(|_: &UpdateState| {}),
+            UpdateOptions {
+                schedule: true,
+                first: Duration::from_millis(10),
+                every: Duration::from_secs(3600),
+                retry: Duration::from_millis(20),
+            },
+        )
+    }
+
+    #[test]
+    fn a_failed_scheduled_check_retries_soon() {
+        let checker =
+            FakeChecker::answering(vec![Err("unreachable".into()), Ok(Some(found("1.0.1")))]);
+        let service = spawn_scheduled(&checker);
+        wait_for(&service, Ready);
+        assert_eq!(checker.check_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn a_failed_scheduled_download_retries_soon() {
+        let checker =
+            FakeChecker::answering(vec![Ok(Some(found("1.0.1"))), Ok(Some(found("1.0.1")))])
+                .downloads(vec![Err("signature mismatch".into()), Ok(())]);
+        let service = spawn_scheduled(&checker);
+        wait_for(&service, Ready);
+        assert_eq!(checker.download_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn a_skipped_scheduled_check_retries_soon() {
+        let checker = FakeChecker::answering(vec![Ok(Some(found("1.0.1")))]);
+        checker.offline.store(true, Ordering::SeqCst);
+        let service = spawn_scheduled(&checker);
+        std::thread::sleep(Duration::from_millis(60));
+        assert_eq!(checker.check_calls.load(Ordering::SeqCst), 0);
+        checker.offline.store(false, Ordering::SeqCst);
+        wait_for(&service, Ready);
+    }
+
+    #[test]
+    fn a_successful_scheduled_check_waits_the_full_interval() {
+        let checker = FakeChecker::answering(vec![Ok(None), Ok(None)]);
+        let service = spawn_scheduled(&checker);
+        wait_for(&service, UpToDate);
+        std::thread::sleep(Duration::from_millis(150));
+        assert_eq!(checker.check_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn outcome_says_when_to_retry() {
+        let checker = FakeChecker::answering(vec![Err("unreachable".into()), Ok(None)]);
+        let h = harness(Arc::clone(&checker), true);
+        assert_eq!(h.service.run_check(false), Outcome::RetrySoon);
+        assert_eq!(h.service.run_check(false), Outcome::Done);
+        checker.offline.store(true, Ordering::SeqCst);
+        assert_eq!(h.service.run_check(false), Outcome::RetrySoon);
+    }
+
+    #[test]
+    fn notify_only_skips_the_install_on_quit_unless_the_user_fetched_it() {
+        // Downloaded automatically, then the user turned automatic updates off.
+        let auto = Arc::new(AtomicBool::new(true));
+        let checker = FakeChecker::answering(vec![Ok(Some(found("1.0.1")))]);
+        let h = harness_with(Arc::clone(&checker), Arc::clone(&auto));
+        h.service.run_check(false);
+        assert_eq!(h.service.state().status, Ready);
+        auto.store(false, Ordering::SeqCst);
+        assert!(!h.service.install_on_quit());
+        assert!(lock(&checker.installs).is_empty());
+        // "Restart to update" still works.
+        h.service.install_for_restart().unwrap();
+        assert_eq!(*lock(&checker.installs), vec![true]);
+    }
+
+    #[test]
+    fn notify_only_installs_on_quit_what_the_user_fetched() {
+        let checker = FakeChecker::answering(vec![Ok(Some(found("1.0.1")))]);
+        let h = harness(Arc::clone(&checker), false);
+        h.service.run_check(true);
+        assert_eq!(h.service.state().status, Ready);
+        assert!(h.service.install_on_quit());
+        assert_eq!(*lock(&checker.installs), vec![false]);
+    }
+
+    fn addr() -> std::net::SocketAddr {
+        "127.0.0.1:443".parse().unwrap()
+    }
+
+    fn failing(kind: std::io::ErrorKind) -> impl Fn(&std::net::SocketAddr) -> std::io::Result<()> {
+        move |_| Err(std::io::Error::from(kind))
+    }
+
+    #[test]
+    fn probe_skips_only_on_clear_signs_of_no_network() {
+        use std::io::ErrorKind;
+        assert!(probe_online(Ok(vec![addr()]), |_| Ok(())));
+        assert!(!probe_online(
+            Ok(vec![addr()]),
+            failing(ErrorKind::TimedOut)
+        ));
+        assert!(!probe_online(
+            Ok(vec![addr()]),
+            failing(ErrorKind::NetworkUnreachable)
+        ));
+        assert!(!probe_online(
+            Err(std::io::Error::other("no such host")),
+            |_| Ok(())
+        ));
+        assert!(!probe_online(Ok(vec![]), |_| Ok(())));
+    }
+
+    #[test]
+    fn probe_errors_that_are_not_offline_still_check() {
+        use std::io::ErrorKind;
+        for kind in [
+            ErrorKind::ConnectionRefused,
+            ErrorKind::ConnectionReset,
+            ErrorKind::PermissionDenied,
+        ] {
+            assert!(probe_online(Ok(vec![addr()]), failing(kind)), "{kind:?}");
+        }
     }
 
     fn wait_for(service: &UpdateService, status: UpdateStatus) {
@@ -647,24 +849,6 @@ mod tests {
             assert!(Instant::now() < deadline, "{:?}", service.state());
             std::thread::sleep(Duration::from_millis(5));
         }
-    }
-
-    #[test]
-    fn the_thread_checks_on_schedule_and_retries_after_a_failure() {
-        let checker =
-            FakeChecker::answering(vec![Err("unreachable".into()), Ok(Some(found("1.0.1")))]);
-        let service = UpdateService::spawn(
-            Arc::clone(&checker) as Arc<dyn Checker>,
-            Arc::new(|| true),
-            Arc::new(|_: &UpdateState| {}),
-            UpdateOptions {
-                schedule: true,
-                first: Duration::from_millis(10),
-                every: Duration::from_millis(30),
-            },
-        );
-        wait_for(&service, Ready);
-        assert_eq!(checker.check_calls.load(Ordering::SeqCst), 2);
     }
 
     #[test]
@@ -678,6 +862,7 @@ mod tests {
                 schedule: false,
                 first: Duration::from_millis(1),
                 every: Duration::from_millis(1),
+                retry: Duration::from_millis(1),
             },
         );
         std::thread::sleep(Duration::from_millis(30));
