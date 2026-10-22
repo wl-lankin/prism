@@ -3,6 +3,7 @@ pub mod commands;
 pub mod db;
 pub mod flow;
 pub mod library;
+pub mod lyrics;
 pub mod media_controls;
 pub mod navidrome;
 pub mod player;
