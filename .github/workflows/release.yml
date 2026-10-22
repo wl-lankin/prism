@@ -1,0 +1,168 @@
+# Builds the installers and the signed updater artifacts and attaches them to a DRAFT GitHub
+# release. Nothing is published here: the owner reviews the draft and publishes it by hand (see
+# docs/releasing.md). Installed apps see the update once the draft is published.
+#
+# Trigger: push a tag like v1.0.0 (release) or v1.0.0-beta.1 (prerelease), or run it by hand
+# with a tag name. The bundle version always comes from src-tauri/tauri.conf.json (NSIS needs a
+# numeric version, so a beta tag still ships 1.0.0); the tag must match it up to the "-suffix".
+#
+# createUpdaterArtifacts lives in src-tauri/tauri.updater.conf.json, passed only here, because it
+# makes `tauri build` demand the signing key and source builds have none. The FFmpeg sidecars
+# come from ffmpeg.yml and are bundled through src-tauri/tauri.sidecar.conf.json.
+#
+# The installers are attached twice, with the version in the name (tauri-action) and as
+# Prism-setup.exe / Prism.dmg, so the README can link to releases/latest/download/<name>.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, e.g. v1.0.0 or v1.0.0-beta.1 (the draft is created for it)"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check tag, version and release notes
+        id: meta
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Tag '$TAG' is not like v1.0.0 or v1.0.0-beta.1"
+            exit 1
+          fi
+          version="$(jq -r .version src-tauri/tauri.conf.json)"
+          base="${TAG#v}"
+          base="${base%%-*}"
+          if [ "$base" != "$version" ]; then
+            echo "::error::Tag $TAG does not match the app version $version in src-tauri/tauri.conf.json"
+            exit 1
+          fi
+          # Fails early when CHANGELOG.md has no text for this version.
+          bash .github/release-notes.sh "$TAG" >/dev/null
+          {
+            echo "tag=$TAG"
+            echo "version=$version"
+          } >> "$GITHUB_OUTPUT"
+
+  ffmpeg:
+    uses: ./.github/workflows/ffmpeg.yml
+
+  release:
+    needs: [prepare, ffmpeg]
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      # One at a time, macOS first: both legs write the same draft and the same latest.json, and
+      # parallel uploads race (two drafts, or one platform missing from latest.json).
+      max-parallel: 1
+      matrix:
+        include:
+          - platform: macos-latest
+            ffmpeg-artifact: ffmpeg-universal-apple-darwin
+            args: "--target universal-apple-darwin --bundles app,dmg --config src-tauri/tauri.updater.conf.json --config src-tauri/tauri.sidecar.conf.json"
+          - platform: windows-latest
+            ffmpeg-artifact: ffmpeg-x86_64-pc-windows-msvc
+            args: "--bundles nsis --config src-tauri/tauri.updater.conf.json --config src-tauri/tauri.sidecar.conf.json"
+    runs-on: ${{ matrix.platform }}
+    env:
+      TAG: ${{ needs.prepare.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.ffmpeg-artifact }}
+          path: ffmpeg-bin
+
+      - name: Stage the FFmpeg sidecars
+        shell: bash
+        run: bash scripts/stage-ffmpeg.sh ffmpeg-bin
+
+      - run: npm ci
+
+      # The body is the CHANGELOG section of the version, which already ends with the install
+      # notes. It also ends up in latest.json, so the app shows it as the release notes.
+      - name: Release notes
+        id: notes
+        shell: bash
+        run: |
+          {
+            echo 'body<<NOTES_EOF'
+            bash .github/release-notes.sh "$TAG"
+            echo 'NOTES_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tauriScript: npx tauri
+          tagName: ${{ env.TAG }}
+          commitish: ${{ github.sha }}
+          releaseName: "Prism ${{ env.TAG }}"
+          releaseBody: ${{ steps.notes.outputs.body }}
+          releaseDraft: true
+          prerelease: ${{ contains(env.TAG, '-') }}
+          uploadUpdaterJson: true
+          updaterJsonPreferNsis: true
+          args: ${{ matrix.args }}
+
+  assets:
+    needs: [prepare, release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ needs.prepare.outputs.tag }}
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Versionless copies of the installers
+        run: |
+          mkdir copies
+          gh release download "$TAG" -D copies \
+            -p "Prism_${VERSION}_x64-setup.exe" -p "Prism_${VERSION}_universal.dmg"
+          cp "copies/Prism_${VERSION}_x64-setup.exe" copies/Prism-setup.exe
+          cp "copies/Prism_${VERSION}_universal.dmg" copies/Prism.dmg
+          gh release upload "$TAG" copies/Prism-setup.exe copies/Prism.dmg --clobber
+
+      - name: Verify the release has every asset
+        run: |
+          mkdir check
+          gh release view "$TAG" --json assets -q '.assets[] | "\(.name)\t\(.size)"' > check/assets.tsv
+          gh release download "$TAG" -D check -p latest.json -p '*.sig'
+          bash .github/verify-release-assets.sh "$VERSION" "$GH_REPO" check
