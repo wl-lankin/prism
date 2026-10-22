@@ -238,7 +238,8 @@
   }
 
   .arc {
-    background: conic-gradient(var(--c1), var(--c2) 120deg, var(--c3) 240deg, var(--c4) 360deg);
+    /* The colours run round and back into the first, so a nearly full arc has no seam at the top. */
+    background: conic-gradient(var(--c1), var(--c2) 90deg, var(--c3) 180deg, var(--c4) 270deg, var(--c1) 360deg);
     mask:
       radial-gradient(farthest-side, transparent calc(100% - var(--t)), #000 calc(100% - var(--t) + 0.6px)),
       conic-gradient(#000 var(--deg), transparent var(--deg));
