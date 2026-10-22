@@ -17,6 +17,7 @@
     // render it only once its player page was opened.
     queue: 'ytmusic-player-queue',
     queueItem: 'ytmusic-player-queue-item',
+    queueTwin: '#counterpart-renderer',
     queueTitle: '.song-title',
     queueByline: '.byline',
     queueThumb: 'img',
@@ -205,7 +206,12 @@
     if (!queue) return items;
     try {
       var list = queue.querySelectorAll(SEL.queueItem);
-      for (var i = 0; i < list.length && items.length < QUEUE_MAX; i++) items.push(list[i]);
+      for (var i = 0; i < list.length && items.length < QUEUE_MAX; i++) {
+        // A song can sit in the page twice, as its song and its video version; the one
+        // under the counterpart is the hidden twin (owner check, 2026-10-22).
+        if (list[i].closest && list[i].closest(SEL.queueTwin)) continue;
+        items.push(list[i]);
+      }
     } catch (e) {
       // A broken queue reads as an empty one.
     }
@@ -218,10 +224,36 @@
     return cap(text.replace(/\s+/g, ' ').trim(), TEXT_MAX);
   }
 
+  function httpsUrl(raw) {
+    if (typeof raw !== 'string') return '';
+    var url = raw.slice(0, 2) === '//' ? 'https:' + raw : raw;
+    return url.length <= URL_MAX && url.slice(0, 8).toLowerCase() === 'https://' ? url : '';
+  }
+
+  // YouTube Music loads an entry's image only once it scrolls into its own view, but the
+  // entry's data already names its thumbnails: the largest of those, else the loaded image.
   function thumbOf(item) {
+    try {
+      var data = item.data || (item.__data && item.__data.data);
+      var list = data && data.thumbnail && data.thumbnail.thumbnails;
+      if (Array.isArray(list)) {
+        var best = '';
+        var bestSize = -1;
+        for (var i = 0; i < list.length; i++) {
+          var url = httpsUrl(list[i] && list[i].url);
+          var size = Number(list[i] && list[i].width) || 0;
+          if (url && size > bestSize) {
+            best = url;
+            bestSize = size;
+          }
+        }
+        if (best) return best;
+      }
+    } catch (e) {
+      // Fall back to the image.
+    }
     var img = find(SEL.queueThumb, item);
-    var src = img && typeof img.src === 'string' ? img.src : '';
-    return src.length <= URL_MAX && src.slice(0, 8).toLowerCase() === 'https://' ? src : '';
+    return httpsUrl(img && img.src);
   }
 
   function isCurrent(item) {
