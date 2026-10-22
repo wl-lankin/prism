@@ -88,8 +88,8 @@ function show(view: LyricsView): void {
 
 /** Brings `lyricsState` in line with what plays. Call it from an effect of a view that
  *  shows lyrics: it reads the player (so the effect re-runs on a track change) and asks
- *  only when the key is new. Switching the online search only asks again for an answer
- *  that was none or an error. */
+ *  only when the key is new. Switching the online search asks again for an answer that was
+ *  none or an error, and, when it goes off, for one that came from LRCLIB. */
 export function syncLyrics(): void {
   const next = target();
   // Read outside untrack: the effect re-runs when the setting changes.
@@ -100,9 +100,11 @@ export function syncLyrics(): void {
     if (lyricsState.key === next.key) {
       cancelSettle();
       if (online === lyricsState.online) return;
-      const { kind } = lyricsState.view;
-      if (kind === 'none' || kind === 'error') start(next.key, next.ask);
-      else lyricsState.online = online;
+      const { view } = lyricsState;
+      const fromLrclib = view.kind === 'found' && view.lyrics.source === 'lrclib';
+      if (view.kind === 'none' || view.kind === 'error' || (!online && fromLrclib)) {
+        start(next.key, next.ask);
+      } else lyricsState.online = online;
       return;
     }
     if (!next.settle) return start(next.key, next.ask);

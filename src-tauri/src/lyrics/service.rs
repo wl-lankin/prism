@@ -41,6 +41,8 @@ pub struct SourceFailed;
 pub trait Sources: Send + Sync {
     /// A library or dropped-file track by id; `None` for ids that are not tracks (radio).
     fn track(&self, id: &str) -> Option<Track>;
+    /// A Navidrome account is set up (the server may still be offline).
+    fn navidrome_signed_in(&self) -> bool;
     /// Blocking. `raw_id` is the server's own song id.
     fn navidrome(
         &self,
@@ -64,6 +66,10 @@ pub struct AppSources {
 impl Sources for AppSources {
     fn track(&self, id: &str) -> Option<Track> {
         (self.tracks)(id)
+    }
+
+    fn navidrome_signed_in(&self) -> bool {
+        self.navidrome.status().state != crate::navidrome::LinkState::Off
     }
 
     fn navidrome(
@@ -135,25 +141,18 @@ fn now() -> i64 {
 
 /// What LRCLIB knows, as the one best entry: synced, else plain, else instrumental.
 fn pick(found: &Found) -> Option<Lyrics> {
-    if let Some(lyrics) = found
+    let parsed = found
         .synced_lrc
         .as_deref()
-        .and_then(|text| lrc::parse(text, LyricsSource::Lrclib))
-    {
-        if lyrics.synced {
-            return Some(lyrics);
-        }
+        .and_then(|text| lrc::parse(text, LyricsSource::Lrclib));
+    if parsed.as_ref().is_some_and(|l| l.synced) {
+        return parsed;
     }
     found
         .plain
         .as_deref()
         .and_then(|text| Lyrics::plain(LyricsSource::Lrclib, text))
-        .or_else(|| {
-            found
-                .synced_lrc
-                .as_deref()
-                .and_then(|text| lrc::parse(text, LyricsSource::Lrclib))
-        })
+        .or(parsed)
         .or_else(|| {
             found
                 .instrumental
@@ -287,6 +286,8 @@ impl LyricsService {
         };
         match track.source {
             Source::Radio => LyricsAnswer::None,
+            // Without an account there is nothing to ask and nothing to cache.
+            Source::Navidrome if !self.sources.navidrome_signed_in() => LyricsAnswer::None,
             Source::Navidrome => match navidrome_raw(&track.id) {
                 Some(raw) => self.resolve_navidrome(&track, raw),
                 None => LyricsAnswer::None,
@@ -386,6 +387,8 @@ impl LyricsService {
     /// entries for 30 days, misses for 7).
     fn page_lyrics(&self, state: &YtmState, failed: &mut bool) -> Option<Lyrics> {
         let Some(asked) = state.video_id.as_deref() else {
+            // The page has not reported the id yet (an ad, a song change): asking again
+            // later can work, so this is an error and not "no lyrics".
             *failed = true;
             return None;
         };
@@ -574,6 +577,7 @@ mod tests {
         tracks: Mutex<HashMap<String, Track>>,
         navidrome: Mutex<Option<Result<Option<SongLyrics>, SourceFailed>>>,
         navidrome_calls: AtomicUsize,
+        signed_out: AtomicBool,
         navidrome_delay: Mutex<Duration>,
         state: Mutex<YtmState>,
         page: Mutex<Option<PageAnswer>>,
@@ -583,6 +587,10 @@ mod tests {
     impl Sources for FakeSources {
         fn track(&self, id: &str) -> Option<Track> {
             lock_plain(&self.tracks).get(id).cloned()
+        }
+
+        fn navidrome_signed_in(&self) -> bool {
+            !self.signed_out.load(Ordering::SeqCst)
         }
 
         fn navidrome(&self, _: &str, _: &str, _: &str) -> Result<Option<SongLyrics>, SourceFailed> {
@@ -691,7 +699,7 @@ mod tests {
         }
     }
 
-    /// A local file with a sidecar `.lrc` and/or plain lyrics in a sidecar-less setup.
+    /// An audio file, with a sidecar `.lrc` when `lrc` is given.
     fn local_file(dir: &Path, lrc: Option<&str>) -> String {
         let audio = dir.join("song.mp3");
         std::fs::write(&audio, b"not audio").unwrap();
@@ -1221,6 +1229,99 @@ mod tests {
             "cached"
         );
         assert!(lock_plain(&r.service.flights).is_empty());
+    }
+
+    #[test]
+    fn waiters_get_the_leaders_error_without_a_second_lookup() {
+        let r = rig(|_, _| not_found());
+        r.lookup.store(false, Ordering::SeqCst);
+        r.add(track("navidrome:abc", Source::Navidrome, None));
+        r.navidrome_says(Err(SourceFailed));
+        *lock_plain(&r.sources.navidrome_delay) = Duration::from_millis(400);
+        let answers: Vec<LyricsAnswer> = std::thread::scope(|scope| {
+            let leader = scope.spawn(|| r.service.for_track("navidrome:abc"));
+            std::thread::sleep(Duration::from_millis(100));
+            let waiters: Vec<_> = (0..3)
+                .map(|_| scope.spawn(|| r.service.for_track("navidrome:abc")))
+                .collect();
+            let mut all = vec![leader.join().unwrap()];
+            all.extend(waiters.into_iter().map(|h| h.join().unwrap()));
+            all
+        });
+        assert!(answers.iter().all(|a| *a == LyricsAnswer::Error));
+        assert_eq!(r.sources.navidrome_calls.load(Ordering::SeqCst), 1);
+        assert!(lock_plain(&r.service.flights).is_empty());
+    }
+
+    #[test]
+    fn a_waiter_wakes_with_an_error_when_the_leader_panics() {
+        let r = rig(|_, _| not_found());
+        let answer = std::thread::scope(|scope| {
+            let leader = scope.spawn(|| {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    r.service.single_flight("k".into(), || {
+                        std::thread::sleep(Duration::from_millis(300));
+                        panic!("lookup failed")
+                    })
+                }))
+            });
+            std::thread::sleep(Duration::from_millis(100));
+            let waiter = scope.spawn(|| r.service.single_flight("k".into(), || LyricsAnswer::None));
+            assert!(leader.join().unwrap().is_err());
+            waiter.join().unwrap()
+        });
+        assert_eq!(answer, LyricsAnswer::Error);
+        assert!(lock_plain(&r.service.flights).is_empty());
+    }
+
+    #[test]
+    fn a_navidrome_track_without_an_account_answers_none_and_caches_nothing() {
+        let r = rig(|_, _| json_plain("Online"));
+        r.sources.signed_out.store(true, Ordering::SeqCst);
+        r.add(track("navidrome:abc", Source::Navidrome, None));
+        assert_eq!(r.service.for_track("navidrome:abc"), LyricsAnswer::None);
+        assert_eq!(r.cached("navidrome:abc"), Cached::Miss);
+        assert_eq!(r.sources.navidrome_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(r.lrclib.requests(), 0);
+    }
+
+    #[test]
+    fn navidrome_text_beats_an_lrclib_instrumental_answer_and_nothing_else_does() {
+        let r = rig(|_, _| json_instrumental());
+        r.add(track("navidrome:abc", Source::Navidrome, None));
+        r.navidrome_says(Ok(Some((
+            None,
+            Some(plain(LyricsSource::Navidrome, "Server")),
+        ))));
+        assert_eq!(lines(&r.service.for_track("navidrome:abc")), ["Server"]);
+
+        let r = rig(|_, _| json_instrumental());
+        r.add(track("navidrome:abc", Source::Navidrome, None));
+        r.navidrome_says(Ok(None));
+        match r.service.for_track("navidrome:abc") {
+            LyricsAnswer::Found { lyrics } => assert!(lyrics.instrumental),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_cached_lrclib_entry_is_ignored_with_the_lookup_off() {
+        let r = rig(|_, _| json_plain("Online"));
+        let dir = tempfile::tempdir().unwrap();
+        let t = track("l1", Source::Local, Some(&local_file(dir.path(), None)));
+        let key = cache::lrclib_key(&track_query(&t));
+        r.add(t);
+        cache::put(
+            &lock(&r.db).unwrap(),
+            &key,
+            Some(&plain(LyricsSource::Lrclib, "Cached")),
+            now(),
+        )
+        .unwrap();
+        assert_eq!(lines(&r.service.for_track("l1")), ["Cached"]);
+        r.lookup.store(false, Ordering::SeqCst);
+        assert_eq!(r.service.for_track("l1"), LyricsAnswer::None);
+        assert_eq!(r.lrclib.requests(), 0);
     }
 
     #[test]
