@@ -8,6 +8,7 @@
 use std::error::Error as StdError;
 use std::fmt;
 use std::io::Read;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -19,6 +20,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::lyrics::{Lyrics, LyricsSource};
 use crate::secret::{Secret, SecretUrl};
 
 /// The Subsonic API version Prism speaks.
@@ -413,6 +415,74 @@ struct Playlists {
     playlist: Vec<PlaylistSummary>,
 }
 
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct LyricsList {
+    #[serde(rename = "structuredLyrics")]
+    structured: Vec<StructuredLyrics>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct StructuredLyrics {
+    synced: bool,
+    /// Milliseconds.
+    offset: Option<i64>,
+    line: Vec<LyricsLine>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct LyricsLine {
+    start: Option<i64>,
+    value: String,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct OldLyrics {
+    value: String,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct Extension {
+    name: String,
+}
+
+/// The (synced, plain) lyrics a server holds for one song.
+pub type SongLyrics = (Option<Lyrics>, Option<Lyrics>);
+
+/// The first synced and the first unsynced entry. The OpenSubsonic `offset` is "positive means
+/// lyrics appear sooner, negative means later", so it is subtracted from every start.
+fn structured_to_lyrics(list: LyricsList) -> SongLyrics {
+    let mut synced = None;
+    let mut plain = None;
+    for entry in list.structured {
+        if entry.synced && synced.is_none() {
+            let offset = entry.offset.unwrap_or(0);
+            let timed: Vec<(u64, String)> = entry
+                .line
+                .into_iter()
+                .filter_map(|l| {
+                    let start = l.start?.saturating_sub(offset).max(0);
+                    Some((start as u64, l.value))
+                })
+                .collect();
+            synced = Lyrics::synced(LyricsSource::Navidrome, timed);
+        } else if !entry.synced && plain.is_none() {
+            let text = entry
+                .line
+                .into_iter()
+                .map(|l| l.value)
+                .collect::<Vec<_>>()
+                .join("\n");
+            plain = Lyrics::plain(LyricsSource::Navidrome, &text);
+        }
+    }
+    (synced, plain)
+}
+
 /// Maps a Subsonic error code.
 fn from_code(code: u32, message: String) -> NavidromeError {
     match code {
@@ -669,6 +739,8 @@ pub struct SubsonicClient {
     account: Account,
     http: Client,
     stream: Client,
+    /// Whether the server offers `songLyrics`; asked once per client (one per connection).
+    song_lyrics: Mutex<Option<bool>>,
 }
 
 impl SubsonicClient {
@@ -720,6 +792,7 @@ impl SubsonicClient {
             account,
             http,
             stream,
+            song_lyrics: Mutex::new(None),
         })
     }
 
@@ -795,6 +868,60 @@ impl SubsonicClient {
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
         })
+    }
+
+    /// True when the server is OpenSubsonic and lists the `songLyrics` extension. Transport
+    /// errors are returned and not remembered; any other answer settles it for this client.
+    fn offers_song_lyrics(&self) -> Result<bool, NavidromeError> {
+        let mut known = self.song_lyrics.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(offered) = *known {
+            return Ok(offered);
+        }
+        let offered = if self.ping()?.open_subsonic {
+            match self.call("getOpenSubsonicExtensions", &[]) {
+                Ok(mut response) => {
+                    let list: Vec<Extension> = field(&mut response, "openSubsonicExtensions")?;
+                    list.iter().any(|e| e.name == "songLyrics")
+                }
+                Err(err @ (NavidromeError::Unreachable(_) | NavidromeError::Tls(_))) => {
+                    return Err(err)
+                }
+                Err(_) => false,
+            }
+        } else {
+            false
+        };
+        *known = Some(offered);
+        Ok(offered)
+    }
+
+    /// The lyrics of a song by its raw server id: `(synced, plain)`, `None` when the server has
+    /// none. Servers with `songLyrics` answer `getLyricsBySongId`; others `getLyrics` by artist
+    /// and title, which gives plain text only.
+    pub fn lyrics(
+        &self,
+        song_id: &str,
+        artist: &str,
+        title: &str,
+    ) -> Result<Option<SongLyrics>, NavidromeError> {
+        let found = if self.offers_song_lyrics()? {
+            match self.call("getLyricsBySongId", &[("id", song_id.to_owned())]) {
+                Ok(mut response) => {
+                    let list: LyricsList = field(&mut response, "lyricsList")?;
+                    structured_to_lyrics(list)
+                }
+                Err(NavidromeError::NotFound) => (None, None),
+                Err(err) => return Err(err),
+            }
+        } else {
+            let mut response = self.call(
+                "getLyrics",
+                &[("artist", artist.to_owned()), ("title", title.to_owned())],
+            )?;
+            let old: OldLyrics = field(&mut response, "lyrics")?;
+            (None, Lyrics::plain(LyricsSource::Navidrome, &old.value))
+        };
+        Ok((found.0.is_some() || found.1.is_some()).then_some(found))
     }
 
     /// `getIndexes` `lastModified` (ms), the library change marker.
@@ -1999,6 +2126,277 @@ mod tests {
         );
         let failure = NavidromeFailure::from(&NavidromeError::WrongCredentials);
         assert_eq!(failure.detail, None);
+    }
+
+    fn line_json(start: Option<i64>, value: &str) -> Value {
+        match start {
+            Some(start) => json!({ "start": start, "value": value }),
+            None => json!({ "value": value }),
+        }
+    }
+
+    fn entry(synced: bool, offset: Option<i64>, lines: Vec<Value>) -> Value {
+        let mut entry = json!({ "lang": "xxx", "synced": synced, "line": lines });
+        if let Some(offset) = offset {
+            entry["offset"] = json!(offset);
+        }
+        entry
+    }
+
+    fn lyric_server(entries: Vec<Value>) -> FakeServer {
+        let mut lib = FakeLibrary::synthetic(1, 1);
+        lib.structured_lyrics.insert("tr-0".into(), entries);
+        FakeServer::start(lib)
+    }
+
+    fn texts(l: &Lyrics) -> Vec<&str> {
+        l.lines.iter().map(|l| l.text.as_str()).collect()
+    }
+
+    fn starts(l: &Lyrics) -> Vec<Option<u64>> {
+        l.lines.iter().map(|l| l.start_ms).collect()
+    }
+
+    #[test]
+    fn lyrics_fixtures_parse() {
+        let mut response = envelope(&fixture("getLyricsBySongId.json")).unwrap();
+        let (synced, plain) = structured_to_lyrics(field(&mut response, "lyricsList").unwrap());
+        let (synced, plain) = (synced.unwrap(), plain.unwrap());
+        assert_eq!(
+            texts(&synced),
+            ["Lantern by the window", "Paper boats in the rain", ""]
+        );
+        assert_eq!(starts(&synced), [Some(100), Some(2_100), Some(3_101)]);
+        assert_eq!(
+            texts(&plain),
+            ["Lantern by the window", "Paper boats in the rain"]
+        );
+
+        let mut response = envelope(&fixture("getLyrics.json")).unwrap();
+        let old: OldLyrics = field(&mut response, "lyrics").unwrap();
+        assert!(old.value.starts_with("Lantern"));
+
+        let mut response = envelope(&fixture("getOpenSubsonicExtensions.json")).unwrap();
+        let list: Vec<Extension> = field(&mut response, "openSubsonicExtensions").unwrap();
+        assert!(list.iter().any(|e| e.name == "songLyrics"));
+    }
+
+    #[test]
+    fn lyrics_synced_and_plain() {
+        let server = lyric_server(vec![
+            entry(
+                true,
+                None,
+                vec![
+                    line_json(Some(2_000), "Second"),
+                    line_json(Some(500), "First"),
+                ],
+            ),
+            entry(
+                false,
+                None,
+                vec![line_json(None, "First"), line_json(None, "Second")],
+            ),
+        ]);
+        let (synced, plain) = client(&server).lyrics("tr-0", "A", "T").unwrap().unwrap();
+        let (synced, plain) = (synced.unwrap(), plain.unwrap());
+        assert_eq!(synced.source, LyricsSource::Navidrome);
+        assert!(synced.synced && !plain.synced);
+        assert_eq!(texts(&synced), ["First", "Second"]);
+        assert_eq!(starts(&synced), [Some(500), Some(2_000)]);
+        assert_eq!(texts(&plain), ["First", "Second"]);
+        let methods: Vec<String> = server.requests().into_iter().map(|r| r.method).collect();
+        assert_eq!(
+            methods,
+            ["ping", "getOpenSubsonicExtensions", "getLyricsBySongId"]
+        );
+        let request = server.requests().pop().unwrap();
+        assert_eq!(param(&request.params, "id"), Some("tr-0"));
+    }
+
+    #[test]
+    fn lyrics_plain_only() {
+        let server = lyric_server(vec![entry(
+            false,
+            None,
+            vec![line_json(None, "Only"), line_json(None, "Plain")],
+        )]);
+        let (synced, plain) = client(&server).lyrics("tr-0", "A", "T").unwrap().unwrap();
+        assert!(synced.is_none());
+        assert_eq!(texts(&plain.unwrap()), ["Only", "Plain"]);
+    }
+
+    #[test]
+    fn lyrics_synced_only() {
+        let server = lyric_server(vec![entry(true, None, vec![line_json(Some(1), "Solo")])]);
+        let (synced, plain) = client(&server).lyrics("tr-0", "A", "T").unwrap().unwrap();
+        assert_eq!(texts(&synced.unwrap()), ["Solo"]);
+        assert!(plain.is_none());
+    }
+
+    #[test]
+    fn lyrics_empty_is_none() {
+        let server = lyric_server(Vec::new());
+        assert_eq!(client(&server).lyrics("tr-0", "A", "T").unwrap(), None);
+        assert_eq!(
+            client(&server).lyrics("tr-unknown", "A", "T").unwrap(),
+            None
+        );
+
+        let blank = lyric_server(vec![
+            entry(true, None, vec![line_json(Some(0), " ")]),
+            entry(false, None, vec![line_json(None, ""), line_json(None, " ")]),
+        ]);
+        assert_eq!(client(&blank).lyrics("tr-0", "A", "T").unwrap(), None);
+    }
+
+    #[test]
+    fn lyrics_offset_follows_the_spec_sign() {
+        // Positive offset: lyrics appear sooner, so starts move earlier (and stop at 0).
+        let server = lyric_server(vec![entry(
+            true,
+            Some(300),
+            vec![line_json(Some(100), "A"), line_json(Some(2_000), "B")],
+        )]);
+        let (synced, _) = client(&server).lyrics("tr-0", "A", "T").unwrap().unwrap();
+        assert_eq!(starts(&synced.unwrap()), [Some(0), Some(1_700)]);
+
+        // Negative offset: lyrics appear later.
+        let server = lyric_server(vec![entry(
+            true,
+            Some(-100),
+            vec![line_json(Some(0), "A"), line_json(Some(2_000), "B")],
+        )]);
+        let (synced, _) = client(&server).lyrics("tr-0", "A", "T").unwrap().unwrap();
+        assert_eq!(starts(&synced.unwrap()), [Some(100), Some(2_100)]);
+    }
+
+    #[test]
+    fn lyrics_skips_untimed_lines_of_a_synced_entry() {
+        let server = lyric_server(vec![entry(
+            true,
+            None,
+            vec![line_json(None, "Lost"), line_json(Some(10), "Kept")],
+        )]);
+        let (synced, _) = client(&server).lyrics("tr-0", "A", "T").unwrap().unwrap();
+        assert_eq!(texts(&synced.unwrap()), ["Kept"]);
+    }
+
+    #[test]
+    fn lyrics_without_the_extension_use_get_lyrics() {
+        let mut lib = FakeLibrary::synthetic(1, 1);
+        lib.no_song_lyrics = true;
+        lib.plain_lyrics
+            .push(("Demo Artist 1".into(), "Song".into(), "One\nTwo".into()));
+        let server = FakeServer::start(lib);
+        let client = client(&server);
+        let (synced, plain) = client
+            .lyrics("tr-0", "Demo Artist 1", "Song")
+            .unwrap()
+            .unwrap();
+        assert!(synced.is_none());
+        assert_eq!(texts(&plain.unwrap()), ["One", "Two"]);
+        assert_eq!(client.lyrics("tr-0", "Nobody", "Nothing").unwrap(), None);
+        let methods: Vec<String> = server.requests().into_iter().map(|r| r.method).collect();
+        assert!(!methods.contains(&"getLyricsBySongId".to_owned()));
+        // The extension list is asked once, not per call.
+        assert_eq!(
+            methods
+                .iter()
+                .filter(|m| *m == "getOpenSubsonicExtensions")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn lyrics_on_an_old_server_skip_the_extension_call() {
+        let mut lib = FakeLibrary::synthetic(1, 1);
+        lib.legacy_server = true;
+        lib.plain_lyrics
+            .push(("Demo Artist 1".into(), "Song".into(), "Old\nSchool".into()));
+        let server = FakeServer::start(lib);
+        let (_, plain) = client(&server)
+            .lyrics("tr-0", "Demo Artist 1", "Song")
+            .unwrap()
+            .unwrap();
+        assert_eq!(texts(&plain.unwrap()), ["Old", "School"]);
+        let methods: Vec<String> = server.requests().into_iter().map(|r| r.method).collect();
+        assert_eq!(methods, ["ping", "getLyrics"]);
+    }
+
+    #[test]
+    fn lyrics_ask_the_extension_list_once_per_client() {
+        let server = lyric_server(vec![entry(false, None, vec![line_json(None, "x")])]);
+        let client = client(&server);
+        client.lyrics("tr-0", "A", "T").unwrap();
+        client.lyrics("tr-0", "A", "T").unwrap();
+        let methods: Vec<String> = server.requests().into_iter().map(|r| r.method).collect();
+        assert_eq!(
+            methods,
+            [
+                "ping",
+                "getOpenSubsonicExtensions",
+                "getLyricsBySongId",
+                "getLyricsBySongId"
+            ]
+        );
+    }
+
+    #[test]
+    fn lyrics_errors_are_errors() {
+        let server = lyric_server(vec![entry(false, None, vec![line_json(None, "x")])]);
+        server.set_fault(Fault::CodeOn {
+            method: "getLyricsBySongId",
+            code: 0,
+        });
+        assert!(matches!(
+            client(&server).lyrics("tr-0", "A", "T"),
+            Err(NavidromeError::Server { code: 0, .. })
+        ));
+        server.set_fault(Fault::CodeOn {
+            method: "getLyricsBySongId",
+            code: 50,
+        });
+        assert_eq!(
+            client(&server).lyrics("tr-0", "A", "T"),
+            Err(NavidromeError::NotAuthorized)
+        );
+        // An unknown song is "no lyrics", not an error.
+        server.set_fault(Fault::CodeOn {
+            method: "getLyricsBySongId",
+            code: 70,
+        });
+        assert_eq!(client(&server).lyrics("tr-0", "A", "T"), Ok(None));
+        server.set_fault(Fault::Html);
+        assert!(matches!(
+            client(&server).lyrics("tr-0", "A", "T"),
+            Err(NavidromeError::NotSubsonic(_))
+        ));
+    }
+
+    #[test]
+    fn lyrics_network_errors_are_not_remembered() {
+        let server = lyric_server(vec![entry(false, None, vec![line_json(None, "x")])]);
+        let client = client(&server);
+        server.set_fault(Fault::Refuse);
+        assert!(client.lyrics("tr-0", "A", "T").unwrap_err().is_offline());
+        server.set_fault(Fault::None);
+        assert!(client.lyrics("tr-0", "A", "T").unwrap().is_some());
+    }
+
+    #[test]
+    fn lyrics_errors_carry_no_secrets() {
+        let server = lyric_server(Vec::new());
+        server.set_fault(Fault::CodeOn {
+            method: "getLyricsBySongId",
+            code: 0,
+        });
+        let text = client(&server)
+            .lyrics("tr-0", "A", "T")
+            .unwrap_err()
+            .to_string();
+        assert!(!text.contains(FAKE_PASSWORD));
     }
 
     /// The Subsonic methods [`smoke`] may call: reads only, never a star, scrobble or edit.
