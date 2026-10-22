@@ -12,7 +12,7 @@ FFMPEG_SHA256="7138d28c96d9d3e3af4ee3d8cad72741f8ffb40da90c1112235dea3ecd3178a3"
 # FLAC), WMA, APE, WavPack, Musepack, TTA, DSD (DSF, DFF), MKA/WebM, AC-3/E-AC-3, LATM AAC,
 # and HLS (TS, raw AAC, fMP4 segments).
 FFMPEG_DEMUXERS="aac ac3 aiff ape asf caf dsf eac3 flac hls iff loas matroska mov mp3 mpc mpc8 mpegts ogg tta w64 wav wv"
-FFMPEG_DECODERS="aac aac_latm ac3 adpcm_ima_wav adpcm_ms alac ape dsd_lsbf dsd_lsbf_planar dsd_msbf dsd_msbf_planar eac3 flac mp1float mp2float mp3float mpc7 mpc8 opus pcm_alaw pcm_f32be pcm_f32le pcm_f64be pcm_f64le pcm_mulaw pcm_s16be pcm_s16le pcm_s24be pcm_s24le pcm_s32be pcm_s32le pcm_s8 pcm_u8 tta vorbis wavpack wmalossless wmapro wmav1 wmav2"
+FFMPEG_DECODERS="aac aac_latm ac3 adpcm_ima_qt adpcm_ima_wav adpcm_ms alac ape dsd_lsbf dsd_lsbf_planar dsd_msbf dsd_msbf_planar dst eac3 flac mp1float mp2float mp3float mpc7 mpc8 opus pcm_alaw pcm_f32be pcm_f32le pcm_f64be pcm_f64le pcm_mulaw pcm_s16be pcm_s16le pcm_s24be pcm_s24le pcm_s32be pcm_s32le pcm_s8 pcm_u8 tta vorbis wavpack wmalossless wmapro wmav1 wmav2 wmavoice"
 FFMPEG_PARSERS="aac aac_latm ac3 flac mpegaudio opus vorbis"
 # file: local files (`file:<path>`); pipe: streams fed through stdin and the output on stdout;
 # the rest is what audio/ffmpeg.rs whitelists for an HLS station URL.
@@ -61,7 +61,7 @@ ffmpeg_fetch_source() {
   local tarball="$dl_dir/ffmpeg-${FFMPEG_VERSION}.tar.xz"
   mkdir -p "$dl_dir" "$src_parent"
   if [ ! -f "$tarball" ]; then
-    curl -fsSL --retry 3 -o "$tarball.part" "$FFMPEG_URL"
+    curl -fsSL --proto '=https' --proto-redir '=https' --retry 3 -o "$tarball.part" "$FFMPEG_URL"
     mv "$tarball.part" "$tarball"
   fi
   local actual
