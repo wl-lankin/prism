@@ -46,11 +46,17 @@ pub fn put(conn: &Connection, key: &str, lyrics: Option<&Lyrics>, now: i64) -> a
 
 /// `lrclib:<artist>|<title>|<album>|<duration s>`, lowercased and trimmed.
 pub fn lrclib_key(q: &Query) -> String {
+    let part = |text: &str| {
+        text.trim()
+            .to_lowercase()
+            .replace('\\', "\\\\")
+            .replace('|', "\\|")
+    };
     format!(
         "lrclib:{}|{}|{}|{}",
-        q.artist.trim().to_lowercase(),
-        q.title.trim().to_lowercase(),
-        q.album.as_deref().unwrap_or("").trim().to_lowercase(),
+        part(&q.artist),
+        part(&q.title),
+        part(q.album.as_deref().unwrap_or("")),
         q.duration_secs()
     )
 }
@@ -149,5 +155,17 @@ mod tests {
             ..q
         };
         assert_eq!(lrclib_key(&q), "lrclib:test artist|song one||0");
+    }
+
+    #[test]
+    fn lrclib_key_is_unambiguous_with_separators_in_fields() {
+        let q = |artist: &str, title: &str| Query {
+            artist: artist.into(),
+            title: title.into(),
+            album: None,
+            duration_ms: 1_000,
+        };
+        assert_ne!(lrclib_key(&q("A|B", "C")), lrclib_key(&q("A", "B|C")));
+        assert_ne!(lrclib_key(&q("A\\", "B")), lrclib_key(&q("A", "\\B")));
     }
 }

@@ -117,6 +117,10 @@ impl Lrclib {
     }
 
     fn lookup(&self, q: &Query) -> Result<Found, LrclibError> {
+        // LRCLIB answers 400 for these; that would read as a server error on every play.
+        if q.artist.trim().is_empty() || q.title.trim().is_empty() {
+            return Ok(Found::default());
+        }
         let mut params = vec![
             ("artist_name", q.artist.clone()),
             ("track_name", q.title.clone()),
@@ -124,7 +128,7 @@ impl Lrclib {
         if let Some(album) = q.album.as_deref().filter(|a| !a.trim().is_empty()) {
             params.push(("album_name", album.to_owned()));
         }
-        if q.duration_ms > 0 {
+        if (1..=3600).contains(&q.duration_secs()) {
             params.push(("duration", q.duration_secs().to_string()));
         }
         if let Some(body) = self.get("/api/get", &params)? {
@@ -256,10 +260,17 @@ fn mentions_version(suffix: &str) -> bool {
         .to_lowercase()
         .split(|c: char| !c.is_alphanumeric())
         .any(|word| {
-            word == "live"
-                || ["remaster", "version", "edit", "mono", "stereo"]
-                    .iter()
-                    .any(|key| word.starts_with(key))
+            [
+                "live",
+                "remaster",
+                "remastered",
+                "version",
+                "versions",
+                "edit",
+                "mono",
+                "stereo",
+            ]
+            .contains(&word)
         })
 }
 
@@ -272,12 +283,15 @@ fn strip_version_suffix(title: &str) -> Option<String> {
         let at = inner.rfind(*open)?;
         Some((&inner[..at], &inner[at + 1..]))
     });
-    let (head, suffix) = bracketed.or_else(|| {
+    let dashed = || {
         let at = title.rfind(" - ")?;
         Some((&title[..at], &title[at + 3..]))
-    })?;
+    };
+    let (head, _) = bracketed
+        .filter(|(_, suffix)| mentions_version(suffix))
+        .or_else(|| dashed().filter(|(_, suffix)| mentions_version(suffix)))?;
     let head = head.trim();
-    (!head.is_empty() && mentions_version(suffix)).then(|| head.to_owned())
+    (!head.is_empty()).then(|| head.to_owned())
 }
 
 #[cfg(test)]
@@ -302,6 +316,8 @@ pub(crate) mod tests {
         status: u16,
         body: String,
         delay: Duration,
+        /// Body ends when the connection closes.
+        no_length: bool,
     }
 
     fn reply(status: u16, body: &str) -> Reply {
@@ -309,6 +325,7 @@ pub(crate) mod tests {
             status,
             body: body.to_owned(),
             delay: Duration::ZERO,
+            no_length: false,
         }
     }
 
@@ -421,10 +438,14 @@ pub(crate) mod tests {
             500 => "Internal Server Error",
             _ => "Status",
         };
+        let length = if reply.no_length {
+            String::new()
+        } else {
+            format!("Content-Length: {}\r\n", reply.body.len())
+        };
         let out = format!(
-            "HTTP/1.1 {} {text}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            reply.status,
-            reply.body.len()
+            "HTTP/1.1 {} {text}\r\nContent-Type: application/json\r\n{length}Connection: close\r\n\r\n",
+            reply.status
         );
         let _ = stream.write_all(out.as_bytes());
         let _ = stream.write_all(reply.body.as_bytes());
@@ -627,6 +648,14 @@ pub(crate) mod tests {
             ("Song (feat. Someone)", None),
             ("Song (Deliverance)", None),
             ("Song - Part 2", None),
+            ("Song (Monologue)", None),
+            ("Song - Stereotype", None),
+            ("Song (Editorial)", None),
+            ("Song - Live (Bonus Track)", Some("Song")),
+            (
+                "Song (Bonus Track) - Remastered",
+                Some("Song (Bonus Track)"),
+            ),
             ("Song", None),
             ("(Live)", None),
         ];
@@ -654,6 +683,56 @@ pub(crate) mod tests {
             reply(200, &entry(200.0, None, Some(&big), false).to_string())
         });
         assert_eq!(fake.client().find(&query()), Err(LrclibError::BadResponse));
+    }
+
+    #[test]
+    fn oversize_body_without_a_length_is_cut_off() {
+        let fake = FakeLrclib::start(|_| {
+            let big = "x".repeat(MAX_BODY as usize + 10);
+            Reply {
+                no_length: true,
+                ..reply(200, &entry(200.0, None, Some(&big), false).to_string())
+            }
+        });
+        assert_eq!(fake.client().find(&query()), Err(LrclibError::BadResponse));
+    }
+
+    #[test]
+    fn blank_artist_or_title_sends_nothing() {
+        let fake = FakeLrclib::start(|_| reply(400, "{}"));
+        for (artist, title) in [(" ", "Song One"), ("Test Artist", "")] {
+            let q = Query {
+                artist: artist.into(),
+                title: title.into(),
+                ..query()
+            };
+            assert!(fake.client().find(&q).unwrap().is_empty());
+        }
+        assert!(fake.requests().is_empty());
+    }
+
+    #[test]
+    fn duration_outside_the_accepted_range_is_left_out() {
+        let fake = FakeLrclib::start(|url| {
+            assert_eq!(param(url, "duration"), None, "{url}");
+            reply(200, &entry(0.0, None, Some(PLAIN), false).to_string())
+        });
+        for duration_ms in [0, 400, 3_600_500, 7_200_000] {
+            let q = Query {
+                duration_ms,
+                ..query()
+            };
+            assert!(fake.client().find(&q).unwrap().plain.is_some());
+        }
+        let fake = FakeLrclib::start(|url| {
+            assert_eq!(param(url, "duration").as_deref(), Some("3600"));
+            reply(200, &entry(3600.0, None, Some(PLAIN), false).to_string())
+        });
+        let q = Query {
+            duration_ms: 3_600_000,
+            ..query()
+        };
+        assert!(fake.client().find(&q).unwrap().plain.is_some());
     }
 
     #[test]
@@ -694,6 +773,37 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn concurrent_requests_keep_their_gap() {
+        let arrivals = Arc::new(Mutex::new(Vec::<Instant>::new()));
+        let seen = Arc::clone(&arrivals);
+        let fake = FakeLrclib::start(move |_| {
+            seen.lock().unwrap().push(Instant::now());
+            reply(200, &entry(200.0, None, Some(PLAIN), false).to_string())
+        });
+        let client = Arc::new(
+            Lrclib::with_timing(
+                &fake.base(),
+                Duration::from_secs(5),
+                Duration::from_millis(200),
+            )
+            .unwrap(),
+        );
+        let threads: Vec<_> = (0..2)
+            .map(|_| {
+                let client = Arc::clone(&client);
+                std::thread::spawn(move || client.find(&query()).unwrap())
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        let mut at = arrivals.lock().unwrap().clone();
+        at.sort();
+        assert_eq!(at.len(), 2);
+        assert!(at[1] - at[0] >= Duration::from_millis(180));
+    }
+
+    #[test]
     fn the_user_agent_names_prism() {
         let fake = FakeLrclib::start(|_| reply(404, "{}"));
         fake.client().find(&query()).unwrap();
@@ -709,7 +819,12 @@ pub(crate) mod tests {
     #[test]
     #[ignore = "reaches lrclib.net"]
     fn live_lrclib_smoke() {
-        LIVE.store(true, Ordering::SeqCst);
+        if std::env::var("PRISM_LIVE_LYRICS").is_ok_and(|v| v == "1") {
+            LIVE.store(true, Ordering::SeqCst);
+        } else {
+            println!("set PRISM_LIVE_LYRICS=1 to reach lrclib.net");
+            return;
+        }
         let client = Lrclib::new(DEFAULT_BASE).unwrap();
         let found = client
             .find(&Query {
