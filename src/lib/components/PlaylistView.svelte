@@ -23,6 +23,7 @@
   import Backdrop from './Backdrop.svelte';
   import Cover from './Cover.svelte';
   import Heart from './Heart.svelte';
+  import EmptyArt from './EmptyArt.svelte';
   import Icon from './Icon.svelte';
   import RowPlay from './RowPlay.svelte';
   import PlaylistCover from './PlaylistCover.svelte';
@@ -482,6 +483,7 @@
         <p class="note">{failed}</p>
       {:else if entries && entries.length === 0}
         <div class="empty">
+          <span class="empty-art"><EmptyArt kind="playlists" /></span>
           <h2>{t('playlist.empty')}</h2>
           {#if remote}
             <p class="lead">{t('playlist.remoteEmptyLead')}</p>
@@ -1014,6 +1016,12 @@
   .empty {
     max-width: 420px;
     padding: 4px 0 12px;
+  }
+
+  /* The tilted back slab lines up with the text edge, as in the other left-aligned states. */
+  .empty-art {
+    display: block;
+    margin: 0 0 12px -20px;
   }
 
   h2 {

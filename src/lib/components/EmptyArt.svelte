@@ -1,5 +1,5 @@
 <script lang="ts" module>
-  export type EmptyKind = 'songs' | 'albums' | 'artists' | 'stations' | 'playlists' | 'library' | 'search';
+  export type EmptyKind = 'songs' | 'albums' | 'artists' | 'stations' | 'playlists' | 'library' | 'search' | 'queue';
 
   const RED = '#ff4d6d';
   const YELLOW = '#ffc94d';
@@ -18,6 +18,8 @@
     library:
       '<path d="M4 7.5A1.5 1.5 0 0 1 5.5 6h4l2 2h7A1.5 1.5 0 0 1 20 9.5v8a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 17.5z"/><path d="M13 15.6v-4.4l2.6.9"/><circle cx="11.6" cy="15.6" r="1.4"/>',
     search: '<circle cx="10.5" cy="10.5" r="6"/><path d="m15 15 5 5"/>',
+    queue:
+      '<path d="M4 6.5h12M4 11.5h12M4 16.5h6.5"/><path d="M14.5 14.3v5a.6.6 0 0 0 .9.5l3.7-2.5a.6.6 0 0 0 0-1l-3.7-2.5a.6.6 0 0 0-.9.5z"/>',
   };
 
   interface Look {
@@ -37,6 +39,7 @@
     playlists: { accent: RED, line: [RED, YELLOW, GREEN, BLUE], tints: [BLUE, GREEN], glow: 0.14 },
     library: { accent: '#cccccc', line: ['#cccccc', RED, YELLOW, GREEN, BLUE], tints: [BLUE, RED], glow: 0.1 },
     search: { accent: '#f3f3f5', line: ['#f3f3f5', '#ffffff', '#f3f3f5'], tints: [BLUE, GREEN], glow: 0.07 },
+    queue: { accent: GREEN, line: [BLUE, GREEN, YELLOW], tints: [GREEN, BLUE], glow: 0.13 },
   };
 
   let next = 0;
