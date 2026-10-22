@@ -204,8 +204,7 @@ it('shows the About dialog with the version, links that open in the browser and 
   expect(dialog.getAttribute('aria-modal')).toBe('true');
   expect(dialog.textContent).toContain('One player, every color of sound.');
   expect(dialog.textContent).toContain('Made by');
-  expect(dialog.textContent).toContain('FFmpeg');
-  expect(dialog.textContent).toContain('LGPL-2.1+');
+  expect(dialog.querySelector('.open')?.textContent).toBe('Open-source licenses');
   expect(document.activeElement?.classList.contains('close')).toBe(true);
 
   const author = [...dialog.querySelectorAll('a')].find((a) => a.textContent === 'Wolfgang Linz')!;
@@ -222,11 +221,12 @@ it('shows the About dialog with the version, links that open in the browser and 
   expect(openUrl).toHaveBeenLastCalledWith('https://github.com/wl-lankin/prism');
 
   // Focus stays inside: Tab from the last link wraps to the close button.
-  github.focus();
-  key(github, 'Tab');
+  const open = dialog.querySelector<HTMLButtonElement>('.open')!;
+  open.focus();
+  key(open, 'Tab');
   expect(document.activeElement?.classList.contains('close')).toBe(true);
   key(document.activeElement!, 'Tab', { shiftKey: true });
-  expect(document.activeElement).toBe(github);
+  expect(document.activeElement).toBe(open);
 
   key(dialog, 'Escape');
   expect(onclose).toHaveBeenCalledTimes(1);
@@ -242,7 +242,7 @@ it('speaks German in the About dialog', () => {
   const text = target.querySelector('[role="dialog"]')!.textContent;
   expect(text).toContain('Ein Player, jede Farbe des Klangs.');
   expect(text).toContain('Entwickelt von');
-  expect(text).toContain('Lizenzen');
+  expect(text).toContain('Open-Source-Lizenzen');
 });
 
 it('lists the folders and saves playback settings at once', async () => {
