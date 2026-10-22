@@ -542,6 +542,43 @@ describe('the queue', () => {
     });
   });
 
+  it('skips_the_hidden_twin_of_a_song', () => {
+    const queue = buildQueue([{ title: 'Song', thumb: THUMB }]);
+    const wrapper = document.createElement('ytmusic-playlist-panel-video-wrapper-renderer');
+    const primary = document.createElement('div');
+    primary.id = 'primary-renderer';
+    primary.appendChild(queueItem({ title: 'Lied', byline: 'Band' }, 1));
+    const twin = document.createElement('div');
+    twin.id = 'counterpart-renderer';
+    twin.appendChild(queueItem({ title: 'Lied (Video)', byline: 'Band' }, 2));
+    wrapper.append(primary, twin);
+    queue.appendChild(wrapper);
+    run();
+    expect((queues[0].items as Report[]).map((item) => item.title)).toEqual(['Song', 'Lied']);
+  });
+
+  it('takes_the_thumbnail_from_the_entry_data_before_the_lazy_image', () => {
+    const queue = buildQueue([{ title: 'Off screen' }, { title: 'Loaded', thumb: THUMB }]);
+    const [lazy, loaded] = queue.querySelectorAll('ytmusic-player-queue-item');
+    Object.assign(lazy, {
+      data: {
+        thumbnail: {
+          thumbnails: [
+            { url: '//lh3.googleusercontent.com/a=w60', width: 60 },
+            { url: 'https://lh3.googleusercontent.com/a=w226', width: 226 },
+            { url: 'javascript:alert(1)', width: 999 },
+          ],
+        },
+      },
+    });
+    Object.assign(loaded, { data: { thumbnail: { thumbnails: 'not a list' } } });
+    run();
+    expect((queues[0].items as Report[]).map((item) => item.thumb)).toEqual([
+      'https://lh3.googleusercontent.com/a=w226',
+      THUMB,
+    ]);
+  });
+
   it('knows_the_current_entry_by_either_mark', () => {
     buildQueue([
       { title: 'a', mark: 'selected' },
