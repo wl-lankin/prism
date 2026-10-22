@@ -202,7 +202,11 @@
     overflow-y: auto;
     overflow-x: hidden;
     margin: 0 -6px;
-    padding: 0 6px 20px;
+    /* The bar's room is always kept (the gutter stands in for the right padding), so a
+       list that overflows for a moment, as it can while a view swaps in, never squeezes
+       the entries (owner, 2026-10-22). */
+    padding: 0 0 20px 6px;
+    scrollbar-gutter: stable;
     mask-image: linear-gradient(to bottom, #000 calc(100% - 22px), transparent);
     /* The inherited standard scrollbar-color would override the slim bar below. */
     scrollbar-color: auto;
