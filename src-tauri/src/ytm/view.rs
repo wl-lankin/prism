@@ -506,6 +506,10 @@ impl TauriHost {
             .data_store_identifier(YTM_STORE)
             .on_navigation(on_navigation)
             .on_new_window(on_new_window);
+        let builder = match super::agent::user_agent() {
+            Some(agent) => builder.user_agent(&agent),
+            None => builder,
+        };
         // `cfg!` rather than `#[cfg]`, so these calls are type-checked on macOS too.
         Ok(if cfg!(windows) {
             builder

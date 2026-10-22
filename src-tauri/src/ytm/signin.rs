@@ -115,6 +115,10 @@ pub fn open(app: &AppHandle, data_dir: &Path, url: Option<Url>) -> Result<(), St
     .on_document_title_changed(|window, title| {
         let _ = window.set_title(&title);
     });
+    let builder = match super::agent::user_agent() {
+        Some(agent) => builder.user_agent(&agent),
+        None => builder,
+    };
     // Windows: the view's own profile, with the same switches (WebView2 requires them to
     // match per profile).
     let builder = if cfg!(windows) {

@@ -5,6 +5,7 @@
 //! and [`report::parse`]), and Prism talks back only with the fixed [`SNIPPETS`]; a seek or a
 //! volume sets one number, formatted by Rust, before its snippet runs.
 
+pub mod agent;
 pub mod covers;
 pub mod dev;
 pub mod policy;
