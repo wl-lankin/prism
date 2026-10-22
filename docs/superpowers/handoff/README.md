@@ -21,7 +21,7 @@ The ledgers are copies of the working ledgers in `.superpowers/sdd/` (gitignored
 
 ## Branches
 
-Each milestone branch is cut from the previous one. None is merged into `main` yet; `main` gets the result at the release.
+Each milestone branch is cut from the previous one. `main` holds the released state (v1.0.0 is the merge of `PRISM-6`). The GitHub default branch is still `PRISM-3`.
 
 | Branch | Content | State |
 |---|---|---|
@@ -30,6 +30,8 @@ Each milestone branch is cut from the previous one. None is merged into `main` y
 | `PRISM-3` | M3 Navidrome | Tasks 1-19 done; Task 20 (owner hand check) open |
 | `PRISM-4` | M4 Radio, cut from `PRISM-3` before the M3 hand check | done; checked by the owner in daily use on the Mac, plus UI fixes from that |
 | `PRISM-5` | M5 YouTube Music, cut from `PRISM-4` | done; Mac hand check done (sign-in, playback, controls), Windows hand check open |
+| `PRISM-6` | M6 Release v1.0.0, cut from `PRISM-5` | released as v1.0.0 from `main` 6284b56; `PRISM-6` is one fix ahead (cb93132) |
+| `main` | released versions | v1.0.0 |
 | `spike-ytm` | YouTube Music sign-in spike | reference only |
 
 Parallel work uses short-lived branches `PRISM-<milestone><task>` (for example `PRISM-312`) in worktrees under `../Prism-wt/`. They are merged with `--no-ff` into the milestone branch and then deleted.
@@ -71,11 +73,7 @@ Parallel work uses short-lived branches `PRISM-<milestone><task>` (for example `
 
    Open: Task 13, the owner hand check (see `ledgers/m4-progress.md`), and merging the M3 hand-check fixes from `PRISM-3` into `PRISM-4`.
 5. **M5 YouTube Music**: built on `PRISM-5` (plan `docs/superpowers/plans/2026-10-21-prism-m5-youtube-music.md`, ledger `ledgers/m5-progress.md`). An embedded music.youtube.com child view in the main window, Google sign-in in its own window, a bridge that reads and drives the page through one IPC command, one transport with exclusive playback, media keys and tray following the active player, the YouTube queue in Prism's queue panel, a per-window app command manifest. Checked on the Mac by the owner; the Windows hand check is open.
-6. **M6 Release v1.0.0**:
-   - installer and versionless asset copies, plus auto-update
-   - macOS build (NSPanel for the mini player)
-   - the README
-   - making the GitHub repo public
+6. **M6 Release v1.0.0**: released and published on 2026-10-22 (plan `docs/superpowers/plans/2026-10-22-prism-m6-release.md`, ledger `ledgers/m6-progress.md`, release flow `docs/releasing.md`). Updater, CI and release workflow, bundled LGPL FFmpeg, mac mini panel, About with licenses, README. The repo is public. The owner skipped the beta and dropped the M3 Navidrome and M5 Windows hand checks before 1.0.0. Open: bring cb93132 (FFmpeg check fix, `requireSignedVersion`) to `main` with the next release.
 7. **v1.1**: Apple Music (needs the owner's Apple developer account; no dev key in the public app) and macOS notarization.
 
 ### M3 Task 20: the owner hand check
@@ -153,7 +151,7 @@ Feedback from the hand check is fixed in worktrees, merged into `PRISM-3`, and r
 - **Releases:**
   - Start at v1.0.0.
   - Every asset also exists under a versionless file name.
-  - The GitHub repo `wl-lankin/prism` is private until the v1.0.0 release, then public.
+  - The GitHub repo `wl-lankin/prism` is public since the v1.0.0 release (2026-10-22).
 
 ## How the work is run
 
