@@ -144,9 +144,12 @@ pub fn start_main(app: &AppHandle, autostart: bool) {
             if let Some(state) = app.try_state::<ShellState>() {
                 state.set_main_closed(true);
             }
+            if let Some(state) = app.try_state::<AppState>() {
+                state.ytm_view.on_main_close();
+            }
         }
         MainAtStart::Show => {
-            if let Some(window) = app.get_webview_window(MAIN_LABEL) {
+            if let Some(window) = app.get_window(MAIN_LABEL) {
                 if let Err(err) = window.show() {
                     eprintln!("showing the main window failed: {err}");
                 }
@@ -167,7 +170,7 @@ pub fn main_show(app: &AppHandle) -> Result<(), String> {
         eprintln!("hiding the mini player failed: {err}");
     }
     let window = app
-        .get_webview_window(MAIN_LABEL)
+        .get_window(MAIN_LABEL)
         .ok_or("the main window is gone")?;
     let fail = |err: tauri::Error| err.to_string();
     window.show().map_err(fail)?;
@@ -373,6 +376,44 @@ mod tests {
         let main = &config["app"]["windows"][0];
         assert_eq!(main["label"], MAIN_LABEL);
         assert_eq!(main["visible"], false);
+    }
+
+    /// With the YouTube Music view inside, `main` holds two webviews and is no longer a
+    /// webview window: a lookup of it as one finds nothing. It is looked up as a window.
+    #[test]
+    fn main_is_never_looked_up_as_a_webview_window() {
+        fn sources(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    sources(&path, out);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        let mut files = Vec::new();
+        sources(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut files,
+        );
+        assert!(files.len() > 20);
+        let call = format!("get_webview_{}(", "window");
+        let mut found = Vec::new();
+        for file in &files {
+            let text = std::fs::read_to_string(file).unwrap();
+            for (at, _) in text.match_indices(&call) {
+                let rest = &text[at + call.len()..];
+                let argument = &rest[..rest.find(')').unwrap_or(rest.len())];
+                let main = argument.contains("MAIN_LABEL")
+                    || argument.contains("\"main\"")
+                    || argument.contains(".label()");
+                if main {
+                    found.push(format!("{}: {argument}", file.display()));
+                }
+            }
+        }
+        assert!(found.is_empty(), "{found:#?}");
     }
 
     #[test]

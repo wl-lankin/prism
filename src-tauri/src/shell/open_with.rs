@@ -111,7 +111,7 @@ fn main_is_away(app: &AppHandle) -> bool {
     if closed.is_some() {
         return away(closed, true, false);
     }
-    match app.get_webview_window(super::MAIN_LABEL) {
+    match app.get_window(super::MAIN_LABEL) {
         Some(window) => away(
             None,
             window.is_visible().unwrap_or(false),

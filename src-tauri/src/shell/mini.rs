@@ -237,15 +237,16 @@ pub fn create(app: &AppHandle, on_top: bool) -> tauri::Result<WebviewWindow> {
         .always_on_top(config.always_on_top)
         .visible(config.visible)
         .build()?;
-    crate::window::clear_system_chrome(&window);
-    never_activate(&window);
-    shape::apply(&window, Some(&region(layout().top)));
+    let frame = window.as_ref().window();
+    crate::window::clear_system_chrome(&frame);
+    never_activate(&frame);
+    shape::apply(&frame, Some(&region(layout().top)));
     Ok(window)
 }
 
 /// Windows: subclasses the window so it answers `WM_MOUSEACTIVATE` itself (`own_reply`).
 #[cfg(target_os = "windows")]
-fn never_activate(window: &WebviewWindow) {
+fn never_activate(window: &tauri::Window) {
     use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
     use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
     use windows_sys::Win32::UI::WindowsAndMessaging::WM_NCDESTROY;
@@ -282,10 +283,10 @@ fn never_activate(window: &WebviewWindow) {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn never_activate(_window: &WebviewWindow) {}
+fn never_activate(_window: &tauri::Window) {}
 
-fn window(app: &AppHandle) -> Option<WebviewWindow> {
-    app.get_webview_window(MINI_LABEL)
+fn window(app: &AppHandle) -> Option<tauri::Window> {
+    app.get_window(MINI_LABEL)
 }
 
 pub fn is_visible(app: &AppHandle) -> bool {
@@ -359,7 +360,7 @@ pub fn hide(app: &AppHandle) -> tauri::Result<()> {
 /// (`show_inactive`), so the runtime still takes it for hidden and `hide()` would change
 /// nothing (measured: the player stayed on screen).
 #[cfg(target_os = "windows")]
-fn hide_native(window: &WebviewWindow) -> tauri::Result<()> {
+fn hide_native(window: &tauri::Window) -> tauri::Result<()> {
     use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
 
     let hwnd = window.hwnd()?;
@@ -369,7 +370,7 @@ fn hide_native(window: &WebviewWindow) -> tauri::Result<()> {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn hide_native(window: &WebviewWindow) -> tauri::Result<()> {
+fn hide_native(window: &tauri::Window) -> tauri::Result<()> {
     window.hide()
 }
 
@@ -395,15 +396,12 @@ pub fn menu(app: &AppHandle, open: bool) {
 
 /// Keeps the shape right after a scale change, and the macOS tracker's position after a move.
 pub fn on_event(window: &tauri::Window, event: &tauri::WindowEvent) {
-    let Some(window) = window.get_webview_window(window.label()) else {
-        return;
-    };
     match event {
         tauri::WindowEvent::ScaleFactorChanged { .. } => {
-            shape::moved(&window);
-            shape::apply(&window, Some(&region(layout().top)));
+            shape::moved(window);
+            shape::apply(window, Some(&region(layout().top)));
         }
-        tauri::WindowEvent::Moved(_) => shape::moved(&window),
+        tauri::WindowEvent::Moved(_) => shape::moved(window),
         _ => {}
     }
 }
@@ -415,7 +413,7 @@ pub fn on_event(window: &tauri::Window, event: &tauri::WindowEvent) {
 /// of the normal windows.
 /// The shape goes on first, so the window never shows unshaped.
 #[cfg(target_os = "windows")]
-fn show_inactive(window: &WebviewWindow, region: Region) {
+fn show_inactive(window: &tauri::Window, region: Region) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         GetWindowLongW, SetWindowPos, ShowWindow, GWL_EXSTYLE, HWND_NOTOPMOST, HWND_TOPMOST,
         SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_SHOWNOACTIVATE, WS_EX_TOPMOST,
@@ -443,7 +441,7 @@ fn show_inactive(window: &WebviewWindow, region: Region) {
 /// closure, after the window is ordered front. Applied before, the cursor tracker would see
 /// a hidden window, stop at once and leave the whole window taking clicks.
 #[cfg(target_os = "macos")]
-fn show_inactive(window: &WebviewWindow, region: Region) {
+fn show_inactive(window: &tauri::Window, region: Region) {
     let target = window.clone();
     let shown = window.run_on_main_thread(move || {
         if let Ok(ns_window) = target.ns_window() {
@@ -463,7 +461,7 @@ fn show_inactive(window: &WebviewWindow, region: Region) {
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-fn show_inactive(window: &WebviewWindow, region: Region) {
+fn show_inactive(window: &tauri::Window, region: Region) {
     let _ = window.show();
     shape::apply(window, Some(&region));
 }

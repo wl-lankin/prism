@@ -25,8 +25,63 @@ pub const BROWSER_ARGS: &str =
     "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,HardwareMediaKeyHandling";
 /// A hand-off to the system browser or the sign-in window at most this often.
 pub const HAND_OFF_SPACING: Duration = Duration::from_secs(1);
-/// Windows: the data directory is removed again this long after a first failure.
+/// The session's store is removed again this long after a first failure.
 pub const REMOVE_RETRY: Duration = Duration::from_millis(500);
+/// Windows: left next to the data directory when it could not be removed at sign-out; the
+/// next start removes the directory before any view exists.
+pub const REMOVE_MARKER: &str = "ytm-webview.remove";
+/// macOS 14+: the view's and the sign-in window's own WKWebsiteDataStore (UUID
+/// 5f1c2b7e-9a43-4d2e-8b61-3c0e7a9d4f12), apart from the main page's default store. wry
+/// ignores it on Windows and below macOS 14.
+pub const YTM_STORE: [u8; 16] = [
+    0x5f, 0x1c, 0x2b, 0x7e, 0x9a, 0x43, 0x4d, 0x2e, 0x8b, 0x61, 0x3c, 0x0e, 0x7a, 0x9d, 0x4f, 0x12,
+];
+
+/// The major version in `sysctl kern.osproductversion`'s answer ("14.6.1" gives 14).
+pub fn macos_major(product_version: &str) -> Option<u32> {
+    product_version.trim().split('.').next()?.parse().ok()
+}
+
+/// Whether WKWebView keeps the view in [`YTM_STORE`] (macOS 14 or later).
+pub fn own_store_from(product_version: Option<&str>) -> bool {
+    product_version
+        .and_then(macos_major)
+        .is_some_and(|major| major >= 14)
+}
+
+#[cfg(target_os = "macos")]
+fn own_store() -> bool {
+    static OWN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OWN.get_or_init(|| {
+        let answer = std::process::Command::new("/usr/sbin/sysctl")
+            .args(["-n", "kern.osproductversion"])
+            .output()
+            .ok()
+            .and_then(|output| String::from_utf8(output.stdout).ok());
+        own_store_from(answer.as_deref())
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn own_store() -> bool {
+    false
+}
+
+/// Windows, at start: removes a data directory a sign-out could not remove, then its marker.
+/// `data_dir` is Prism's data directory.
+pub fn remove_pending(data_dir: &Path) -> Result<(), String> {
+    let marker = data_dir.join(REMOVE_MARKER);
+    if !marker.exists() {
+        return Ok(());
+    }
+    let dir = data_dir.join(DATA_DIR_NAME);
+    match std::fs::remove_dir_all(&dir) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(format!("{}: {err}", dir.display())),
+    }
+    std::fs::remove_file(&marker).map_err(|err| format!("{}: {err}", marker.display()))
+}
 
 /// Where the view goes in the main window, in logical pixels (the placeholder's rect).
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
@@ -84,8 +139,12 @@ pub trait ViewHost: Send + Sync {
     /// Opens the sign-in window at the standard page (or focuses it), without waiting.
     fn open_sign_in(&self);
     fn close_sign_in(&self);
-    /// Removes the view's own data directory (Windows); nothing to do elsewhere.
-    fn remove_data_dir(&self) -> Result<(), String>;
+    /// Removes the session's own store once the view and the sign-in window are gone: the
+    /// data directory on Windows, [`YTM_STORE`] on macOS 14+; nothing to do elsewhere.
+    fn remove_store(&self) -> Result<(), String>;
+    /// The store could not be removed: leave a note for the next start (Windows).
+    fn mark_for_removal(&self);
+    fn main_minimized(&self) -> bool;
     /// Runs `job` off the calling thread (the view is created there).
     fn spawn(&self, job: Box<dyn FnOnce() + Send>);
 }
@@ -260,28 +319,31 @@ impl YtmView {
     }
 
     /// Sign-out: the session's data is cleared, the sign-in window and the view go, the
-    /// state is idle again, and (Windows) the view's data directory is removed once the
-    /// view is gone. Blocks for up to [`REMOVE_RETRY`]; not for the main thread.
+    /// state is idle again, and the session's own store is removed once the view is gone
+    /// (tried twice, [`REMOVE_RETRY`] apart, then left for the next start). Blocks; not for
+    /// the main thread.
     pub fn sign_out(&self) {
         let _create = lock(&self.create);
         log("clearing the YouTube Music session", self.host.clear_data());
         self.host.close_sign_in();
         self.forget();
         self.service.reset();
-        if let Err(err) = self.host.remove_data_dir() {
+        if let Err(err) = self.host.remove_store() {
             std::thread::sleep(self.remove_retry);
-            if let Err(again) = self.host.remove_data_dir() {
+            if let Err(again) = self.host.remove_store() {
                 eprintln!("removing the YouTube Music data failed: {err}; again: {again}");
+                self.host.mark_for_removal();
             }
         }
     }
 
     /// Whether a navigation may open the sign-in window or the system browser now: only
-    /// while the view is visible for the view (the user clicked something), and at most once
-    /// per [`HAND_OFF_SPACING`].
+    /// while the view is visible for the view (the user clicked something; a minimized main
+    /// window counts as not visible), and at most once per [`HAND_OFF_SPACING`].
     pub fn may_hand_off(&self, from: From, now: Instant) -> bool {
+        let minimized = from == From::View && self.host.main_minimized();
         let mut inner = lock(&self.inner);
-        if from == From::View && !(inner.shown && !inner.main_closed) {
+        if from == From::View && (minimized || !inner.shown || inner.main_closed) {
             return false;
         }
         if inner
@@ -387,6 +449,7 @@ impl TauriHost {
         let builder = WebviewBuilder::new(super::VIEW_LABEL, tauri::WebviewUrl::External(url))
             .initialization_script(super::bridge_script(super::dev_host()))
             .background_throttling(BackgroundThrottlingPolicy::Disabled)
+            .data_store_identifier(YTM_STORE)
             .on_navigation(on_navigation)
             .on_new_window(on_new_window);
         // `cfg!` rather than `#[cfg]`, so these calls are type-checked on macOS too.
@@ -449,14 +512,20 @@ impl ViewHost for TauriHost {
     }
 
     fn clear_data(&self) -> Result<(), String> {
-        let view = self
-            .webview()
-            .or_else(|| self.app.get_webview(super::signin::SIGNIN_LABEL));
-        // macOS: the view uses the default data store, which the main page shares.
-        let view = if cfg!(windows) {
-            view
+        let view = if own_store() {
+            // The store goes as a whole afterwards (`remove_store`); never the main page's.
+            self.webview()
         } else {
-            view.or_else(|| self.app.get_webview(crate::shell::MAIN_LABEL))
+            let view = self
+                .webview()
+                .or_else(|| self.app.get_webview(super::signin::SIGNIN_LABEL));
+            // Below macOS 14 the view uses the default data store, which the main page
+            // shares.
+            if cfg!(windows) {
+                view
+            } else {
+                view.or_else(|| self.app.get_webview(crate::shell::MAIN_LABEL))
+            }
         };
         match view {
             Some(view) => view
@@ -474,7 +543,24 @@ impl ViewHost for TauriHost {
         super::signin::close(&self.app);
     }
 
-    fn remove_data_dir(&self) -> Result<(), String> {
+    fn remove_store(&self) -> Result<(), String> {
+        #[cfg(target_os = "macos")]
+        if own_store() {
+            return tauri::async_runtime::block_on(async {
+                let stores = self
+                    .app
+                    .fetch_data_store_identifiers()
+                    .await
+                    .map_err(|err| err.to_string())?;
+                if !stores.contains(&YTM_STORE) {
+                    return Ok(());
+                }
+                self.app
+                    .remove_data_store(YTM_STORE)
+                    .await
+                    .map_err(|err| err.to_string())
+            });
+        }
         if !cfg!(windows) {
             return Ok(());
         }
@@ -484,6 +570,22 @@ impl ViewHost for TauriHost {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(err) => Err(format!("{}: {err}", dir.display())),
         }
+    }
+
+    fn mark_for_removal(&self) {
+        if !cfg!(windows) {
+            return;
+        }
+        let marker = self.data_dir.join(REMOVE_MARKER);
+        if let Err(err) = std::fs::write(&marker, b"") {
+            eprintln!("noting {} for removal failed: {err}", marker.display());
+        }
+    }
+
+    fn main_minimized(&self) -> bool {
+        self.app
+            .get_window(crate::shell::MAIN_LABEL)
+            .is_some_and(|window| window.is_minimized().unwrap_or(false))
     }
 
     fn spawn(&self, job: Box<dyn FnOnce() + Send>) {
@@ -525,6 +627,7 @@ mod tests {
         size: Mutex<Option<(f64, f64)>>,
         ops: Mutex<Vec<String>>,
         remove_failures: AtomicUsize,
+        minimized: AtomicBool,
     }
 
     impl FakeHost {
@@ -582,7 +685,7 @@ mod tests {
         fn close_sign_in(&self) {
             self.record("close sign-in");
         }
-        fn remove_data_dir(&self) -> Result<(), String> {
+        fn remove_store(&self) -> Result<(), String> {
             self.record("remove");
             let failures = self.remove_failures.load(Ordering::SeqCst);
             if failures > 0 {
@@ -590,6 +693,12 @@ mod tests {
                 return Err("in use".into());
             }
             Ok(())
+        }
+        fn mark_for_removal(&self) {
+            self.record("mark");
+        }
+        fn main_minimized(&self) -> bool {
+            self.minimized.load(Ordering::SeqCst)
         }
         fn spawn(&self, job: Box<dyn FnOnce() + Send>) {
             self.record("spawn");
@@ -794,8 +903,12 @@ mod tests {
             }
             fn open_sign_in(&self) {}
             fn close_sign_in(&self) {}
-            fn remove_data_dir(&self) -> Result<(), String> {
+            fn remove_store(&self) -> Result<(), String> {
                 Ok(())
+            }
+            fn mark_for_removal(&self) {}
+            fn main_minimized(&self) -> bool {
+                false
             }
             fn spawn(&self, job: Box<dyn FnOnce() + Send>) {
                 *lock(&self.job) = Some(job);
@@ -875,12 +988,19 @@ mod tests {
         f.view.show(rect(232.0, 48.0, 1048.0, 680.0)).unwrap();
         assert_eq!(f.host.take(), ["spawn", "create 232 48 1048 680"]);
 
-        // A data directory still in use is tried once more, then left.
+        // A store still in use is tried once more, then left for the next start.
         f.host.remove_failures.store(5, Ordering::SeqCst);
         f.view.sign_out();
         assert_eq!(
             f.host.take(),
-            ["clear", "close sign-in", "close", "remove", "remove"]
+            [
+                "clear",
+                "close sign-in",
+                "close",
+                "remove",
+                "remove",
+                "mark"
+            ]
         );
         f.host.remove_failures.store(1, Ordering::SeqCst);
         f.view.sign_out();
@@ -925,9 +1045,50 @@ mod tests {
         // The sign-in window has its own window; only the spacing counts for it.
         assert!(f.view.may_hand_off(From::SignIn, at(5000)));
         f.view.on_main_show();
+        // A minimized main window shows nothing either.
+        f.host.minimized.store(true, Ordering::SeqCst);
+        assert!(!f.view.may_hand_off(From::View, at(7000)));
+        assert!(f.view.may_hand_off(From::SignIn, at(7000)));
+        f.host.minimized.store(false, Ordering::SeqCst);
+        assert!(f.view.may_hand_off(From::View, at(8000)));
         f.view.hide().unwrap();
         assert!(!f.view.may_hand_off(From::View, at(9000)));
         assert!(f.view.may_hand_off(From::SignIn, at(9000)));
+    }
+
+    #[test]
+    fn a_store_left_behind_goes_at_the_next_start() {
+        let data = tempfile::tempdir().unwrap();
+        let dir = data.path().join(DATA_DIR_NAME);
+        std::fs::create_dir_all(dir.join("EBWebView/Default")).unwrap();
+        std::fs::write(dir.join("EBWebView/Default/Cookies"), b"x").unwrap();
+        // No marker: the directory stays.
+        remove_pending(data.path()).unwrap();
+        assert!(dir.exists());
+        std::fs::write(data.path().join(REMOVE_MARKER), b"").unwrap();
+        remove_pending(data.path()).unwrap();
+        assert!(!dir.exists());
+        assert!(!data.path().join(REMOVE_MARKER).exists());
+        // A marker without a directory is cleaned up too.
+        std::fs::write(data.path().join(REMOVE_MARKER), b"").unwrap();
+        remove_pending(data.path()).unwrap();
+        assert!(!data.path().join(REMOVE_MARKER).exists());
+    }
+
+    #[test]
+    fn own_store_from_macos_14() {
+        assert_eq!(macos_major("14.6.1\n"), Some(14));
+        assert_eq!(macos_major("26.0"), Some(26));
+        assert_eq!(macos_major("garbage"), None);
+        assert!(own_store_from(Some("14.0")));
+        assert!(own_store_from(Some("15.2")));
+        assert!(own_store_from(Some("26.1\n")));
+        assert!(!own_store_from(Some("13.6.7")));
+        assert!(!own_store_from(Some("11.0")));
+        assert!(!own_store_from(Some("")));
+        assert!(!own_store_from(None));
+        // A fixed, non-nil identifier.
+        assert_ne!(YTM_STORE, [0; 16]);
     }
 
     #[test]

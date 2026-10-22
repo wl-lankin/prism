@@ -11,7 +11,7 @@
 use std::sync::LazyLock;
 
 use serde::Deserialize;
-use tauri::WebviewWindow;
+use tauri::Window;
 
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -237,7 +237,7 @@ static APPLIED: std::sync::LazyLock<
 /// Windows: a window region, the card's rounded rectangle OR the ring's circle, in physical
 /// px. Outside it the window neither paints nor takes clicks.
 #[cfg(target_os = "windows")]
-pub fn apply(window: &WebviewWindow, region: Option<&Region>) {
+pub fn apply(window: &Window, region: Option<&Region>) {
     use windows_sys::Win32::Graphics::Gdi::{
         CombineRgn, CreateEllipticRgn, CreateRoundRectRgn, DeleteObject, SetWindowRgn, HRGN,
         RGN_ERROR, RGN_OR,
@@ -312,12 +312,12 @@ pub fn apply(window: &WebviewWindow, region: Option<&Region>) {
 /// (`set_ignore_cursor_events`) whenever the cursor is outside the shape. It stops when the
 /// window hides or the shape is removed; the next `apply` starts it again.
 #[cfg(target_os = "macos")]
-pub fn apply(window: &WebviewWindow, region: Option<&Region>) {
+pub fn apply(window: &Window, region: Option<&Region>) {
     tracker::apply(window, region.copied());
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-pub fn apply(_window: &WebviewWindow, _region: Option<&Region>) {}
+pub fn apply(_window: &Window, _region: Option<&Region>) {}
 
 #[cfg(target_os = "macos")]
 mod tracker {
@@ -326,7 +326,7 @@ mod tracker {
     use std::sync::{Arc, LazyLock, Mutex};
     use std::time::Duration;
 
-    use tauri::{Manager, WebviewWindow};
+    use tauri::{Manager, Window};
 
     use super::Region;
 
@@ -355,14 +355,14 @@ mod tracker {
     static TRACKED: LazyLock<Mutex<HashMap<String, Arc<Tracked>>>> =
         LazyLock::new(Default::default);
 
-    fn tracked(window: &WebviewWindow) -> Option<Arc<Tracked>> {
+    fn tracked(window: &Window) -> Option<Arc<Tracked>> {
         let mut all = TRACKED.lock().ok()?;
         Some(Arc::clone(
             all.entry(window.label().to_string()).or_default(),
         ))
     }
 
-    fn read_geometry(window: &WebviewWindow) -> Option<Geometry> {
+    fn read_geometry(window: &Window) -> Option<Geometry> {
         let origin = window.inner_position().ok()?;
         let scale = window.scale_factor().ok()?;
         Some(Geometry {
@@ -372,13 +372,13 @@ mod tracker {
         })
     }
 
-    fn refresh_geometry(window: &WebviewWindow, tracked: &Tracked) {
+    fn refresh_geometry(window: &Window, tracked: &Tracked) {
         if let Ok(mut geometry) = tracked.geometry.lock() {
             *geometry = read_geometry(window);
         }
     }
 
-    pub fn apply(window: &WebviewWindow, region: Option<Region>) {
+    pub fn apply(window: &Window, region: Option<Region>) {
         let Some(tracked) = tracked(window) else {
             return;
         };
@@ -410,13 +410,13 @@ mod tracker {
 
     /// Keeps the cached position and scale current; called when the window moves or its
     /// scale changes, so the tracker does not ask for them on every poll.
-    pub fn moved(window: &WebviewWindow) {
+    pub fn moved(window: &Window) {
         if let Some(tracked) = tracked(window) {
             refresh_geometry(window, &tracked);
         }
     }
 
-    fn track(window: &WebviewWindow, tracked: &Tracked) {
+    fn track(window: &Window, tracked: &Tracked) {
         let mut ignoring = false;
         let mut interval = POLL;
         loop {
@@ -458,18 +458,18 @@ mod tracker {
 /// Tells the shape tracker that the window moved or changed scale (macOS only; Windows
 /// regions are relative to the window and need nothing).
 #[cfg(target_os = "macos")]
-pub fn moved(window: &WebviewWindow) {
+pub fn moved(window: &Window) {
     tracker::moved(window);
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn moved(_window: &WebviewWindow) {}
+pub fn moved(_window: &Window) {}
 
 /// Re-applies the main window's shape for its current size: the card plus the ring, or no
 /// shape at all while it is maximized (there is no strip then; the page follows the same
 /// state through the window store). A minimized window keeps its shape. Prism has no
 /// fullscreen mode.
-pub fn reshape_main(window: &WebviewWindow) {
+pub fn reshape_main(window: &Window) {
     if window.is_minimized().unwrap_or(false) {
         return;
     }

@@ -107,6 +107,7 @@ pub fn open(app: &AppHandle, data_dir: &Path, url: Option<Url>) -> Result<(), St
     .center()
     .resizable(true)
     .decorations(true)
+    .data_store_identifier(view::YTM_STORE)
     .on_navigation(on_navigation)
     .on_new_window(on_new_window)
     .on_page_load(on_page_load)

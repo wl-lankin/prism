@@ -73,9 +73,15 @@ fn starts_with_segment(path: &str, prefix: &str) -> bool {
     }
 }
 
-/// Prism's own origins: `tauri.localhost`, `ipc.localhost`, `prism.localhost`, `localhost`.
-fn is_app_host(host: &str) -> bool {
+/// Names that only mean something inside a home or office network (a router, a NAS).
+const LOCAL_DOMAINS: [&str; 5] = ["local", "lan", "home.arpa", "box", "internal"];
+
+/// Prism's own origins (`tauri.localhost`, `ipc.localhost`, `prism.localhost`,
+/// `localhost`), single-label names and local network names: never a page to open.
+fn is_app_or_local_host(host: &str) -> bool {
     under(host, "localhost")
+        || !host.contains('.')
+        || LOCAL_DOMAINS.iter().any(|domain| under(host, domain))
 }
 
 pub fn decide(url: &Url, from: From) -> Decision {
@@ -87,7 +93,7 @@ pub fn decide(url: &Url, from: From) -> Decision {
     };
     let host = host.trim_end_matches('.').to_ascii_lowercase();
     let ip = host.starts_with('[') || host.parse::<std::net::Ipv4Addr>().is_ok();
-    if host.is_empty() || ip || is_app_host(&host) {
+    if host.is_empty() || ip || is_app_or_local_host(&host) {
         return Decision::Block;
     }
     // An explicit port is never one of Google's pages.
@@ -97,7 +103,10 @@ pub fn decide(url: &Url, from: From) -> Decision {
             let path = url.path();
             match host.as_str() {
                 _ if !default_port => Decision::External,
-                PAGE_HOST | "consent.youtube.com" | "accounts.youtube.com" => Decision::Stay,
+                PAGE_HOST
+                | "consent.youtube.com"
+                | "consent.google.com"
+                | "accounts.youtube.com" => Decision::Stay,
                 "www.youtube.com"
                     if YOUTUBE_REDIRECTS
                         .iter()
@@ -154,6 +163,7 @@ mod tests {
             "https://music.youtube.com/watch?v=abc&list=RD1",
             "https://MUSIC.youtube.com/library",
             "https://consent.youtube.com/m?continue=https://music.youtube.com/",
+            "https://consent.google.com/ml?continue=https://music.youtube.com/&gl=DE",
             "https://accounts.youtube.com/accounts/SetSID?ssdc=1",
             "https://accounts.youtube.com/RotateCookiesPage?origin=https://music.youtube.com",
             "https://www.youtube.com/signin?action_handle_signin=true&next=%2F",
@@ -321,6 +331,33 @@ mod tests {
             "https://x.y.localhost/",
         ] {
             assert_eq!(both(raw), (Decision::Block, Decision::Block), "{raw}");
+        }
+    }
+
+    #[test]
+    fn policy_blocks_local_network_names() {
+        for raw in [
+            "https://router/",
+            "https://nas/admin",
+            "https://printer./",
+            "https://nas.local/",
+            "https://Testhausen-NAS.LOCAL/",
+            "https://pi.lan/",
+            "https://media.home.arpa/",
+            "https://fritz.box/",
+            "https://www.fritz.box/",
+            "https://wiki.internal/",
+        ] {
+            assert_eq!(both(raw), (Decision::Block, Decision::Block), "{raw}");
+        }
+        // Lookalikes on public names still open outside.
+        for raw in [
+            "https://local.example.org/",
+            "https://lan.example/",
+            "https://fritzbox.example/",
+            "https://box.example.com/",
+        ] {
+            assert_eq!(both(raw), (Decision::External, Decision::External), "{raw}");
         }
     }
 }

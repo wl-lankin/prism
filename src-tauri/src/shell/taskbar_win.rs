@@ -13,7 +13,7 @@
 use std::cell::RefCell;
 use std::sync::OnceLock;
 
-use tauri::{AppHandle, WebviewWindow};
+use tauri::{AppHandle, Window};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
 use windows::Win32::UI::Shell::{
@@ -219,7 +219,7 @@ fn with_bar(act: impl FnOnce(&mut ThumbBar)) {
 
 /// Subclasses the main window (on the main thread, at setup) and adds the thumbnail buttons
 /// if its taskbar button exists already.
-pub fn attach(app: &AppHandle, window: &WebviewWindow) {
+pub fn attach(app: &AppHandle, window: &Window) {
     use windows_sys::Win32::UI::Shell::SetWindowSubclass;
     use windows_sys::Win32::UI::WindowsAndMessaging::{ChangeWindowMessageFilterEx, MSGFLT_ALLOW};
 

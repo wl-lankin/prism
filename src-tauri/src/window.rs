@@ -18,7 +18,7 @@ pub struct Vibrancy(pub bool);
 /// rounded corners (the card rounds itself) and any system backdrop. Older Windows versions
 /// ignore the attributes they do not know.
 #[cfg(target_os = "windows")]
-pub(crate) fn clear_system_chrome(window: &tauri::WebviewWindow) {
+pub(crate) fn clear_system_chrome(window: &tauri::Window) {
     use std::ffi::c_void;
     use windows_sys::Win32::Graphics::Dwm::{
         DwmSetWindowAttribute, DWMSBT_NONE, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE,
@@ -51,7 +51,7 @@ pub(crate) fn clear_system_chrome(window: &tauri::WebviewWindow) {
 }
 
 #[cfg(not(target_os = "windows"))]
-pub(crate) fn clear_system_chrome(_window: &tauri::WebviewWindow) {}
+pub(crate) fn clear_system_chrome(_window: &tauri::Window) {}
 
 /// `DefWindowProc` does not repaint the non-client frame for a `WM_NCACTIVATE` whose lParam
 /// is -1.
@@ -79,7 +79,7 @@ fn passed_lparam(message: u32, lparam: isize) -> isize {
 /// corners. The subclass passes `WM_NCACTIVATE` on with lParam -1, so the runtime still sees
 /// every activation change but nothing paints the frame.
 #[cfg(target_os = "windows")]
-fn no_classic_frame(window: &tauri::WebviewWindow) {
+fn no_classic_frame(window: &tauri::Window) {
     use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
     use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
     use windows_sys::Win32::UI::WindowsAndMessaging::WM_NCDESTROY;
@@ -121,7 +121,7 @@ fn no_classic_frame(window: &tauri::WebviewWindow) {
 /// non-black color there shows as a tinted band in the transparent strip. `index.html`
 /// paints `--bg` itself, so there is still no white first frame.
 pub fn setup(app: &tauri::App) {
-    if let Some(window) = app.get_webview_window("main") {
+    if let Some(window) = app.get_window(crate::shell::MAIN_LABEL) {
         clear_system_chrome(&window);
         if let Err(err) = window.set_background_color(Some(Color(0, 0, 0, 0))) {
             eprintln!("clearing the window background failed: {err}");
@@ -146,14 +146,13 @@ pub fn on_main_event(window: &tauri::Window, event: &WindowEvent) {
     if !reshape && !moved {
         return;
     }
-    let Some(window) = window.get_webview_window(window.label()) else {
-        return;
-    };
+    // The window itself: with the YouTube Music view inside, `main` is no longer a
+    // webview window.
     if moved {
-        shape::moved(&window);
+        shape::moved(window);
     }
     if reshape {
-        shape::reshape_main(&window);
+        shape::reshape_main(window);
     }
 }
 
@@ -652,6 +651,8 @@ mod tests {
         let ytm = json(include_str!("../capabilities/ytm.json"));
         assert_eq!(ytm["identifier"], "ytm");
         assert_eq!(ytm["webviews"], serde_json::json!(["ytm"]));
+        // Never for an app page, even if the view ever loaded one.
+        assert_eq!(ytm["local"], false);
         assert!(ytm.get("windows").is_none());
         assert_eq!(
             ytm["remote"],

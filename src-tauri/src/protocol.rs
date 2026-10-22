@@ -14,11 +14,23 @@ use crate::library::covers::CoverStore;
 use crate::thumbs::{ResizeError, ResizeGate, SIZES};
 use crate::AppState;
 
+/// Only Prism's own pages get covers; the YouTube Music view and the sign-in window load
+/// remote pages and get nothing.
+pub fn refused(webview_label: &str) -> Option<Response<Vec<u8>>> {
+    let ours = webview_label == crate::shell::MAIN_LABEL
+        || webview_label == crate::shell::mini::MINI_LABEL;
+    (!ours).then(|| no_store(StatusCode::FORBIDDEN, "not for this page"))
+}
+
 pub fn register<R: Runtime>(
     ctx: UriSchemeContext<'_, R>,
     request: Request<Vec<u8>>,
     responder: UriSchemeResponder,
 ) {
+    if let Some(refusal) = refused(ctx.webview_label()) {
+        responder.respond(refusal);
+        return;
+    }
     let app = ctx.app_handle().clone();
     let path = request.uri().path().to_string();
     tauri::async_runtime::spawn_blocking(move || {
@@ -114,6 +126,17 @@ mod tests {
     use std::sync::Arc;
 
     use crate::thumbs::RemoteCovers;
+
+    #[test]
+    fn covers_only_for_prism_pages() {
+        assert!(refused("main").is_none());
+        assert!(refused("mini").is_none());
+        for label in ["ytm", "ytm-signin", "MAIN", "", "main "] {
+            let response = refused(label).unwrap_or_else(|| panic!("{label:?} was served"));
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        }
+    }
 
     fn png(width: u32, height: u32) -> Vec<u8> {
         let image = RgbImage::from_fn(width, height, |x, y| image::Rgb([x as u8, y as u8, 90]));
