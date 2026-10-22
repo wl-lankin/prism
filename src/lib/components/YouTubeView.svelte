@@ -35,11 +35,16 @@
     }
   }
 
+  /** The transport's seek rail reaches this far up into the content area; the native view
+   *  stops above it, or it would cover the rail's upper half. */
+  const RAIL_REACH = 10;
+
   function report() {
     if (!stage) return;
     const box = stage.getBoundingClientRect();
-    if (box.width <= 0 || box.height <= 0) return;
-    reportRect({ x: box.left, y: box.top, width: box.width, height: box.height });
+    const height = box.height - RAIL_REACH;
+    if (box.width <= 0 || height <= 0) return;
+    reportRect({ x: box.left, y: box.top, width: box.width, height });
   }
 
   $effect(() => {

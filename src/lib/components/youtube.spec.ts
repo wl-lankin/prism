@@ -89,7 +89,8 @@ describe('YouTube Music view', () => {
     const app = mountView();
     flushFrames();
     expect(calls('ytm_show')).toHaveLength(1);
-    expect(calls('ytm_show')[0][1]).toEqual({ rect: RECT });
+    // The native view stops 10 px above the transport, clear of the seek rail.
+    expect(calls('ytm_show')[0][1]).toEqual({ rect: { ...RECT, height: RECT.height - 10 } });
     expect(calls('ytm_hide')).toHaveLength(0);
     unmount(app);
     mounted.splice(mounted.indexOf(app), 1);
@@ -108,7 +109,7 @@ describe('YouTube Music view', () => {
     window.dispatchEvent(new Event('resize'));
     flushFrames();
     expect(calls('ytm_show')).toHaveLength(2);
-    expect(calls('ytm_show')[1][1]).toEqual({ rect: { ...RECT, width: 640 } });
+    expect(calls('ytm_show')[1][1]).toEqual({ rect: { ...RECT, width: 640, height: RECT.height - 10 } });
   });
 
   it('sign_in_button_calls_the_backend', () => {
