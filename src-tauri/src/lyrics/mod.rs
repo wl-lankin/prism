@@ -103,12 +103,18 @@ impl Lyrics {
 /// One display line: no control characters, no outer whitespace, at most `MAX_LINE_CHARS`.
 fn clean(raw: &str) -> String {
     raw.chars()
-        .filter(|c| !c.is_control())
+        .filter(|c| !c.is_control() && !is_bidi_override(*c))
         .collect::<String>()
         .trim()
         .chars()
         .take(MAX_LINE_CHARS)
         .collect()
+}
+
+/// Embeddings, overrides and isolates could reorder the rest of the line. Marks (LRM, RLM)
+/// and joiners (ZWJ, ZWNJ) stay: scripts and emoji need them.
+fn is_bidi_override(c: char) -> bool {
+    matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}')
 }
 
 #[cfg(test)]
@@ -149,6 +155,16 @@ mod tests {
                 .len(),
             MAX_LINES
         );
+    }
+
+    #[test]
+    fn bidi_overrides_go_but_marks_and_joiners_stay() {
+        let l = Lyrics::plain(
+            LyricsSource::Youtube,
+            "a\u{202E}b\u{2066}c\u{FEFF}\u{200F}d\u{200D}e",
+        )
+        .unwrap();
+        assert_eq!(l.lines[0].text, "abc\u{200F}d\u{200D}e");
     }
 
     #[test]
