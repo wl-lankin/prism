@@ -663,4 +663,18 @@ mod tests {
     fn it_builds() {
         assert_eq!(2 + 2, 4);
     }
+
+    /// A Dock click opens the main window the way the tray menu and the mini player's "Open
+    /// Prism" do (`main_show` also hides the mini player); it never brings the mini player.
+    #[test]
+    fn dock_click_opens_the_main_window() {
+        let source = include_str!("lib.rs");
+        let at = source
+            .find("tauri::RunEvent::Reopen")
+            .expect("the Reopen arm");
+        let arm = &source[at..];
+        let arm = &arm[..arm.find("_ =>").expect("the arm's end")];
+        assert!(arm.contains("shell::main_show(app)"), "{arm}");
+        assert!(!arm.contains("mini::"), "{arm}");
+    }
 }

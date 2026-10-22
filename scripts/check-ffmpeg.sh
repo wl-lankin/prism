@@ -44,6 +44,9 @@ for tool in "$ffmpeg" "$ffprobe"; do
       *" $flag "*) fail "$(basename "$tool") is configured with $flag" ;;
     esac
   done
+  case " $config " in
+    *" --enable-lib"*) fail "$(basename "$tool") links an external library" ;;
+  esac
   echo "$version" | grep -q "version ${FFMPEG_VERSION}" ||
     fail "$(basename "$tool") is not version $FFMPEG_VERSION"
 done

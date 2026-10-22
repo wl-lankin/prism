@@ -60,7 +60,7 @@ Windows x64 adds:
 
 - **Demuxers and decoders:** the formats in the design spec (5.2): MP3, AAC/M4A, ALAC, FLAC,
   WAV/W64, AIFF/CAF, Ogg Vorbis/Opus/FLAC, WMA (incl. Pro and Lossless), APE, WavPack,
-  Musepack, TTA, DSD (DSF, DFF), MKA/WebM; for radio also AC-3/E-AC-3, LATM AAC and HLS
+  Musepack, TTA, DSD (DSF, DFF, also DST-compressed), MKA/WebM; for radio also AC-3/E-AC-3, LATM AAC and HLS
   (MPEG-TS, raw AAC and fMP4 segments).
 - **Protocols:** `file` and `pipe` for local files and the streams Prism feeds through stdin;
   `http`, `https`, `httpproxy`, `tcp`, `tls` and `crypto` for HLS stations, exactly the
@@ -68,7 +68,8 @@ Windows x64 adds:
   on Windows.
 - **Output:** 32-bit float PCM on stdout (`-f f32le`), resampled with libswresample. The
   `null`, `s16le` and `wav` outputs are for tests and manual checks.
-- **Not in it:** video decoders and filters (embedded cover art is read by Prism itself), any
+- **Not in it:** video decoders (embedded cover art is read by Prism itself; the ffmpeg
+  program always brings a few tiny video filters of its own), any
   encoder beyond raw PCM, devices, network protocols other than the above, hardware
   acceleration, external libraries.
 

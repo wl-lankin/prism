@@ -1,7 +1,9 @@
 //! The mini player: a small, transparent window docked to a corner of the screen.
 //!
 //! It never takes focus: it is created unfocusable (Windows `WS_EX_NOACTIVATE`) and shown
-//! without activation, so the app the user types in keeps the caret and the keystrokes.
+//! without activation, so the app the user types in keeps the caret and the keystrokes. On
+//! macOS it also behaves as a utility panel (`apply_panel`): on every Space, over full-screen
+//! apps, out of the window cycling and left in place by Mission Control.
 //! Like the main window it is shaped (`shell::shape`): only the card and the Flow ring that
 //! hangs half out of its left edge paint and take clicks.
 //!
@@ -240,6 +242,7 @@ pub fn create(app: &AppHandle, on_top: bool) -> tauri::Result<WebviewWindow> {
     let frame = window.as_ref().window();
     crate::window::clear_system_chrome(&frame);
     never_activate(&frame);
+    apply_panel(&frame, on_top);
     shape::apply(&frame, Some(&region(layout().top)));
     Ok(window)
 }
@@ -284,6 +287,82 @@ fn never_activate(window: &tauri::Window) {
 
 #[cfg(not(target_os = "windows"))]
 fn never_activate(_window: &tauri::Window) {}
+
+/// How the mini window sits among the other windows (macOS), as a utility panel would.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PanelBehavior {
+    /// Above the other apps' windows (the floating level): only with "Keep mini player on top".
+    pub floating: bool,
+    /// On every Space.
+    pub all_spaces: bool,
+    /// Also on a full-screen app's Space.
+    pub over_full_screen: bool,
+    /// Mission Control leaves it where it is instead of arranging it with the windows.
+    pub stationary: bool,
+    /// Out of Cmd+` and the Window menu's cycling.
+    pub ignores_cycle: bool,
+    /// Stays on screen while another app is active.
+    pub hides_on_deactivate: bool,
+}
+
+pub fn panel_behavior(on_top: bool) -> PanelBehavior {
+    PanelBehavior {
+        floating: on_top,
+        all_spaces: true,
+        over_full_screen: true,
+        stationary: true,
+        ignores_cycle: true,
+        hides_on_deactivate: false,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn collection_behavior(panel: &PanelBehavior) -> objc2_app_kit::NSWindowCollectionBehavior {
+    use objc2_app_kit::NSWindowCollectionBehavior as B;
+
+    let mut behavior = B::Default;
+    behavior.set(B::CanJoinAllSpaces, panel.all_spaces);
+    behavior.set(B::FullScreenAuxiliary, panel.over_full_screen);
+    behavior.set(B::Stationary, panel.stationary);
+    behavior.set(B::IgnoresCycle, panel.ignores_cycle);
+    behavior
+}
+
+#[cfg(target_os = "macos")]
+fn window_level(panel: &PanelBehavior) -> objc2_app_kit::NSWindowLevel {
+    if panel.floating {
+        objc2_app_kit::NSFloatingWindowLevel
+    } else {
+        objc2_app_kit::NSNormalWindowLevel
+    }
+}
+
+/// macOS: makes the mini window behave like a utility panel ([`panel_behavior`]). It stays an
+/// NSWindow: the `nonactivatingPanel` style mask is only defined for NSPanel, so it is not
+/// set; the window is unfocusable and shown with `orderFrontRegardless` instead, which keeps
+/// Prism from becoming the active app. Runs at creation and when "Keep mini player on top"
+/// changes.
+#[cfg(target_os = "macos")]
+pub fn apply_panel(window: &tauri::Window, on_top: bool) {
+    let target = window.clone();
+    let panel = panel_behavior(on_top);
+    let applied = window.run_on_main_thread(move || {
+        if let Ok(ns_window) = target.ns_window() {
+            // SAFETY: `ns_window` is the live NSWindow behind the mini window, used on the
+            // main thread.
+            let ns_window = unsafe { &*(ns_window as *const objc2_app_kit::NSWindow) };
+            ns_window.setHidesOnDeactivate(panel.hides_on_deactivate);
+            ns_window.setCollectionBehavior(collection_behavior(&panel));
+            ns_window.setLevel(window_level(&panel));
+        }
+    });
+    if let Err(err) = applied {
+        eprintln!("setting up the mini player panel failed: {err}");
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn apply_panel(_window: &tauri::Window, _on_top: bool) {}
 
 fn window(app: &AppHandle) -> Option<tauri::Window> {
     app.get_window(MINI_LABEL)
@@ -592,6 +671,45 @@ mod tests {
         assert!(!config.resizable);
         assert!(!config.always_on_top);
         assert!(builder_config(true).always_on_top);
+    }
+
+    #[test]
+    fn panel_floats_only_when_kept_on_top() {
+        let normal = panel_behavior(false);
+        assert!(!normal.floating);
+        assert!(panel_behavior(true).floating);
+        // Everything else holds with and without "Keep mini player on top".
+        for panel in [normal, panel_behavior(true)] {
+            assert!(panel.all_spaces);
+            assert!(panel.over_full_screen);
+            assert!(panel.stationary);
+            assert!(panel.ignores_cycle);
+            assert!(!panel.hides_on_deactivate);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn panel_maps_to_appkit_flags() {
+        use objc2_app_kit::NSWindowCollectionBehavior as B;
+
+        let behavior = collection_behavior(&panel_behavior(false));
+        assert_eq!(
+            behavior,
+            B::CanJoinAllSpaces | B::FullScreenAuxiliary | B::Stationary | B::IgnoresCycle
+        );
+        assert_eq!(collection_behavior(&panel_behavior(true)), behavior);
+        // AppKit refuses these next to the flags above.
+        for clash in [
+            B::MoveToActiveSpace,
+            B::Managed,
+            B::Transient,
+            B::ParticipatesInCycle,
+        ] {
+            assert!(!behavior.intersects(clash));
+        }
+        assert_eq!(window_level(&panel_behavior(false)), 0);
+        assert_eq!(window_level(&panel_behavior(true)), 3);
     }
 
     #[test]

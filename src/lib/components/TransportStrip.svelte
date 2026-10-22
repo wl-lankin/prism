@@ -165,7 +165,6 @@
     >
       <Icon name="queue" size={18} />
     </button>
-    <span class="divider" aria-hidden="true"></span>
     <!-- Dropped files ("file:" ids) are not in the library; a favorite of one would be an orphan. -->
     {#if !yt && !idle && track && !track.id.startsWith('file:')}
       <Heart kind={live ? 'station' : 'track'} id={track.id} label={t('favorites.toggleItem', { name: track.title })} />
@@ -358,13 +357,6 @@
 
   .volume {
     width: 104px;
-  }
-
-  .divider {
-    width: 1px;
-    height: 18px;
-    margin: 0 2px;
-    background: var(--line);
   }
 
   .btn.toggle {

@@ -323,6 +323,7 @@ pub fn apply_setting(app: &AppHandle, change: &Change) -> Result<(), String> {
                 window
                     .set_always_on_top(*on)
                     .map_err(|err| format!("keeping the mini player on top failed: {err}"))?;
+                mini::apply_panel(&window.as_ref().window(), *on);
             }
         }
         // Applied in settings_set, outside the settings lock (before saving, so a refusal
