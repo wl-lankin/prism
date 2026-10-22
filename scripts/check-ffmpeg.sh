@@ -47,7 +47,8 @@ for tool in "$ffmpeg" "$ffprobe"; do
   case " $config " in
     *" --enable-lib"*) fail "$(basename "$tool") links an external library" ;;
   esac
-  echo "$version" | grep -q "version ${FFMPEG_VERSION}" ||
+  # A here-string, not a pipe: with pipefail, grep -q quitting early fails the echo (SIGPIPE).
+  grep -q "version ${FFMPEG_VERSION}" <<<"$version" ||
     fail "$(basename "$tool") is not version $FFMPEG_VERSION"
 done
 for pinned in "FFmpeg ${FFMPEG_VERSION}" "$FFMPEG_SHA256"; do
@@ -77,7 +78,7 @@ protocols="$(run "$ffmpeg" -hide_banner -protocols | awk '/^Output:/ { exit } fo
 require() {
   local kind="$1" have="$2" want="$3" name
   for name in $want; do
-    echo "$have" | grep -qx "$name" || fail "missing $kind: $name"
+    grep -qx "$name" <<<"$have" || fail "missing $kind: $name"
   done
 }
 require demuxer "$demuxers" "$FFMPEG_REQUIRED_DEMUXERS"
