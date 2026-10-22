@@ -1,0 +1,36 @@
+{
+  "subsonic-response": {
+    "status": "ok",
+    "version": "1.16.1",
+    "type": "navidrome",
+    "serverVersion": "0.58.0 (fake)",
+    "openSubsonic": true,
+    "lyricsList": {
+      "structuredLyrics": [
+        {
+          "displayArtist": "Demo Artist 1",
+          "displayTitle": "Demo Song 1",
+          "lang": "xxx",
+          "offset": -100,
+          "synced": true,
+          "line": [
+            { "start": 0, "value": "Lantern by the window" },
+            { "start": 2000, "value": "Paper boats in the rain" },
+            { "start": 3001, "value": "" }
+          ]
+        },
+        {
+          "displayArtist": "Demo Artist 1",
+          "displayTitle": "Demo Song 1",
+          "lang": "und",
+          "offset": 100,
+          "synced": false,
+          "line": [
+            { "value": "Lantern by the window" },
+            { "value": "Paper boats in the rain" }
+          ]
+        }
+      ]
+    }
+  }
+}
