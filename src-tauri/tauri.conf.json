@@ -1,0 +1,82 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "Prism",
+  "version": "1.0.0",
+  "identifier": "de.wolfganglinz.prism",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1440",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "macOSPrivateApi": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "Prism",
+        "width": 1280,
+        "height": 820,
+        "minWidth": 900,
+        "minHeight": 600,
+        "center": true,
+        "visible": false,
+        "decorations": false,
+        "transparent": true,
+        "shadow": false,
+        "backgroundColor": "#00000000"
+      }
+    ],
+    "security": {
+      "csp": {
+        "default-src": "'self'",
+        "img-src": "'self' data: prism: http://prism.localhost",
+        "connect-src": "'self' ipc: http://ipc.localhost prism: http://prism.localhost",
+        "media-src": "'self' prism: http://prism.localhost",
+        "style-src": "'self' 'unsafe-inline'",
+        "script-src": "'self'"
+      },
+      "devCsp": {
+        "default-src": "'self'",
+        "img-src": "'self' data: prism: http://prism.localhost",
+        "connect-src": "'self' ipc: http://ipc.localhost prism: http://prism.localhost ws://localhost:1441",
+        "media-src": "'self' prism: http://prism.localhost",
+        "style-src": "'self' 'unsafe-inline'",
+        "script-src": "'self'"
+      },
+      "dangerousDisableAssetCspModification": ["style-src"]
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis", "app", "dmg"],
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"],
+    "publisher": "Wolfgang Linz",
+    "copyright": "Copyright 2026 Wolfgang Linz",
+    "homepage": "https://wolfgang-linz.de",
+    "category": "Music",
+    "shortDescription": "A music player for every source.",
+    "longDescription": "Prism is a music player for your own library, Navidrome, Apple Music, YouTube and radio.",
+    "license": "MIT",
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "installerIcon": "icons/icon.ico",
+        "installerHooks": "windows/hooks.nsh"
+      }
+    },
+    "macOS": {
+      "minimumSystemVersion": "11.0"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDFCQTVEMjI1RTBCMDQ5QkUKUldTK1NiRGdKZEtsRzdrcFIySmlSa0hCZ3J2LzY5YXNFU0U4OHRZZG12UnBPR0FJRDhFMVdydjEK",
+      "endpoints": ["https://github.com/wl-lankin/prism/releases/latest/download/latest.json"],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
+}

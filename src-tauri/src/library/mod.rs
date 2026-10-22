@@ -1,0 +1,577 @@
+pub mod covers;
+pub mod favorites;
+pub mod history;
+pub mod lookup;
+pub mod model;
+pub mod playlists;
+pub mod query;
+pub mod scan;
+pub mod tags;
+pub mod watch;
+
+use std::cell::Cell;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+use rusqlite::OptionalExtension;
+use serde::Serialize;
+use tauri::{AppHandle, Emitter, Manager};
+
+use crate::db::Db;
+use covers::CoverStore;
+use scan::{folder_key, lock, rebuild_albums, scan_folder, FailedStamps, ScanInputs, ScanReport};
+
+pub const EVENT_CHANGED: &str = "library://changed";
+pub const EVENT_SCAN_PROGRESS: &str = "library://scan-progress";
+
+/// Payload of `library://scan-progress`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderScanProgress {
+    pub folder: String,
+    pub done: u32,
+    pub total: u32,
+}
+
+/// What the library tells the UI. The Tauri layer maps these onto `library://changed`
+/// and `library://scan-progress`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LibraryEvent {
+    Changed,
+    ScanProgress(FolderScanProgress),
+}
+
+/// The local library service: folders, scans and the events they produce.
+pub struct Library {
+    pub db: Arc<Db>,
+    pub covers: Arc<CoverStore>,
+    /// Scans never overlap: the watcher and user actions may ask for one at the same time.
+    scan_lock: Mutex<()>,
+    options: LibraryOptions,
+    /// Files whose read failed, with the stamp they failed at (see `scan::FailedStamps`).
+    failed_stamps: Mutex<FailedStamps>,
+}
+
+/// Decided once when the library is created.
+#[derive(Debug, Clone, Copy)]
+pub struct LibraryOptions {
+    /// Re-read zero-duration rows of formats only ffprobe can parse. Without ffprobe a
+    /// re-read cannot improve them and would only report a change on every scan.
+    pub reread_unparsed: bool,
+}
+
+impl Library {
+    pub fn new(db: Arc<Db>, covers: Arc<CoverStore>, options: LibraryOptions) -> Library {
+        Library {
+            db,
+            covers,
+            scan_lock: Mutex::new(()),
+            options,
+            failed_stamps: Mutex::new(FailedStamps::new()),
+        }
+    }
+
+    /// The library folders in the order they were added.
+    pub fn folders(&self) -> anyhow::Result<Vec<PathBuf>> {
+        let conn = lock(&self.db)?;
+        let mut stmt = conn.prepare("SELECT path FROM folders ORDER BY rowid")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        Ok(rows
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(PathBuf::from)
+            .collect())
+    }
+
+    /// Registers a folder and indexes it. The folder must exist.
+    pub fn add_folder(
+        &self,
+        path: &Path,
+        emit: &dyn Fn(LibraryEvent),
+    ) -> anyhow::Result<ScanReport> {
+        let path = normalize(path)?;
+        if !path.is_dir() {
+            anyhow::bail!("{} is not a folder", path.display());
+        }
+        // The overlap check and the insert are one step: two concurrent adds of overlapping
+        // folders cannot both pass the check.
+        let _scan = self.scan_lock.lock().map_err(|_| poisoned())?;
+        self.check_not_nested(&path)?;
+        lock(&self.db)?.execute(
+            "INSERT INTO folders (path, online) VALUES (?1, 1) ON CONFLICT(path) DO NOTHING",
+            [folder_key(&path)],
+        )?;
+        let report = self.scan_locked(&path, emit)?;
+        emit(LibraryEvent::Changed);
+        Ok(report)
+    }
+
+    /// The registered folders currently marked offline.
+    pub fn offline_folders(&self) -> anyhow::Result<Vec<PathBuf>> {
+        let conn = lock(&self.db)?;
+        let mut stmt = conn.prepare("SELECT path FROM folders WHERE online = 0 ORDER BY rowid")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        Ok(rows
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(PathBuf::from)
+            .collect())
+    }
+
+    /// Forgets a folder and every track indexed from it.
+    pub fn remove_folder(&self, path: &Path, emit: &dyn Fn(LibraryEvent)) -> anyhow::Result<()> {
+        let _scan = self.scan_lock.lock().map_err(|_| poisoned())?;
+        let key = folder_key(&normalize(path)?);
+        let mut conn = lock(&self.db)?;
+        let tx = conn.transaction()?;
+        let albums: Vec<String> = {
+            let mut stmt = tx.prepare("SELECT DISTINCT album_id FROM tracks WHERE folder = ?1")?;
+            let rows = stmt.query_map([&key], |row| row.get(0))?;
+            rows.collect::<Result<_, _>>()?
+        };
+        tx.execute("DELETE FROM tracks WHERE folder = ?1", [&key])?;
+        rebuild_albums(&tx, albums.iter())?;
+        tx.execute("DELETE FROM folders WHERE path = ?1", [&key])?;
+        tx.commit()?;
+        drop(conn);
+        if let Ok(mut stamps) = self.failed_stamps.lock() {
+            stamps.retain(|path, _| !Path::new(path).starts_with(&key));
+        }
+        emit(LibraryEvent::Changed);
+        Ok(())
+    }
+
+    /// Rescans one folder; emits `Changed` only when the index or its online state changed.
+    pub fn rescan_folder(
+        &self,
+        path: &Path,
+        emit: &dyn Fn(LibraryEvent),
+    ) -> anyhow::Result<ScanReport> {
+        let path = normalize(path)?;
+        let key = folder_key(&path);
+        let online_before = self.online(&key)?;
+        let report = self.scan(&path, emit)?;
+        let changed = report.added + report.updated + report.removed > 0;
+        if changed || self.online(&key)? != online_before {
+            emit(LibraryEvent::Changed);
+        }
+        Ok(report)
+    }
+
+    /// Rescans every folder. A failing folder does not stop the others.
+    pub fn rescan_all(
+        &self,
+        emit: &dyn Fn(LibraryEvent),
+    ) -> anyhow::Result<Vec<(String, ScanReport)>> {
+        let mut reports = Vec::new();
+        for folder in self.folders()? {
+            let key = folder_key(&folder);
+            match self.rescan_folder(&folder, emit) {
+                Ok(report) => reports.push((key, report)),
+                Err(err) => reports.push((
+                    key.clone(),
+                    ScanReport {
+                        failed: vec![(key, format!("{err:#}"))],
+                        ..ScanReport::default()
+                    },
+                )),
+            }
+        }
+        Ok(reports)
+    }
+
+    /// Whether `path` is a library folder (after the same normalization as `add_folder`).
+    pub fn is_registered(&self, path: &Path) -> anyhow::Result<bool> {
+        let key = folder_key(&normalize(path)?);
+        scan::is_registered(&*lock(&self.db)?, &key)
+    }
+
+    /// Library folders may not overlap: every track must belong to exactly one folder.
+    fn check_not_nested(&self, path: &Path) -> anyhow::Result<()> {
+        let new = comparable(path);
+        for existing in self.folders()? {
+            let old = comparable(&existing);
+            if new == old {
+                anyhow::bail!("{} is already in your library", path.display());
+            }
+            if new.starts_with(&old) {
+                anyhow::bail!(
+                    "{} is inside the library folder {}; it is already part of your library",
+                    path.display(),
+                    existing.display()
+                );
+            }
+            if old.starts_with(&new) {
+                anyhow::bail!(
+                    "{} contains the library folder {}; remove that folder first, then add this one",
+                    path.display(),
+                    existing.display()
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn online(&self, key: &str) -> anyhow::Result<Option<bool>> {
+        let conn = lock(&self.db)?;
+        let online = conn
+            .query_row("SELECT online FROM folders WHERE path = ?1", [key], |row| {
+                row.get::<_, i64>(0)
+            })
+            .optional()?;
+        Ok(online.map(|value| value != 0))
+    }
+
+    fn scan(&self, path: &Path, emit: &dyn Fn(LibraryEvent)) -> anyhow::Result<ScanReport> {
+        let _scan = self.scan_lock.lock().map_err(|_| poisoned())?;
+        self.scan_locked(path, emit)
+    }
+
+    /// `scan` for a caller that already holds `scan_lock`.
+    fn scan_locked(&self, path: &Path, emit: &dyn Fn(LibraryEvent)) -> anyhow::Result<ScanReport> {
+        let folder = folder_key(path);
+        let total = Cell::new(0u32);
+        let inputs = ScanInputs {
+            reread_unparsed: self.options.reread_unparsed,
+            failed_stamps: &self.failed_stamps,
+        };
+        let result = scan_folder(&self.db, &self.covers, path, &inputs, |progress| {
+            total.set(progress.total);
+            emit(LibraryEvent::ScanProgress(FolderScanProgress {
+                folder: folder.clone(),
+                done: progress.done,
+                total: progress.total,
+            }))
+        });
+        if result.is_err() {
+            // A scan that fails part-way still ends: the UI clears its busy state on done == total.
+            emit(LibraryEvent::ScanProgress(FolderScanProgress {
+                folder: folder.clone(),
+                done: total.get(),
+                total: total.get(),
+            }));
+        }
+        result
+    }
+}
+
+fn poisoned() -> anyhow::Error {
+    anyhow::anyhow!("library scan lock poisoned")
+}
+
+/// The one spelling a folder is stored under: absolute, as `std::path::absolute` gives it.
+pub fn normalize(path: &Path) -> anyhow::Result<PathBuf> {
+    Ok(std::path::absolute(path)?)
+}
+
+/// A folder path for overlap checks: links resolved, and case folded where the file system
+/// usually ignores case (Windows, macOS).
+fn comparable(path: &Path) -> PathBuf {
+    let resolved = watch::canonicalize_lossy(path);
+    if cfg!(any(windows, target_os = "macos")) {
+        PathBuf::from(resolved.to_string_lossy().to_lowercase())
+    } else {
+        resolved
+    }
+}
+
+/// Emits library events to the webview as `library://changed` and `library://scan-progress`.
+pub fn tauri_emitter(app: AppHandle) -> impl Fn(LibraryEvent) {
+    move |event| {
+        let result = match &event {
+            LibraryEvent::Changed => {
+                // New or changed albums may need a cover lookup.
+                if let Some(state) = app.try_state::<crate::AppState>() {
+                    state.lookup.kick();
+                }
+                app.emit(EVENT_CHANGED, ())
+            }
+            LibraryEvent::ScanProgress(progress) => app.emit(EVENT_SCAN_PROGRESS, progress),
+        };
+        if let Err(err) = result {
+            eprintln!("emitting {event:?} failed: {err}");
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use std::cell::RefCell;
+
+    use super::*;
+    use crate::library::scan::tests::copy_fixtures;
+
+    pub(crate) fn library() -> (Library, tempfile::TempDir) {
+        library_with(LibraryOptions {
+            reread_unparsed: true,
+        })
+    }
+
+    fn library_with(options: LibraryOptions) -> (Library, tempfile::TempDir) {
+        let cover_dir = tempfile::tempdir().unwrap();
+        let library = Library::new(
+            Arc::new(Db::open_in_memory().unwrap()),
+            Arc::new(CoverStore::new(cover_dir.path().to_path_buf())),
+            options,
+        );
+        (library, cover_dir)
+    }
+
+    fn count(library: &Library, sql: &str) -> i64 {
+        library
+            .db
+            .0
+            .lock()
+            .unwrap()
+            .query_row(sql, [], |row| row.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn add_folder_scans_and_emits() {
+        let (library, _covers) = library();
+        let dir = copy_fixtures(&["corrupt.flac"]);
+        let events = RefCell::new(Vec::new());
+        let report = library
+            .add_folder(dir.path(), &|event| events.borrow_mut().push(event))
+            .unwrap();
+        assert!(report.added >= 10);
+        let events = events.into_inner();
+        assert_eq!(events.last(), Some(&LibraryEvent::Changed));
+        let last_progress = events
+            .iter()
+            .rev()
+            .find_map(|event| match event {
+                LibraryEvent::ScanProgress(progress) => Some(progress.clone()),
+                LibraryEvent::Changed => None,
+            })
+            .expect("scan progress");
+        assert_eq!(last_progress.done, last_progress.total);
+        assert_eq!(last_progress.folder, folder_key(dir.path()));
+        assert_eq!(library.folders().unwrap(), vec![dir.path().to_path_buf()]);
+    }
+
+    #[test]
+    fn a_scan_that_fails_part_way_still_ends_with_done_equal_total() {
+        let (library, _covers) = library();
+        let dir = copy_fixtures(&["corrupt.flac"]);
+        library
+            .db
+            .0
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER boom BEFORE INSERT ON tracks
+                 BEGIN SELECT RAISE(ABORT, 'boom'); END;",
+            )
+            .unwrap();
+        let events = RefCell::new(Vec::new());
+        let result = library.add_folder(dir.path(), &|event| events.borrow_mut().push(event));
+        assert!(result.is_err());
+        let events = events.into_inner();
+        assert!(!events.contains(&LibraryEvent::Changed));
+        let Some(LibraryEvent::ScanProgress(last)) = events.last() else {
+            panic!("the last event is a progress: {events:?}");
+        };
+        assert_eq!(last.done, last.total);
+        assert!(
+            last.total > 0,
+            "the failure came after the file count was known"
+        );
+    }
+
+    #[test]
+    fn add_folder_rejects_missing_dir() {
+        let (library, _covers) = library();
+        let dir = tempfile::tempdir().unwrap();
+        assert!(library
+            .add_folder(&dir.path().join("nope"), &|_| {})
+            .is_err());
+        assert!(library.folders().unwrap().is_empty());
+    }
+
+    #[test]
+    fn remove_folder_drops_tracks_and_albums() {
+        let (library, _covers) = library();
+        let first = copy_fixtures(&["corrupt.flac", "cover"]);
+        let second = copy_fixtures(&["corrupt.flac"]);
+        library.add_folder(first.path(), &|_| {}).unwrap();
+        library.add_folder(second.path(), &|_| {}).unwrap();
+        let both = count(&library, "SELECT COUNT(*) FROM tracks");
+        let events = RefCell::new(Vec::new());
+        library
+            .remove_folder(second.path(), &|event| events.borrow_mut().push(event))
+            .unwrap();
+        assert_eq!(events.into_inner(), vec![LibraryEvent::Changed]);
+        assert!(count(&library, "SELECT COUNT(*) FROM tracks") < both);
+        assert_eq!(
+            count(
+                &library,
+                "SELECT COUNT(*) FROM tracks WHERE title = 'Gamma'"
+            ),
+            0
+        );
+        assert_eq!(
+            count(
+                &library,
+                "SELECT COUNT(*) FROM albums WHERE title = 'Cover Album'"
+            ),
+            0
+        );
+        assert_eq!(
+            count(
+                &library,
+                "SELECT track_count FROM albums WHERE title = 'Fixture Album'"
+            ),
+            2
+        );
+        assert_eq!(library.folders().unwrap(), vec![first.path().to_path_buf()]);
+        assert_eq!(
+            count(
+                &library,
+                "SELECT COUNT(*) FROM tracks_fts WHERE tracks_fts MATCH 'gamma'"
+            ),
+            0
+        );
+    }
+
+    #[test]
+    fn remove_folder_forgets_its_failed_stamps() {
+        let (library, _covers) = library();
+        let dir = copy_fixtures(&[]);
+        let other = copy_fixtures(&["corrupt.flac"]);
+        library.add_folder(dir.path(), &|_| {}).unwrap();
+        library.add_folder(other.path(), &|_| {}).unwrap();
+        let stamp_of = |folder: &Path| folder.join("corrupt.flac").to_string_lossy().into_owned();
+        {
+            let mut stamps = library.failed_stamps.lock().unwrap();
+            assert!(stamps.contains_key(&stamp_of(dir.path())));
+            stamps.insert(stamp_of(other.path()), (1, 1));
+        }
+        library.remove_folder(dir.path(), &|_| {}).unwrap();
+        let stamps = library.failed_stamps.lock().unwrap();
+        assert!(!stamps.contains_key(&stamp_of(dir.path())));
+        assert!(stamps.contains_key(&stamp_of(other.path())));
+    }
+
+    #[test]
+    fn removed_folder_does_not_come_back() {
+        let (library, _covers) = library();
+        let dir = copy_fixtures(&["corrupt.flac"]);
+        library.add_folder(dir.path(), &|_| {}).unwrap();
+        assert!(library.is_registered(dir.path()).unwrap());
+        // A non-normalized spelling of the same folder must remove it too.
+        let spelled = dir.path().join("cover").join("..");
+        if std::path::absolute(&spelled).unwrap() == dir.path() {
+            library.remove_folder(&spelled, &|_| {}).unwrap();
+        } else {
+            library.remove_folder(dir.path(), &|_| {}).unwrap();
+        }
+        assert!(!library.is_registered(dir.path()).unwrap());
+        // The watcher (or anything else) rescanning the old path must not resurrect it.
+        let events = RefCell::new(Vec::new());
+        let report = library
+            .rescan_folder(dir.path(), &|event| events.borrow_mut().push(event))
+            .unwrap();
+        assert_eq!(report, ScanReport::default());
+        assert!(events.into_inner().is_empty());
+        assert_eq!(count(&library, "SELECT COUNT(*) FROM folders"), 0);
+        assert_eq!(count(&library, "SELECT COUNT(*) FROM tracks"), 0);
+        assert_eq!(count(&library, "SELECT COUNT(*) FROM albums"), 0);
+    }
+
+    #[test]
+    fn add_folder_refuses_nested_roots() {
+        let (library, _covers) = library();
+        let root = tempfile::tempdir().unwrap();
+        let music = root.path().join("music");
+        let inner = music.join("rock");
+        std::fs::create_dir_all(&inner).unwrap();
+        library.add_folder(&music, &|_| {}).unwrap();
+
+        let inside = library.add_folder(&inner, &|_| {}).unwrap_err();
+        assert!(
+            format!("{inside:#}").contains("inside the library folder"),
+            "{inside:#}"
+        );
+        let outer = library.add_folder(root.path(), &|_| {}).unwrap_err();
+        assert!(
+            format!("{outer:#}").contains("contains the library folder"),
+            "{outer:#}"
+        );
+        let again = library.add_folder(&music, &|_| {}).unwrap_err();
+        assert!(
+            format!("{again:#}").contains("already in your library"),
+            "{again:#}"
+        );
+        // A sibling whose name merely starts the same way is fine.
+        let sibling = root.path().join("music2");
+        std::fs::create_dir(&sibling).unwrap();
+        library.add_folder(&sibling, &|_| {}).unwrap();
+        assert_eq!(library.folders().unwrap(), vec![music, sibling]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn nested_check_ignores_case_on_windows() {
+        let (library, _covers) = library();
+        let root = tempfile::tempdir().unwrap();
+        let music = root.path().join("Music");
+        std::fs::create_dir_all(music.join("Rock")).unwrap();
+        library.add_folder(&music, &|_| {}).unwrap();
+        let upper = PathBuf::from(music.to_string_lossy().to_uppercase()).join("ROCK");
+        assert!(library.add_folder(&upper, &|_| {}).is_err());
+    }
+
+    #[test]
+    fn unparsed_rows_quiet_without_ffprobe() {
+        let (library, _covers) = library_with(LibraryOptions {
+            reread_unparsed: false,
+        });
+        let dir = copy_fixtures(&["corrupt.flac"]);
+        library.add_folder(dir.path(), &|_| {}).unwrap();
+        library
+            .db
+            .0
+            .lock()
+            .unwrap()
+            .execute("UPDATE tracks SET duration_ms = 0 WHERE format = 'wma'", [])
+            .unwrap();
+        assert_eq!(
+            count(&library, "SELECT COUNT(*) FROM tracks WHERE format = 'wma'"),
+            1
+        );
+        for _ in 0..2 {
+            let events = RefCell::new(Vec::new());
+            library
+                .rescan_folder(dir.path(), &|event| events.borrow_mut().push(event))
+                .unwrap();
+            assert!(!events.into_inner().contains(&LibraryEvent::Changed));
+        }
+    }
+
+    #[test]
+    fn rescan_all_covers_every_folder_and_stays_quiet_when_unchanged() {
+        let (library, _covers) = library();
+        let first = copy_fixtures(&["corrupt.flac", "cover"]);
+        let second = copy_fixtures(&["corrupt.flac"]);
+        library.add_folder(first.path(), &|_| {}).unwrap();
+        library.add_folder(second.path(), &|_| {}).unwrap();
+        let events = RefCell::new(Vec::new());
+        let reports = library
+            .rescan_all(&|event| events.borrow_mut().push(event))
+            .unwrap();
+        assert_eq!(reports.len(), 2);
+        assert!(reports
+            .iter()
+            .all(|(_, report)| report.unchanged > 0 && report.added == 0));
+        assert!(!events.into_inner().contains(&LibraryEvent::Changed));
+
+        std::fs::remove_file(second.path().join("tagged.mp3")).unwrap();
+        let events = RefCell::new(Vec::new());
+        library
+            .rescan_all(&|event| events.borrow_mut().push(event))
+            .unwrap();
+        assert!(events.into_inner().contains(&LibraryEvent::Changed));
+    }
+}

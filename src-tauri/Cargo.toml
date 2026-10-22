@@ -1,0 +1,78 @@
+[package]
+name = "prism"
+version = "1.0.0"
+description = "Prism - a music player for every source."
+authors = ["Wolfgang Linz"]
+license = "MIT"
+repository = "https://github.com/wl-lankin/prism"
+edition = "2021"
+
+[lib]
+name = "prism_lib"
+crate-type = ["rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["macos-private-api", "tray-icon", "unstable"] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-single-instance = "2"
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-autostart = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+rfd = "0.16"
+anyhow = "1.0.104"
+sha1 = "0.11.0"
+hex = "0.4.3"
+lofty = "0.25.4"
+walkdir = "2.5.0"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico"] }
+rayon = "1.12.0"
+notify = "8.2.0"
+notify-debouncer-mini = "0.7.0"
+symphonia = { version = "0.6.1", default-features = false, features = ["mp3", "aac", "isomp4", "flac", "ogg", "vorbis", "wav", "pcm", "adpcm", "alac", "aiff", "mkv", "caf"] }
+cpal = "0.18.2"
+rtrb = "0.4.0"
+rubato = "5.0.1"
+crossbeam-channel = "0.5.17"
+souvlaki = "0.8.3"
+rand = "0.9"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "rustls-tls-native-roots", "json", "gzip"] }
+md-5 = "0.11"
+keyring = { version = "3", features = ["windows-native", "apple-native"] }
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
+
+[target.'cfg(windows)'.dependencies]
+# DWM attributes for the transparent main window (no border, no rounded system corners, no
+# backdrop), GDI for its window region (the click-through strip), and ShowWindow /
+# SetWindowPos to show the mini player without activating it.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Storage_FileSystem", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+# ITaskbarList3 for the main window's thumbnail toolbar (COM, which windows-sys does not wrap).
+windows = { version = "0.62", features = ["Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_System_Com", "Win32_Foundation"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# orderFrontRegardless and the panel behaviour for the mini player (shown without activating
+# Prism); the same versions Tauri uses.
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSResponder", "NSWindow"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+# No panic = "abort": Prism decodes untrusted media files, and handlers rely on
+# unwinding (catch_unwind) to survive a decoder panic instead of killing the app.
+strip = true
+
+# Audio decoders are hot loops; keep them fast in dev builds too.
+[profile.dev.package."*"]
+opt-level = 3
+
+[dev-dependencies]
+tempfile = "3.27.0"
+flate2 = "1"

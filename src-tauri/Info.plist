@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDocumentTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleTypeName</key>
+      <string>Audio file</string>
+      <key>CFBundleTypeRole</key>
+      <string>Viewer</string>
+      <key>LSHandlerRank</key>
+      <string>Alternate</string>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>public.audio</string>
+        <string>public.mp3</string>
+        <string>public.mpeg-4-audio</string>
+        <string>public.aac-audio</string>
+        <string>org.xiph.flac</string>
+        <string>com.microsoft.waveform-audio</string>
+        <string>public.aiff-audio</string>
+        <string>public.aifc-audio</string>
+        <string>org.xiph.ogg-audio</string>
+        <string>com.apple.coreaudio-format</string>
+      </array>
+      <key>CFBundleTypeExtensions</key>
+      <array>
+        <string>mp3</string>
+        <string>m4a</string>
+        <string>m4b</string>
+        <string>aac</string>
+        <string>alac</string>
+        <string>flac</string>
+        <string>wav</string>
+        <string>aif</string>
+        <string>aiff</string>
+        <string>aifc</string>
+        <string>ogg</string>
+        <string>oga</string>
+        <string>opus</string>
+        <string>wma</string>
+        <string>ape</string>
+        <string>wv</string>
+        <string>mpc</string>
+        <string>tta</string>
+        <string>dsf</string>
+        <string>dff</string>
+        <string>mka</string>
+        <string>webm</string>
+        <string>caf</string>
+      </array>
+    </dict>
+  </array>
+</dict>
+</plist>

@@ -1,0 +1,31 @@
+# Rules for every M4 implementer
+
+- **Where to work:** your own worktree and branch only (`/Users/wolfganglinz/Projects/Prism-wt/m4-t<NN>`, branch `PRISM-4<NN>`). Commit with `git -c user.name="Wolfgang Linz" -c user.email="27097016+wl-lankin@users.noreply.github.com"`, using the commit message from the plan. Never push, never merge, never touch other worktrees or the main checkout.
+- **What to read:** the plan at `docs/superpowers/plans/2026-10-21-prism-m4-radio.md` (Global Constraints, Review Focus, Decisions, Owner answers, your task, Execution notes) and the ledger at `/Users/wolfganglinz/Projects/Prism/.superpowers/sdd/2026-10-21-prism-m4-radio/progress.md`. Ledger rulings and "Binding for Task N" items are mandatory. Read the ledger, never edit it.
+- **Plan vs. code:** the plan was written against `PRISM-3` at `b5599b0`. Check each interface it assumes against the actual code, adapt, and list every deviation in your report. Earlier M4 tasks may already be merged; build on what is there.
+- **Workflow:** TDD as the task's steps say: failing tests first, then the code.
+- **Writing:**
+  - Never use em dashes or en dashes.
+  - No AI attribution, no session links.
+  - Code comments: few, only for a non-obvious why, in English, matching the house style.
+  - Write files with Write/Edit, never with Bash heredocs, `sed -i` or scripts that write files.
+- **Data:**
+  - Fake data only. Fake Navidrome account `demo` / `demo-pass`; fake place "Testhausen" (DE, region "Testland", lat 50.0, lon 10.0).
+  - Test servers bind `127.0.0.1:0`. No test reaches the internet, except `#[ignore]` live tests the plan names.
+  - Never a real server URL, real credentials or the owner's location.
+- **Locks:** never take the DB lock while holding another service lock; network calls never run under the DB lock.
+- **Processes:**
+  - Do not launch the app (this machine is a Mac: WKWebView has no CDP, so visual checks go to the owner hand check).
+  - Record the PIDs you start and stop only those. Never kill by image name.
+  - Never touch `~/Library/Application Support/de.wolfganglinz.prism` or `~/Library/Caches/de.wolfganglinz.prism`.
+  - Reap any FFmpeg children your tests start.
+  - No test may play sound on the real output device. Run tests that could by exact name only.
+- **Cargo:** `CARGO_TARGET_DIR` is `src-tauri/target` inside your worktree (it was cloned from the main checkout, so builds are incremental).
+- **Frontend:** if you change frontend files, `npm test` and `npm run check` must stay green (`node_modules` is already in the worktree).
+- **Verify before you report:**
+  - Full `cargo test --manifest-path src-tauri/Cargo.toml`, plus your task filter 3x for flakiness.
+  - `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings` and `cargo fmt --manifest-path src-tauri/Cargo.toml --check`.
+  - `npm test` and `npm run check` when frontend files changed.
+  - Paste the numbers in your report.
+- **UI tasks (9-11):** follow the existing design (graphite palette, spectral accents, source colors, radio `#4da6ff`, 120 ms `--dur` transitions that keep running under reduced motion; endless loops stop under reduced motion). Every new string goes in `src/lib/i18n.ts` in both EN and DE with real umlauts.
+- **Report:** write it to `/Users/wolfganglinz/Projects/Prism/.superpowers/sdd/2026-10-21-prism-m4-radio/task<N>-report.md` (commits, test numbers, deviations from the plan, concerns, anything a later task must know). Return a short summary of the same.

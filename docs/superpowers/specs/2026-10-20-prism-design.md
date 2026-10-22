@@ -153,6 +153,10 @@ something he enjoys looking at.
 ### 5.6 YouTube Music
 - YouTube Music has no official playback API. Prism embeds music.youtube.com in an in-app
   web view. The user signs in there themselves; Prism never sees or stores the password.
+- No extra window (owner decision, 2026-10-20): the YouTube Music view lives inside the main
+  window's content area (a child web view), shown when "YouTube Music" is selected in the
+  sidebar and hidden, not destroyed, when the user navigates away, so playback continues and
+  Prism's controls keep driving it.
 - Sign-in fallback (owner decision): if Google refuses sign-in inside the embedded view
   ("This browser or app may not be secure"), Prism opens sign-in in a separate pop-up
   window that shares the same session store, then returns to the embedded view signed in.
@@ -209,13 +213,17 @@ something he enjoys looking at.
 - Matches `mini-v2.html`: about 310 px wide, cover, title, artist, source and quality,
   heart, previous, next, volume, and the Flow ring half outside the left edge.
 - It never steals focus while the user types elsewhere, and it never pops up on its own.
-- Windows: closing the main window hides it, the app keeps running, and the mini player
-  takes over the app's taskbar button. Clicking that taskbar button toggles the mini player
-  docked above the bottom-right of the taskbar. Left-click on the tray icon also toggles it.
-  A button on the mini player reopens the main window. The main window's taskbar thumbnail
-  carries previous / play-pause / next buttons.
-- macOS: a menu bar icon toggles the mini player directly under it. Clicking the Dock icon
-  opens the main window.
+- Windows (owner decision, 2026-10-21): closing the main window hides it completely and the
+  app keeps running in the tray. The Prism taskbar button disappears with the window, as on
+  macOS. Closing it also opens the mini player (without taking focus) docked above the
+  bottom-right of the taskbar; the close is the user action, so the mini player still never
+  appears on its own. It does not open on a start at sign-in or when Prism quits.
+  Left-click on the tray icon and the global shortcut toggle the mini player. The tray menu's "Open Prism", the "Open Prism" button on the mini player
+  and a second launch reopen the main window, and its taskbar button comes back. While the
+  main window is open, its taskbar thumbnail carries previous / play-pause / next buttons.
+- macOS: a menu bar icon toggles the mini player directly under it. Closing the main window
+  hides it and opens the mini player under the menu bar icon (owner decision, 2026-10-21).
+  Clicking the Dock icon opens the main window.
 - A global shortcut toggles the mini player (default Ctrl+Alt+P / Cmd+Option+P,
   configurable).
 - Option: "Keep mini player on top".

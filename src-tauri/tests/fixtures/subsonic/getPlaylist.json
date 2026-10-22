@@ -1,0 +1,45 @@
+{
+  "subsonic-response": {
+    "status": "ok",
+    "version": "1.16.1",
+    "type": "navidrome",
+    "serverVersion": "0.58.0 (fake)",
+    "openSubsonic": true,
+    "playlist": {
+      "id": "pl-1",
+      "name": "Demo Playlist",
+      "songCount": 2,
+      "duration": 421,
+      "public": false,
+      "owner": "demo",
+      "created": "2025-12-03T09:00:00Z",
+      "changed": "2026-01-02T09:30:00Z",
+      "coverArt": "pl-1_0",
+      "entry": [
+        {
+          "id": "tr-1",
+          "title": "Demo Song 1",
+          "album": "Demo Album 1",
+          "artist": "Demo Artist 1",
+          "albumId": "al-1",
+          "artistId": "ar-1",
+          "coverArt": "al-1_abc",
+          "duration": 222,
+          "suffix": "flac"
+        },
+        {
+          "id": "tr-2",
+          "title": "Demo Song 2",
+          "album": "Demo Album 1",
+          "artist": "Demo Artist 1",
+          "albumId": "al-1",
+          "artistId": "ar-1",
+          "coverArt": "al-1_abc",
+          "duration": 199,
+          "suffix": "flac",
+          "starred": "2026-01-01T12:00:00Z"
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,5 @@
+[
+  {"name": "Testland", "country": "Germany", "stationcount": 310},
+  {"name": "Examplestate", "country": "Germany", "stationcount": 95},
+  {"name": "", "country": "Germany", "stationcount": 4}
+]
