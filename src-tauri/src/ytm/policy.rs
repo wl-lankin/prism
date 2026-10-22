@@ -138,6 +138,19 @@ pub fn decide(url: &Url, from: From) -> Decision {
     }
 }
 
+/// [`decide`] for the view. `dev_page` is the fake page of a debug run (`dev::page()`, always
+/// `None` in release builds): its exact origin stays as well.
+pub fn decide_view(url: &Url, dev_page: Option<&Url>) -> Decision {
+    let own = dev_page.is_some_and(|page| {
+        url.origin() == page.origin() && url.username().is_empty() && url.password().is_none()
+    });
+    if own {
+        Decision::Stay
+    } else {
+        decide(url, From::View)
+    }
+}
+
 /// The sign-in window reached YouTube Music: the session is in the shared store now.
 pub fn sign_in_done(url: &Url) -> bool {
     url.scheme() == "https" && url.host_str() == Some(PAGE_HOST) && url.port().is_none()
@@ -359,5 +372,50 @@ mod tests {
         ] {
             assert_eq!(both(raw), (Decision::External, Decision::External), "{raw}");
         }
+    }
+
+    #[test]
+    fn dev_page_stays_only_with_the_override() {
+        let page = url("http://127.0.0.1:4100/");
+        let own = [
+            "http://127.0.0.1:4100/",
+            "http://127.0.0.1:4100/index.html?song=2",
+        ];
+        for raw in own {
+            assert_eq!(decide_view(&url(raw), None), Decision::Block, "{raw}");
+            assert_eq!(decide_view(&url(raw), Some(&page)), Decision::Stay, "{raw}");
+            // The sign-in window never gets it.
+            assert_eq!(decide(&url(raw), From::SignIn), Decision::Block, "{raw}");
+        }
+        for raw in [
+            "http://127.0.0.1:4101/",
+            "https://127.0.0.1:4100/",
+            "http://localhost:4100/",
+            "http://127.0.0.2:4100/",
+            "http://[::1]:4100/",
+            "http://demo@127.0.0.1:4100/",
+            "tauri://localhost/",
+        ] {
+            assert_eq!(
+                decide_view(&url(raw), Some(&page)),
+                Decision::Block,
+                "{raw}"
+            );
+        }
+        // Everything else is decided as without the override.
+        for raw in [
+            "https://music.youtube.com/",
+            "https://accounts.google.com/ServiceLogin",
+            "https://example.org/",
+            "https://doubleclick.net/x",
+        ] {
+            assert_eq!(
+                decide_view(&url(raw), Some(&page)),
+                decide(&url(raw), From::View),
+                "{raw}"
+            );
+        }
+        #[cfg(not(debug_assertions))]
+        assert!(crate::ytm::dev::page().is_none());
     }
 }

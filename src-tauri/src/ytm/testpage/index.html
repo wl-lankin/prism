@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Fake YouTube Music</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #101114;
+        --panel: #1a1c21;
+        --line: #2a2d34;
+        --text: #e8e9ec;
+        --muted: #9a9ea8;
+        --amber: #ffc94d;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: var(--bg);
+        color: var(--text);
+        font: 14px/1.4 system-ui, sans-serif;
+      }
+      body {
+        display: flex;
+        flex-direction: column;
+      }
+      .note {
+        padding: 8px 16px;
+        color: var(--muted);
+        border-bottom: 1px solid var(--line);
+      }
+      ytmusic-player {
+        flex: 1;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 24px;
+        padding: 24px;
+        min-height: 0;
+      }
+      .art {
+        width: 160px;
+        height: 160px;
+        border-radius: 8px;
+        flex: none;
+      }
+      ytmusic-player video {
+        display: none;
+      }
+      .now h1 {
+        margin: 0 0 4px;
+        font-size: 22px;
+      }
+      .now p {
+        margin: 0;
+        color: var(--muted);
+      }
+      ytmusic-player-bar {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 12px 16px;
+        background: var(--panel);
+        border-top: 1px solid var(--line);
+      }
+      ytmusic-player-bar button {
+        min-width: 44px;
+        height: 36px;
+        border: 1px solid var(--line);
+        border-radius: 18px;
+        background: transparent;
+        color: var(--text);
+        font: inherit;
+        cursor: pointer;
+      }
+      ytmusic-player-bar button[aria-disabled='true'] {
+        opacity: 0.4;
+        cursor: default;
+      }
+      #play-pause-button {
+        border-color: var(--amber);
+        color: var(--amber);
+      }
+      .time {
+        margin-left: auto;
+        color: var(--muted);
+        font-variant-numeric: tabular-nums;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="note">Fake YouTube Music page for Prism dev runs. Three demo songs, a quiet tone each.</div>
+    <ytmusic-player>
+      <div class="art" id="art"></div>
+      <div class="now">
+        <h1 id="title">Demo Song 1</h1>
+        <p id="artist">Demo Artist 1</p>
+      </div>
+      <video id="player-video" preload="auto" playsinline></video>
+    </ytmusic-player>
+    <ytmusic-player-bar>
+      <button class="previous-button" type="button" aria-label="Previous">Prev</button>
+      <button id="play-pause-button" type="button" aria-label="Play">Play</button>
+      <button class="next-button" type="button" aria-label="Next">Next</button>
+      <span class="time" id="time">0:00 / 0:00</span>
+    </ytmusic-player-bar>
+    <script src="player.js"></script>
+  </body>
+</html>
