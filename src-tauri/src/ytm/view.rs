@@ -135,8 +135,10 @@ pub trait ViewHost: Send + Sync {
     fn close(&self) -> Result<(), String>;
     /// Clears the cookies and storage the view's session lives in.
     fn clear_data(&self) -> Result<(), String>;
-    /// Opens the sign-in window at the standard page (or focuses it), without waiting.
-    fn open_sign_in(&self);
+    /// Opens the sign-in window at `url` or the standard page (or focuses it). Blocks; not
+    /// for the main thread.
+    fn open_sign_in(&self, url: Option<Url>);
+    fn sign_in_exists(&self) -> bool;
     fn close_sign_in(&self);
     /// Removes the session's own store once the view and the sign-in window are gone: the
     /// data directory on Windows, [`YTM_STORE`] on macOS 14+; nothing to do elsewhere.
@@ -236,7 +238,10 @@ impl YtmView {
         let _create = lock(&self.create);
         let rect = lock(&self.inner).rect;
         let created = match rect {
-            Some(rect) if !self.host.exists() => self.host.create(rect),
+            Some(rect) if !self.host.exists() => {
+                self.prepare_store();
+                self.host.create(rect)
+            }
             _ => Ok(()),
         };
         let (visible, latest) = {
@@ -309,8 +314,37 @@ impl YtmView {
     }
 
     /// Settings' "Sign in".
-    pub fn sign_in(&self) {
-        self.host.open_sign_in();
+    pub fn sign_in(self: &Arc<Self>) {
+        self.open_sign_in(None);
+    }
+
+    /// Opens the sign-in window at `url` (an accounts.google.com page from the view) or the
+    /// standard page, in the background. It shares the view's store, so it is created under
+    /// the same lock, after a store left behind has gone.
+    pub fn open_sign_in(self: &Arc<Self>, url: Option<Url>) {
+        let view = Arc::clone(self);
+        self.host.spawn(Box::new(move || {
+            let _create = lock(&view.create);
+            if !view.host.sign_in_exists() {
+                view.prepare_store();
+            }
+            view.host.open_sign_in(url);
+        }));
+    }
+
+    /// Called with `create` held, right before the view or the sign-in window creates the
+    /// session's store: a store a sign-out left behind goes first, if nothing uses it. The
+    /// note goes either way, so it never outlives the new session.
+    fn prepare_store(&self) {
+        if !self.host.marked_for_removal() {
+            return;
+        }
+        if !self.host.exists() && !self.host.sign_in_exists() {
+            if let Err(err) = self.host.remove_store() {
+                eprintln!("removing the old YouTube Music data failed: {err}");
+            }
+        }
+        log("removing the YouTube Music note", self.host.clear_mark());
     }
 
     /// Sign-out: the session's data is cleared, the sign-in window and the view go, the
@@ -332,9 +366,9 @@ impl YtmView {
         }
     }
 
-    /// At start: a store a sign-out left behind goes now, in the background. It holds the
-    /// lock the view's creation holds, and a view created first keeps the note for the next
-    /// start (a store in use cannot go).
+    /// At start: a store a sign-out left behind goes now, in the background, under the lock
+    /// the view and the sign-in window are created under. If either exists already, the
+    /// store is in use and their creation has dealt with the note.
     pub fn remove_left_behind(self: &Arc<Self>) {
         if !self.host.marked_for_removal() {
             return;
@@ -342,7 +376,7 @@ impl YtmView {
         let view = Arc::clone(self);
         self.host.spawn(Box::new(move || {
             let _create = lock(&view.create);
-            if view.host.exists() {
+            if view.host.exists() || view.host.sign_in_exists() {
                 return;
             }
             match view.host.remove_store() {
@@ -397,12 +431,12 @@ pub(crate) fn open_outside(app: &AppHandle, url: &Url) {
 
 /// The view's navigation and new-window decisions, with their effects. Runs on the main
 /// thread inside the web view's callback, so the effects run later, elsewhere.
-fn act(app: &AppHandle, data_dir: &Path, url: &Url) -> bool {
+fn act(app: &AppHandle, url: &Url) -> bool {
     match policy::decide_view(url, super::dev::page()) {
         Decision::Stay => true,
         Decision::SignIn => {
-            if may_hand_off(app, From::View) {
-                super::signin::open_later(app, data_dir, Some(url.clone()));
+            if let Some(view) = view_state(app).filter(|_| may_hand_off(app, From::View)) {
+                view.open_sign_in(Some(url.clone()));
             }
             false
         }
@@ -452,16 +486,16 @@ impl TauriHost {
             None => Url::parse(PAGE_URL).map_err(|err| err.to_string())?,
         };
         let on_navigation = {
-            let (app, data_dir) = (self.app.clone(), self.data_dir.clone());
-            move |url: &Url| act(&app, &data_dir, url)
+            let app = self.app.clone();
+            move |url: &Url| act(&app, url)
         };
         let on_new_window = {
-            let (app, data_dir) = (self.app.clone(), self.data_dir.clone());
+            let app = self.app.clone();
             move |url: Url, _features| {
                 // A YouTube Music page in a new window has no place to go; the rest is
                 // handed off as a navigation would be.
                 if policy::decide_view(&url, super::dev::page()) != Decision::Stay {
-                    act(&app, &data_dir, &url);
+                    act(&app, &url);
                 }
                 NewWindowResponse::Deny
             }
@@ -558,8 +592,16 @@ impl ViewHost for TauriHost {
         }
     }
 
-    fn open_sign_in(&self) {
-        super::signin::open_later(&self.app, &self.data_dir, None);
+    fn open_sign_in(&self, url: Option<Url>) {
+        if let Err(err) = super::signin::open(&self.app, &self.data_dir, url) {
+            eprintln!("opening the Google sign-in failed: {err}");
+        }
+    }
+
+    fn sign_in_exists(&self) -> bool {
+        self.app
+            .get_webview_window(super::signin::SIGNIN_LABEL)
+            .is_some()
     }
 
     fn close_sign_in(&self) {
@@ -661,6 +703,7 @@ mod tests {
         remove_failures: AtomicUsize,
         minimized: AtomicBool,
         marked: AtomicBool,
+        signin: AtomicBool,
     }
 
     impl FakeHost {
@@ -712,10 +755,15 @@ mod tests {
             self.record("clear");
             Ok(())
         }
-        fn open_sign_in(&self) {
+        fn open_sign_in(&self, _: Option<Url>) {
+            self.signin.store(true, Ordering::SeqCst);
             self.record("open sign-in");
         }
+        fn sign_in_exists(&self) -> bool {
+            self.signin.load(Ordering::SeqCst)
+        }
         fn close_sign_in(&self) {
+            self.signin.store(false, Ordering::SeqCst);
             self.record("close sign-in");
         }
         fn remove_store(&self) -> Result<(), String> {
@@ -914,7 +962,10 @@ mod tests {
             fn clear_data(&self) -> Result<(), String> {
                 self.host.clear_data()
             }
-            fn open_sign_in(&self) {}
+            fn open_sign_in(&self, _: Option<Url>) {}
+            fn sign_in_exists(&self) -> bool {
+                false
+            }
             fn close_sign_in(&self) {}
             fn remove_store(&self) -> Result<(), String> {
                 Ok(())
@@ -1044,7 +1095,7 @@ mod tests {
         assert!(f.host.take().is_empty());
         // Settings' "Sign in" needs no view.
         f.view.sign_in();
-        assert_eq!(f.host.take(), ["open sign-in"]);
+        assert_eq!(f.host.take(), ["spawn", "open sign-in"]);
     }
 
     #[test]
@@ -1102,12 +1153,52 @@ mod tests {
         assert_eq!(next.host.take(), ["spawn", "remove"]);
         assert!(next.host.marked_for_removal());
 
-        // A view created first keeps its store; the note waits.
+        // The view is created while the note is set: the store goes first, then the note,
+        // then the view.
         next.view.show(rect(0.0, 0.0, 10.0, 10.0)).unwrap();
-        next.host.take();
-        next.view.remove_left_behind();
-        assert_eq!(next.host.take(), ["spawn"]);
-        assert!(next.host.marked_for_removal());
+        assert_eq!(
+            next.host.take(),
+            ["spawn", "remove", "unmark", "create 0 0 10 10"]
+        );
+        assert!(!next.host.marked_for_removal());
+
+        // The removal fails again at creation: the note still goes, so it never outlives
+        // the new session.
+        let failing = fixture();
+        failing.host.marked.store(true, Ordering::SeqCst);
+        failing.host.remove_failures.store(1, Ordering::SeqCst);
+        failing.view.show(rect(0.0, 0.0, 10.0, 10.0)).unwrap();
+        assert_eq!(
+            failing.host.take(),
+            ["spawn", "remove", "unmark", "create 0 0 10 10"]
+        );
+        assert!(!failing.host.marked_for_removal());
+        // With the view up, a later start-up job removes nothing.
+        failing.host.marked.store(true, Ordering::SeqCst);
+        failing.view.remove_left_behind();
+        assert_eq!(failing.host.take(), ["spawn"]);
+
+        // The sign-in window shares the store: opened while marked, the store goes first
+        // and no note is left.
+        let signin = fixture();
+        signin.host.marked.store(true, Ordering::SeqCst);
+        signin.view.sign_in();
+        assert_eq!(
+            signin.host.take(),
+            ["spawn", "remove", "unmark", "open sign-in"]
+        );
+        assert!(!signin.host.marked_for_removal());
+        // A sign-in window open first keeps its store: nothing is removed, at start or when
+        // the view is created next to it.
+        signin.host.marked.store(true, Ordering::SeqCst);
+        signin.view.remove_left_behind();
+        assert_eq!(signin.host.take(), ["spawn"]);
+        signin.view.show(rect(0.0, 0.0, 10.0, 10.0)).unwrap();
+        assert_eq!(signin.host.take(), ["spawn", "unmark", "create 0 0 10 10"]);
+        assert!(!signin.host.marked_for_removal());
+        // A second open only focuses it.
+        signin.view.sign_in();
+        assert_eq!(signin.host.take(), ["spawn", "open sign-in"]);
     }
 
     #[test]

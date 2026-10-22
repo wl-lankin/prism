@@ -2,7 +2,7 @@
 //! own page gets a normal window that shares the view's data store; once it reaches YouTube
 //! Music the session is there, the window closes and the view reloads.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
@@ -53,7 +53,8 @@ fn act(app: &AppHandle, url: &Url) -> bool {
 }
 
 /// Opens the window, or brings the open one to the front. Creates a window, so not for the
-/// main thread (WebView2 deadlocks there); see [`open_later`].
+/// main thread (WebView2 deadlocks there). Only through `YtmView::open_sign_in`, which
+/// creates it under the view's creation lock (the two share a store).
 pub fn open(app: &AppHandle, data_dir: &Path, url: Option<Url>) -> Result<(), String> {
     let _opening = OPENING.lock().unwrap_or_else(|p| p.into_inner());
     if let Some(window) = app.get_webview_window(SIGNIN_LABEL) {
@@ -124,16 +125,6 @@ pub fn open(app: &AppHandle, data_dir: &Path, url: Option<Url>) -> Result<(), St
         builder
     };
     builder.build().map(|_| ()).map_err(|err| err.to_string())
-}
-
-/// [`open`] from a thread that must not wait (the main thread, a web view's callback).
-pub fn open_later(app: &AppHandle, data_dir: &Path, url: Option<Url>) {
-    let (app, data_dir): (AppHandle, PathBuf) = (app.clone(), data_dir.to_path_buf());
-    tauri::async_runtime::spawn_blocking(move || {
-        if let Err(err) = open(&app, &data_dir, url) {
-            eprintln!("opening the Google sign-in failed: {err}");
-        }
-    });
 }
 
 pub fn close(app: &AppHandle) {
