@@ -32,6 +32,20 @@
   // Under Prism's cap for a queue report (256 KiB), with room for the report around the items.
   var QUEUE_BYTES_MAX = 255 * 1024;
   var HEARTBEAT_MS = 1000;
+  // Under Prism's cap for a lyrics report (64 KiB), with room for the report around the text.
+  var LYRICS_BYTES_MAX = 60 * 1024;
+  // Under Prism's own wait (8 s), so a slow answer still arrives as a failure.
+  var LYRICS_TIME_MS = 7000;
+  var REQUEST_MAX = 4294967295;
+  var VIDEO_ID = /^[A-Za-z0-9_-]{11}$/;
+  var BROWSE_ID = /^[A-Za-z0-9_-]{1,128}$/;
+  // Where YouTube Music's own API keeps the lyrics (as the ytmusicapi project reads them).
+  var TABS = ['contents', 'singleColumnMusicWatchNextResultsRenderer', 'tabbedRenderer', 'watchNextTabbedResultsRenderer', 'tabs'];
+  var PAGE_TYPE = ['browseEndpointContextSupportedConfigs', 'browseEndpointContextMusicConfig', 'pageType'];
+  var LYRICS_PAGE = 'MUSIC_PAGE_TYPE_TRACK_LYRICS';
+  // A tab of this type shows the tabs were read right, so a missing lyrics tab means no lyrics.
+  var RELATED_PAGE = 'MUSIC_PAGE_TYPE_TRACK_RELATED';
+  var SECTIONS = ['contents', 'sectionListRenderer', 'contents'];
   var EVENTS = ['play', 'pause', 'ended', 'durationchange', 'loadedmetadata', 'seeked'];
 
   // Prism's own transport plays and steers, so the page's player bar is hidden (owner,
@@ -60,8 +74,12 @@
   var watchedQueue = null;
   var queueObserver = null;
 
+  // A cut never leaves half a surrogate pair: Prism cannot read a report with one.
   function cap(value, max) {
-    return typeof value === 'string' ? value.slice(0, max) : '';
+    if (typeof value !== 'string') return '';
+    var text = value.slice(0, max);
+    var last = text.charCodeAt(text.length - 1);
+    return last >= 0xd800 && last <= 0xdbff ? text.slice(0, -1) : text;
   }
 
   function find(selector, root) {
@@ -130,7 +148,28 @@
       canNext: enabled(next),
       canPrev: enabled(prev),
       available: !!(bar && toggle && next && prev && video),
+      videoId: videoId(),
     };
+  }
+
+  // The player's own idea of the video, else the page URL's; '' when neither is an id.
+  function videoId() {
+    try {
+      var player = document.getElementById('movie_player');
+      var data = player && typeof player.getVideoData === 'function' ? player.getVideoData() : null;
+      var id = data && data.video_id;
+      if (typeof id === 'string' && VIDEO_ID.test(id)) return id;
+    } catch (e) {
+      // Fall back to the URL.
+    }
+    try {
+      var search = typeof location.search === 'string' ? location.search : '';
+      var fromUrl = new URLSearchParams(search).get('v');
+      if (fromUrl && VIDEO_ID.test(fromUrl)) return fromUrl;
+    } catch (e) {
+      // No id.
+    }
+    return '';
   }
 
   function send(report) {
@@ -331,6 +370,180 @@
     else queueTimer = setTimeout(checkQueue, wait);
   }
 
+  function at(value, path) {
+    for (var i = 0; i < path.length; i++) {
+      if (value === null || typeof value !== 'object') return undefined;
+      value = value[path[i]];
+    }
+    return value;
+  }
+
+  function runsText(holder) {
+    var runs = holder && holder.runs;
+    if (!Array.isArray(runs)) return '';
+    var text = '';
+    for (var i = 0; i < runs.length; i++) {
+      if (runs[i] && typeof runs[i].text === 'string') text += runs[i].text;
+    }
+    return text;
+  }
+
+  // The page's own client context (a copy), else the minimal one YouTube Music's API takes.
+  function innertubeContext() {
+    try {
+      var config = window.ytcfg;
+      var value = config && typeof config.get === 'function' ? config.get('INNERTUBE_CONTEXT') : null;
+      if (value && typeof value === 'object' && !Array.isArray(value)) {
+        var copy = JSON.parse(JSON.stringify(value));
+        if (copy && typeof copy === 'object') return copy;
+      }
+    } catch (e) {
+      // Use the minimal one.
+    }
+    var day = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+    return { client: { clientName: 'WEB_REMIX', clientVersion: '1.' + day + '.01.00' } };
+  }
+
+  // A POST to YouTube Music's own API, on the page's origin and without the user's cookies.
+  function innertube(endpoint, body, signal) {
+    var init = {
+      method: 'POST',
+      mode: 'same-origin',
+      credentials: 'omit',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    };
+    if (signal) init.signal = signal;
+    return Promise.resolve()
+      .then(function () {
+        return window.fetch('/youtubei/v1/' + endpoint + '?prettyPrint=false', init);
+      })
+      .then(function (response) {
+        if (!response || !response.ok) throw new Error('status');
+        return response.json();
+      })
+      .then(function (data) {
+        if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('shape');
+        return data;
+      });
+  }
+
+  // The lyrics tab's browse id. Null when the song has no lyrics: an unselectable tab, or
+  // tabs of known types without a lyrics one. Tabs of no known type are a shape this bridge
+  // does not know (a failure, never a miss).
+  function lyricsBrowseId(next) {
+    var tabs = at(next, TABS);
+    if (!Array.isArray(tabs)) throw new Error('shape');
+    var known = false;
+    for (var i = 0; i < tabs.length; i++) {
+      var tab = tabs[i] && tabs[i].tabRenderer;
+      if (!tab || typeof tab !== 'object') continue;
+      // Skipped before its endpoint is read, as ytmusicapi does; it usually has none.
+      if (Object.prototype.hasOwnProperty.call(tab, 'unselectable')) {
+        known = true;
+        continue;
+      }
+      var browse = at(tab, ['endpoint', 'browseEndpoint']);
+      var type = at(browse, PAGE_TYPE);
+      if (type === RELATED_PAGE) known = true;
+      if (type !== LYRICS_PAGE) continue;
+      var id = browse.browseId;
+      if (typeof id !== 'string' || !BROWSE_ID.test(id)) throw new Error('shape');
+      return id;
+    }
+    if (!known) throw new Error('shape');
+    return null;
+  }
+
+  function lyricsShelf(page) {
+    var sections = at(page, SECTIONS);
+    if (!Array.isArray(sections)) return null;
+    for (var i = 0; i < sections.length; i++) {
+      var shelf = sections[i] && sections[i].musicDescriptionShelfRenderer;
+      if (shelf && typeof shelf === 'object') return shelf;
+    }
+    return null;
+  }
+
+  // The report at most LYRICS_BYTES_MAX as JSON; the text loses its tail to fit.
+  function fitLyrics(report) {
+    var over = bytes(JSON.stringify(report)) - LYRICS_BYTES_MAX;
+    while (over > 0 && report.text) {
+      var text = report.text.slice(0, Math.max(0, report.text.length - over));
+      var last = text.charCodeAt(text.length - 1);
+      if (last >= 0xd800 && last <= 0xdbff) text = text.slice(0, -1);
+      report.text = text;
+      over = bytes(JSON.stringify(report)) - LYRICS_BYTES_MAX;
+    }
+    return report;
+  }
+
+  function validRequest(n) {
+    return typeof n === 'number' && Number.isInteger(n) && n >= 1 && n <= REQUEST_MAX;
+  }
+
+  // Answers Prism's request number `window.__prismLyricsRequest` for the video playing now.
+  function lyrics() {
+    var request = window.__prismLyricsRequest;
+    if (!validRequest(request)) return;
+    var id = videoId();
+    if (!id) return;
+    var controller = typeof AbortController === 'function' ? new AbortController() : null;
+    var signal = controller ? controller.signal : null;
+    var done = false;
+    var timer = null;
+    function finish(text, provider, failed) {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      send(
+        fitLyrics({
+          v: 1,
+          kind: 'lyrics',
+          request: request,
+          videoId: id,
+          text: text,
+          provider: provider ? cap(provider.replace(/\s+/g, ' ').trim(), TEXT_MAX) || null : null,
+          failed: failed,
+        })
+      );
+    }
+    timer = setTimeout(function () {
+      if (controller) controller.abort();
+      finish(null, null, true);
+    }, LYRICS_TIME_MS);
+    var context = innertubeContext();
+    innertube(
+      'next',
+      {
+        enablePersistentPlaylistPanel: true,
+        isAudioOnly: true,
+        tunerSettingValue: 'AUTOMIX_SETTING_NORMAL',
+        videoId: id,
+        playlistId: 'RDAMVM' + id,
+        watchEndpointMusicSupportedConfigs: {
+          watchEndpointMusicConfig: { hasPersistentPlaylistPanel: true, musicVideoType: 'MUSIC_VIDEO_TYPE_ATV' },
+        },
+        context: context,
+      },
+      signal
+    )
+      .then(function (next) {
+        var browseId = lyricsBrowseId(next);
+        if (browseId === null) return finish(null, null, false);
+        return innertube('browse', { browseId: browseId, context: context }, signal).then(function (page) {
+          var shelf = lyricsShelf(page);
+          var text = shelf ? runsText(shelf.description) : '';
+          // The tab promised lyrics: a page without them is a shape this bridge does not know.
+          if (!text.trim()) throw new Error('shape');
+          finish(text, runsText(shelf.footer), false);
+        });
+      })
+      .then(null, function () {
+        finish(null, null, true);
+      });
+  }
+
   function click(selector) {
     var button = control(selector);
     if (enabled(button)) button.click();
@@ -378,6 +591,9 @@
         if (typeof at !== 'number' || !Number.isInteger(at) || at < 0) break;
         var entry = queueItems(find(SEL.queue))[at];
         if (entry) (find(SEL.queuePlay, entry) || entry).click();
+        break;
+      case 'lyrics':
+        lyrics();
         break;
       default:
         break;

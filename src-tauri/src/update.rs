@@ -978,6 +978,9 @@ mod tests {
         let updater = &config()["plugins"]["updater"];
         assert_eq!(updater["endpoints"], serde_json::json!([ENDPOINT]));
         assert_eq!(updater["windows"]["installMode"], "passive");
+        // The signature must carry the version, so a relabelled latest.json cannot pair a
+        // newer number with an older signed package. Every release since 1.0.0 is signed so.
+        assert_eq!(updater["requireSignedVersion"], true);
         assert!(updater.get("dangerousInsecureTransportProtocol").is_none());
         assert!(updater.get("dangerousAcceptInvalidCerts").is_none());
     }

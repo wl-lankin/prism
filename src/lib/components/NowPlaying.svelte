@@ -8,6 +8,7 @@
   import { go } from '../stores/nav.svelte';
   import { player } from '../stores/player.svelte';
   import { currentTitle, findStation, toggleStationFavorite } from '../stores/radio.svelte';
+  import { nowPlayingSide, setNowPlayingSide } from '../stores/queue.svelte';
   import { settings } from '../stores/settings.svelte';
   import { playQueueEntry, ytm } from '../stores/ytm.svelte';
   import type { FlowVariant, QueueItem, Track } from '../types';
@@ -18,8 +19,10 @@
   import EmptyArt from './EmptyArt.svelte';
   import Icon from './Icon.svelte';
   import LivePill from './LivePill.svelte';
+  import LyricsView from './LyricsView.svelte';
   import NowPlayingBars from './NowPlayingBars.svelte';
   import RowPlay from './RowPlay.svelte';
+  import Segmented from './Segmented.svelte';
   import StationTile from './StationTile.svelte';
 
   /** What plays now, as large as the window allows, beside the whole queue. The queue is
@@ -76,6 +79,11 @@
     if (at < 0 || !ytList) return;
     ytList.querySelector(`#ytnp-${at}`)?.scrollIntoView({ block: 'nearest' });
   });
+  const sideOptions = $derived([
+    { value: 'queue' as const, label: t('lyrics.upNext') },
+    { value: 'lyrics' as const, label: t('lyrics.show') },
+  ]);
+  const lyricsSide = $derived(nowPlayingSide.view === 'lyrics');
   const total = $derived(player.queueLength);
   const current = $derived(player.queueIndex);
   /** Dropped files ("file:" ids) are not in the library: no album, no artist page, no heart. */
@@ -314,7 +322,21 @@
           </span>
         </div>
       </header>
-      {#if ytQueue}
+      <div class="sideswitch">
+        <span id="np-side-label" hidden>{t('lyrics.sideView')}</span>
+        <Segmented
+          labelledby="np-side-label"
+          attr="data-side"
+          value={nowPlayingSide.view}
+          options={sideOptions}
+          onpick={setNowPlayingSide}
+        />
+      </div>
+      {#if lyricsSide}
+      <section class="queue lyrics-slot" aria-label={t('lyrics.title')}>
+        <LyricsView />
+      </section>
+      {:else if ytQueue}
         <section class="queue" aria-labelledby="queue-heading">
           <div class="qhead">
             <h2 id="queue-heading">{t('nowPlaying.queue')}</h2>
@@ -413,7 +435,22 @@
           {/if}
         </div>
       </header>
+      <div class="sideswitch">
+        <span id="np-side-label" hidden>{t('lyrics.sideView')}</span>
+        <Segmented
+          labelledby="np-side-label"
+          attr="data-side"
+          value={nowPlayingSide.view}
+          options={sideOptions}
+          onpick={setNowPlayingSide}
+        />
+      </div>
 
+      {#if lyricsSide}
+      <section class="queue lyrics-slot" aria-label={t('lyrics.title')}>
+        <LyricsView />
+      </section>
+      {:else}
       <section class="queue" aria-labelledby="queue-heading">
         <div class="qhead">
           <h2 id="queue-heading" class:flow={!!flow}>{heading}</h2>
@@ -516,6 +553,7 @@
           </div>
         </div>
       </section>
+      {/if}
     </div>
   {/if}
 </div>
@@ -688,6 +726,21 @@
     display: flex;
     flex-direction: column;
     border-top: 1px solid var(--line);
+  }
+
+  .sideswitch {
+    flex: none;
+    display: flex;
+    padding: 14px 0 0;
+    border-top: 1px solid var(--line);
+  }
+
+  .sideswitch + .queue {
+    border-top: 0;
+  }
+
+  .lyrics-slot {
+    padding-top: 12px;
   }
 
   .qhead {

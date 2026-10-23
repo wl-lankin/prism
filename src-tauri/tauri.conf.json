@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Prism",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "identifier": "de.wolfganglinz.prism",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -74,6 +74,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDFCQTVEMjI1RTBCMDQ5QkUKUldTK1NiRGdKZEtsRzdrcFIySmlSa0hCZ3J2LzY5YXNFU0U4OHRZZG12UnBPR0FJRDhFMVdydjEK",
       "endpoints": ["https://github.com/wl-lankin/prism/releases/latest/download/latest.json"],
+      "requireSignedVersion": true,
       "windows": {
         "installMode": "passive"
       }

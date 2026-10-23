@@ -147,7 +147,7 @@ pub fn ensure_server(db: &Db, key: &str) -> anyhow::Result<bool> {
 }
 
 /// Deletes every Navidrome row (tracks, albums, favorites, play stats, both queues, remote
-/// playlists, cover rows and cover lookups) and every sync state key except `server`. The
+/// playlists, cover rows and cover lookups, cached server lyrics) and every sync state key except `server`. The
 /// cached cover files go after the commit, through the service's cover purge.
 pub fn wipe_navidrome(tx: &Transaction) -> anyhow::Result<()> {
     tx.execute_batch(
@@ -161,6 +161,7 @@ pub fn wipe_navidrome(tx: &Transaction) -> anyhow::Result<()> {
          DELETE FROM navidrome_scrobble_queue;
          DELETE FROM remote_playlist_tracks;
          DELETE FROM remote_playlists;
+         DELETE FROM lyrics_cache WHERE key GLOB 'navidrome:*';
          DELETE FROM navidrome_state WHERE key <> 'server';",
     )?;
     Ok(())
@@ -1066,7 +1067,11 @@ mod tests {
                                                       ('abc123', 'abc123.jpg');
                  INSERT INTO cover_lookups (album_id, status, checked_at)
                      VALUES ('navidrome:al-0', 'notfound', 1),
-                            ('local:album', 'notfound', 1);",
+                            ('local:album', 'notfound', 1);
+                 INSERT INTO lyrics_cache (key, lyrics, checked_at)
+                     VALUES ('navidrome:tr-0', NULL, 1),
+                            ('lrclib:a|b||1', NULL, 1),
+                            ('youtube:demoSong001', NULL, 1);",
             )
             .unwrap();
         }
@@ -1093,6 +1098,12 @@ mod tests {
                 "{table}"
             );
         }
+        // Server lyrics go; the other sources' entries stay.
+        assert_eq!(
+            env.count("SELECT COUNT(*) FROM lyrics_cache WHERE key GLOB 'navidrome:*'"),
+            0
+        );
+        assert_eq!(env.count("SELECT COUNT(*) FROM lyrics_cache"), 2);
         // Local cover rows and lookups stay.
         assert_eq!(
             env.count("SELECT COUNT(*) FROM covers WHERE id = 'abc123'"),

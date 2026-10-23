@@ -152,6 +152,14 @@ pub(crate) struct FakeLibrary {
     pub starred_artists: HashSet<String>,
     /// `(song id, submission, time)` per scrobbled id.
     pub scrobbles: Vec<(String, bool, Option<i64>)>,
+    /// `structuredLyrics` entries (JSON as the spec shapes them) per song id.
+    pub structured_lyrics: HashMap<String, Vec<Value>>,
+    /// `(artist, title, text)` answered by the pre-OpenSubsonic `getLyrics`.
+    pub plain_lyrics: Vec<(String, String, String)>,
+    /// `ping` does not say `openSubsonic`, and the OpenSubsonic methods do not exist.
+    pub legacy_server: bool,
+    /// `getOpenSubsonicExtensions` does not list `songLyrics`.
+    pub no_song_lyrics: bool,
     audio: HashMap<String, Audio>,
     /// Cover bytes served as-is instead of a generated PNG.
     covers: HashMap<String, Vec<u8>>,
@@ -853,7 +861,43 @@ fn answer(
     let lib = &mut state.lib;
     let not_found = || Reply::json(failed(70));
     match method {
+        "ping" if lib.legacy_server => {
+            let mut value = ok(json!({}));
+            if let Some(response) = value
+                .get_mut("subsonic-response")
+                .and_then(Value::as_object_mut)
+            {
+                response.remove("openSubsonic");
+            }
+            Reply::json(value)
+        }
         "ping" => Reply::json(ok(json!({}))),
+        "getOpenSubsonicExtensions" if !lib.legacy_server => {
+            let mut list = vec![json!({ "name": "template", "versions": [1] })];
+            if !lib.no_song_lyrics {
+                list.push(json!({ "name": "songLyrics", "versions": [1] }));
+            }
+            Reply::json(ok(json!({ "openSubsonicExtensions": list })))
+        }
+        "getLyricsBySongId" if !lib.legacy_server && !lib.no_song_lyrics => {
+            let id = param(params, "id").unwrap_or_default();
+            let entries = lib.structured_lyrics.get(id).cloned().unwrap_or_default();
+            Reply::json(ok(json!({ "lyricsList": { "structuredLyrics": entries } })))
+        }
+        "getLyrics" => {
+            let artist = param(params, "artist").unwrap_or_default();
+            let title = param(params, "title").unwrap_or_default();
+            let value = lib
+                .plain_lyrics
+                .iter()
+                .find(|(a, t, _)| a == artist && t == title)
+                .map(|(_, _, text)| text.as_str());
+            let lyrics = match value {
+                Some(text) => json!({ "artist": artist, "title": title, "value": text }),
+                None => json!({ "artist": artist, "title": title }),
+            };
+            Reply::json(ok(json!({ "lyrics": lyrics })))
+        }
         "getIndexes" => {
             let mut index: Vec<(String, Vec<Value>)> = Vec::new();
             let mut artists = lib.artists.clone();

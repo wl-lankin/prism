@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.1.0
+
+**Lyrics**
+- Lyrics for the playing song in Now Playing and in a side panel (Ctrl+L). Synced lyrics follow the song line by line; click a line to jump there.
+- From .lrc files next to your songs, lyrics in the files, your Navidrome server, LRCLIB and YouTube Music.
+- "Search lyrics online" in Settings turns LRCLIB off. Prism then sends nothing to lrclib.net.
+
+---
+
+**First install**
+
+The installers are not code-signed yet, so your system will warn you the first time.
+
+- Windows: if SmartScreen blocks the installer, click "More info", then "Run anyway".
+- macOS: right-click Prism in Applications and choose "Open", then confirm. Or run `xattr -dr com.apple.quarantine /Applications/Prism.app` in Terminal.
+
 ## 1.0.0
 
 First release of Prism, a music player for your own music, your Navidrome server, internet radio and YouTube Music, for Windows and macOS.

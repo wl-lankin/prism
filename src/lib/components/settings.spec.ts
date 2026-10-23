@@ -318,6 +318,9 @@ it('saves the crossfade, mini player, cover and system settings', async () => {
   toggle('label-covers').click();
   await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('settings_set', { patch: { coverLookup: false } }));
   expect(target.textContent).toContain('MusicBrainz and the Cover Art Archive');
+  toggle('label-lyrics').click();
+  await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('settings_set', { patch: { lyricsLookup: false } }));
+  expect(target.textContent).toContain('Sends artist, title, album and length to lrclib.net.');
   toggle('label-autostart').click();
   await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('settings_set', { patch: { startWithSystem: true } }));
 });
@@ -787,6 +790,7 @@ it('has the same defaults as the backend', () => {
     crossfade: 'flow',
     crossfadeMs: 4000,
     coverLookup: true,
+    lyricsLookup: true,
     miniOnTop: false,
     miniShortcut: 'CommandOrControl+Alt+P',
     startWithSystem: false,

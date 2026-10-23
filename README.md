@@ -30,6 +30,7 @@
 - **Navidrome.** Browse and stream your server next to your local files. Hearts sync with the server's stars both ways, its playlists show up, and plays are scrobbled.
 - **Radio.** Search internet radio stations worldwide or see stations near you. Save stations, see the current song, and Prism reconnects after a dropout.
 - **YouTube Music.** Sign in in its own window and play it from within Prism. Its queue shows in Prism's queue panel, and media keys control it like any other source.
+- **Lyrics.** Synced lyrics follow the song line by line in Now Playing or the side panel, and a click on a line jumps there. They come from .lrc files, the song files, Navidrome, YouTube Music and LRCLIB (online search can be switched off).
 - **Flow.** An endless mix from your favorites in your library and on Navidrome.
 - **Favorites.** Songs, albums, artists and stations in one place.
 - **Mini player, tray and media keys.** A small mini player that can stay on top, a tray icon (Windows) or menu bar item (macOS), and media keys and system media controls that follow whichever source is playing. A global shortcut shows or hides the mini player.
