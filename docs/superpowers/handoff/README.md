@@ -21,7 +21,7 @@ The ledgers are copies of the working ledgers in `.superpowers/sdd/` (gitignored
 
 ## Branches
 
-Each milestone branch is cut from the previous one. `main` holds the released state (v1.0.0 is the merge of `PRISM-6`, v1.1.0 the merge of `PRISM-7`). The GitHub default branch is still `PRISM-3`.
+Each milestone branch is cut from the previous one. `main` holds the released state (v1.0.0 is the merge of `PRISM-6`, v1.1.0 the merge of `PRISM-7`). The GitHub default branch is `main` (since 2026-10-23).
 
 | Branch | Content | State |
 |---|---|---|
