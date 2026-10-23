@@ -31,7 +31,7 @@ Each milestone branch is cut from the previous one. `main` holds the released st
 | `PRISM-4` | M4 Radio, cut from `PRISM-3` before the M3 hand check | done; checked by the owner in daily use on the Mac, plus UI fixes from that |
 | `PRISM-5` | M5 YouTube Music, cut from `PRISM-4` | done; Mac hand check done (sign-in, playback, controls), Windows hand check open |
 | `PRISM-6` | M6 Release v1.0.0, cut from `PRISM-5` | released as v1.0.0 from `main` 6284b56; its fix cb93132 reached `main` with v1.1.0 |
-| `PRISM-7` | M7 Lyrics, cut from `PRISM-6` | released as v1.1.0 from `main` 222e2c0 |
+| `PRISM-7` | M7 Lyrics, cut from `PRISM-6` | released as v1.1.0 from `main` df0c937 |
 | `main` | released versions | v1.1.0 |
 | `spike-ytm` | YouTube Music sign-in spike | reference only |
 

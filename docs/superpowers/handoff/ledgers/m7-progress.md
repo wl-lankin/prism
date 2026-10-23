@@ -25,7 +25,7 @@ Plan: docs/superpowers/plans/2026-10-22-prism-m7-lyrics.md. Branch PRISM-7 cut f
 - Task 4 fixes e598b94; merged 7b457d3. cargo 1057 + 2 expected manifest failures, npm 527, check 0. Task 6 started in m7-t06 (PRISM-706).
 - Task 6: c8fc688 (cargo 1096 all green, npm 527). Review: approve with minors (setting-off refetch of lrclib answers, tests, signed-out none, clear navidrome rows on disconnect); fixes sent back.
 - Task 6 fixes 43cd471; merged 96904e5. Task 7: cargo 1101 green, clippy, fmt, Windows check, npm 528, check 0; CHANGELOG Unreleased + README (d2fc848), LRCLIB credit (ae1b569). Hand-check instance dev8 (prism-data8) running from m7 with demo/ (60 tracks; Night Swim Revisited 01 .lrc, 02 embedded synced, 03 embedded plain, invented text). Task 8 owner hand check open.
-- Task 8: owner 2026-10-23 "Mir passts", then "dann release". Task worktrees m7-t01..t06 and branches removed. Version 1.1.0 (0740f38), merged into main 222e2c0, CI on main, tag v1.1.0.
+- Task 8: owner 2026-10-23 "Mir passts", then "dann release". Task worktrees m7-t01..t06 and branches removed. Version 1.1.0 (0740f38), merged into main 222e2c0, CI on main red once (clippy 1.99 chunks_exact in lyrics/local.rs), fixed; main df0c937, tag v1.1.0, release run 39925991835 green, all 10 assets, sigs version:1.1.0, published as latest.
 
 ## Rulings
 - Recurring: implementers edit with Python despite the Write/Edit rule (Tasks 1, 2, 3). Reviewers check the result, not the tool.
