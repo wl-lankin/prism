@@ -70,7 +70,7 @@ jobs:
           $unpacked = Join-Path $env:RUNNER_TEMP 'installer'
           7z x $setup.FullName "-o$unpacked" -y | Out-Null
           $files = @($setup) + @(Get-ChildItem $unpacked -Recurse -Filter *.exe | Where-Object Name -notlike 'uninstall*')
-          foreach ($n in 'Prism.exe', 'ffmpeg.exe', 'ffprobe.exe') {
+          foreach ($n in 'prism.exe', 'ffmpeg.exe', 'ffprobe.exe') {
             if (-not ($files.Name -ccontains $n)) { throw "$n missing in the installer: $($files.Name -join ', ')" }
           }
           $bad = 0
