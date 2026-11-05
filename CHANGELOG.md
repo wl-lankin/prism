@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.1.1
+
+**Signed Windows installer**
+- The Windows installer and the app are now digitally signed (publisher Wolfgang Linz), so Windows no longer warns about an unknown publisher.
+
+---
+
+**First install**
+
+The macOS app is not code-signed yet, so macOS will warn you the first time.
+
+- Windows: the installer is signed. While the certificate is still new, SmartScreen can ask once; click "Run anyway" if it does.
+- macOS: right-click Prism in Applications and choose "Open", then confirm. Or run `xattr -dr com.apple.quarantine /Applications/Prism.app` in Terminal.
+
 ## 1.1.0
 
 **Lyrics**
