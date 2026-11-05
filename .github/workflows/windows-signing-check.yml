@@ -1,0 +1,88 @@
+# Builds and signs the Windows installer without releasing anything, then checks the signatures
+# of the installer and of every .exe inside it. Runs on pull requests that touch the signing setup,
+# or by hand. The installer is kept as a workflow artifact.
+
+name: Windows signing check
+
+on:
+  pull_request:
+    paths:
+      - .github/actions/windows-signing/**
+      - .github/workflows/windows-signing-check.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  ffmpeg:
+    uses: ./.github/workflows/ffmpeg.yml
+
+  sign:
+    needs: ffmpeg
+    runs-on: windows-latest
+    environment: release
+    env:
+      AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ffmpeg-x86_64-pc-windows-msvc
+          path: ffmpeg-bin
+
+      - name: Stage the FFmpeg sidecars
+        shell: bash
+        run: bash scripts/stage-ffmpeg.sh ffmpeg-bin
+
+      - run: npm ci
+
+      # The app, the ffmpeg/ffprobe sidecars (externalBin) and the installer are signed inside
+      # tauri build.
+      - name: Prepare code signing
+        id: signing
+        uses: ./.github/actions/windows-signing
+        with:
+          description: Prism
+
+      - name: Build and sign
+        shell: bash
+        run: npx tauri build --bundles nsis --config src-tauri/tauri.sidecar.conf.json --config "${{ steps.signing.outputs.config }}"
+
+      - name: Check the signatures
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe
+          $unpacked = Join-Path $env:RUNNER_TEMP 'installer'
+          7z x $setup.FullName "-o$unpacked" -y | Out-Null
+          $files = @($setup) + @(Get-ChildItem $unpacked -Recurse -Filter *.exe | Where-Object Name -notlike 'uninstall*')
+          foreach ($n in 'Prism.exe', 'ffmpeg.exe', 'ffprobe.exe') {
+            if (-not ($files.Name -ccontains $n)) { throw "$n missing in the installer: $($files.Name -join ', ')" }
+          }
+          $bad = 0
+          foreach ($f in $files) {
+            $s = Get-AuthenticodeSignature $f.FullName
+            "{0}: {1} | {2} | timestamp: {3}" -f $f.Name, $s.Status, $s.SignerCertificate.Subject, ($null -ne $s.TimeStamperCertificate)
+            if ($s.Status -ne 'Valid' -or $s.SignerCertificate.Subject -notmatch 'CN=Wolfgang Linz' -or -not $s.TimeStamperCertificate) { $bad++ }
+          }
+          if ($bad) { throw "$bad file(s) not signed correctly" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prism-windows-signed
+          path: src-tauri/target/release/bundle/nsis/*-setup.exe
+          retention-days: 7

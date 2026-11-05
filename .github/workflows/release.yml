@@ -12,6 +12,8 @@
 # makes `tauri build` demand the signing key and source builds have none. The FFmpeg sidecars
 # come from ffmpeg.yml and are bundled through src-tauri/tauri.sidecar.conf.json.
 #
+# The Windows app, sidecars and installer are Authenticode-signed (docs/CODE-SIGNING.md).
+#
 # The installers are attached twice, with the version in the name (tauri-action) and as
 # Prism-setup.exe / Prism.dmg, so the README can link to releases/latest/download/<name>.
 
@@ -87,6 +89,7 @@ jobs:
     needs: [prepare, ffmpeg]
     permissions:
       contents: write
+      id-token: write # Windows signing logs in to Azure Artifact Signing through OIDC
     strategy:
       fail-fast: false
       # One at a time, macOS first: both legs write the same draft and the same latest.json, and
@@ -101,8 +104,12 @@ jobs:
             ffmpeg-artifact: ffmpeg-x86_64-pc-windows-msvc
             args: "--bundles nsis --config src-tauri/tauri.updater.conf.json --config src-tauri/tauri.sidecar.conf.json"
     runs-on: ${{ matrix.platform }}
+    # The Azure login for signing only trusts jobs in this environment.
+    environment: release
     env:
       TAG: ${{ needs.prepare.outputs.tag }}
+      AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
     steps:
       - uses: actions/checkout@v4
 
@@ -129,6 +136,15 @@ jobs:
         run: bash scripts/stage-ffmpeg.sh ffmpeg-bin
 
       - run: npm ci
+
+      # Tauri signs the app, the ffmpeg/ffprobe sidecars (externalBin) and the installer inside
+      # tauri build, so the updater .sig files are made over the signed installer.
+      - name: Prepare code signing (Windows)
+        id: signing
+        if: matrix.platform == 'windows-latest'
+        uses: ./.github/actions/windows-signing
+        with:
+          description: Prism
 
       # The body is the CHANGELOG section of the version, which already ends with the install
       # notes. It also ends up in latest.json, so the app shows it as the release notes.
@@ -157,7 +173,7 @@ jobs:
           prerelease: ${{ contains(env.TAG, '-') }}
           uploadUpdaterJson: true
           updaterJsonPreferNsis: true
-          args: ${{ matrix.args }}
+          args: ${{ matrix.args }}${{ steps.signing.outputs.config && format(' --config {0}', steps.signing.outputs.config) || '' }}
 
   assets:
     needs: [prepare, release]

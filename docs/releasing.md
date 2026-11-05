@@ -14,6 +14,8 @@ only fills a draft, and the owner publishes it.
    `Prism_1.0.0-beta.1_x64-setup.exe`. The NSIS installer accepts a prerelease version (only MSI
    would not, and none is built). The beta takes its notes from the `1.0.0` section when there
    is no `1.0.0-beta.1` section. Going to 1.0.0 means setting the version back.
+   The Windows installer is code-signed (`docs/CODE-SIGNING.md`), so the install notes of a new
+   version no longer need the "not code-signed" line for Windows; macOS stays unsigned.
 3. CI is green on the commit (`.github/workflows/ci.yml`).
 
 ## Running it
