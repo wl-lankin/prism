@@ -72,7 +72,7 @@ A file dropped onto the window plays even if it is outside your library.
 
 ## First launch
 
-The 1.0 installers are not code-signed yet, so your system warns you the first time.
+The macOS app is not signed, so your system warns you the first time. The Windows installer is code-signed from the first release after 1.1.0 (publisher "Wolfgang Linz"); while the certificate is still new, SmartScreen can still ask once.
 
 - **Windows:** if SmartScreen blocks the installer, click "More info", then "Run anyway".
 - **macOS:** right-click Prism in Applications, choose "Open", then confirm. Or run this in Terminal:
