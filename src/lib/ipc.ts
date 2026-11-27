@@ -219,6 +219,8 @@ export const audioDevices = () => call<string[]>('audio_devices');
 export const windowVibrancy = () => call<boolean>('window_vibrancy');
 /** True in kiosk mode: the touchscreen player, full screen, without window controls. */
 export const windowKiosk = () => call<boolean>('window_kiosk');
+/** Kiosk only: switches the device off or restarts it (Settings, "This device"). */
+export const kioskPower = (action: 'poweroff' | 'reboot') => call<void>('kiosk_power', { action });
 /** The one-time startup notice (a quarantined library file name), cleared once read. */
 export const startupNotice = () => call<string | null>('startup_notice');
 

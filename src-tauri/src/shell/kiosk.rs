@@ -6,6 +6,8 @@
 use std::ffi::OsStr;
 use std::sync::OnceLock;
 
+use serde::Deserialize;
+
 /// The environment variable that turns kiosk mode on (`1`, `true`, `yes` or `on`).
 pub const ENV: &str = "PRISM_KIOSK";
 
@@ -65,6 +67,51 @@ pub fn window_kiosk() -> bool {
     enabled()
 }
 
+/// What the kiosk's power buttons ask for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Power {
+    Poweroff,
+    Reboot,
+}
+
+impl Power {
+    fn verb(self) -> &'static str {
+        match self {
+            Power::Poweroff => "poweroff",
+            Power::Reboot => "reboot",
+        }
+    }
+}
+
+/// Switches the device off or restarts it: a kiosk has no desktop with a power menu. Refused
+/// outside kiosk mode. Runs `sudo -n /usr/bin/systemctl poweroff` (or `reboot`), which the
+/// sudoers rule from `scripts/pi/setup-kiosk.sh` allows the kiosk user without a password;
+/// `-n` makes a missing rule fail at once instead of waiting for a password nobody can type.
+#[tauri::command]
+pub fn kiosk_power(action: Power) -> Result<(), String> {
+    if !enabled() {
+        return Err("switching the device off is for kiosk mode only".into());
+    }
+    let output = std::process::Command::new("sudo")
+        .args(["-n", "/usr/bin/systemctl", action.verb()])
+        .output()
+        .map_err(|err| format!("sudo could not start: {err}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let reason: String = String::from_utf8_lossy(&output.stderr)
+        .trim()
+        .chars()
+        .take(200)
+        .collect();
+    Err(if reason.is_empty() {
+        format!("systemctl {} failed", action.verb())
+    } else {
+        reason
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -78,6 +125,23 @@ mod tests {
             assert!(!is_on(Some(OsStr::new(off))), "{off:?}");
         }
         assert!(!is_on(None));
+    }
+
+    #[test]
+    fn power_actions_come_from_the_page_in_lowercase() {
+        let action: Power = serde_json::from_str("\"poweroff\"").unwrap();
+        assert_eq!(action, Power::Poweroff);
+        assert_eq!(action.verb(), "poweroff");
+        let action: Power = serde_json::from_str("\"reboot\"").unwrap();
+        assert_eq!(action.verb(), "reboot");
+        assert!(serde_json::from_str::<Power>("\"halt\"").is_err());
+    }
+
+    #[test]
+    fn power_is_refused_outside_kiosk_mode() {
+        // Tests never run with PRISM_KIOSK set, so nothing is switched off here.
+        assert!(!enabled());
+        assert!(kiosk_power(Power::Poweroff).is_err());
     }
 
     #[test]

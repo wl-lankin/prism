@@ -82,6 +82,7 @@
     "allow-tray-set-labels",
     "allow-window-vibrancy",
     "allow-window-kiosk",
+    "allow-kiosk-power",
     "allow-startup-notice",
     "allow-ytm-show",
     "allow-ytm-hide",

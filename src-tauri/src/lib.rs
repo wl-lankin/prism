@@ -701,6 +701,7 @@ pub fn run() {
             commands::update_restart,
             window::window_vibrancy,
             shell::kiosk::window_kiosk,
+            shell::kiosk::kiosk_power,
             startup::startup_notice,
         ])
         .build(tauri::generate_context!())

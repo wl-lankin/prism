@@ -700,6 +700,79 @@ it('disconnect_needs_the_confirm_row', async () => {
   await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('navidrome_disconnect', undefined));
 });
 
+describe('This device (kiosk)', () => {
+  let windowState: { kiosk: boolean };
+
+  beforeEach(async () => {
+    ({ windowState } = await import('../stores/window.svelte'));
+    windowState.kiosk = true;
+  });
+
+  afterEach(() => {
+    windowState.kiosk = false;
+  });
+
+  const device = () => target.querySelector<HTMLElement>('section[aria-labelledby="settings-device"]');
+  const deviceButton = (label: string) =>
+    [...device()!.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === label)!;
+
+  it('replaces the mini player and system sections in kiosk mode only', () => {
+    mounted.push(mount(Settings, { target }));
+    flushSync();
+    expect(device()).not.toBeNull();
+    expect(target.querySelector('section[aria-labelledby="settings-mini"]')).toBeNull();
+    expect(target.querySelector('section[aria-labelledby="settings-system"]')).toBeNull();
+
+    windowState.kiosk = false;
+    flushSync();
+    expect(device()).toBeNull();
+    expect(target.querySelector('section[aria-labelledby="settings-mini"]')).not.toBeNull();
+  });
+
+  it('switches off only after the confirm, and Cancel keeps it on', async () => {
+    mounted.push(mount(Settings, { target }));
+    flushSync();
+    invoke.mockClear();
+    deviceButton('Switch off').click();
+    flushSync();
+    expect(device()!.textContent).toContain('Switch the device off now?');
+    expect(invoke).not.toHaveBeenCalledWith('kiosk_power', expect.anything());
+    await vi.waitFor(() => expect(document.activeElement).toBe(deviceButton('Cancel')));
+    deviceButton('Cancel').click();
+    flushSync();
+    expect(device()!.textContent).not.toContain('Switch the device off now?');
+    expect(invoke).not.toHaveBeenCalledWith('kiosk_power', expect.anything());
+
+    deviceButton('Restart').click();
+    flushSync();
+    expect(device()!.textContent).toContain('Restart the device now?');
+    device()!.querySelector<HTMLButtonElement>('.link.danger')!.click();
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('kiosk_power', { action: 'reboot' }));
+  });
+
+  it('shows why the device could not be switched', async () => {
+    mounted.push(mount(Settings, { target }));
+    flushSync();
+    const plain = invoke.getMockImplementation()!;
+    invoke.mockImplementation(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === 'kiosk_power') throw 'sudo: a password is required';
+      return plain(cmd, args);
+    });
+    try {
+      deviceButton('Switch off').click();
+      flushSync();
+      device()!.querySelector<HTMLButtonElement>('.link.danger')!.click();
+      await vi.waitFor(() =>
+        expect(device()!.querySelector('[role="alert"]')?.textContent).toContain('sudo: a password is required'),
+      );
+      // The buttons work again for another try.
+      expect(deviceButton('Switch off').disabled).toBe(false);
+    } finally {
+      invoke.mockImplementation(plain);
+    }
+  });
+});
+
 it('folder_remove_confirm_moves_the_focus_and_esc_keeps', async () => {
   mountSettings();
   await vi.waitFor(() => {

@@ -108,6 +108,22 @@ EOF
     ;;
 esac
 
+echo "== power buttons"
+# Prism's "Switch off" and "Restart" (Settings, This device) run these two commands through
+# `sudo -n`; the kiosk user may run exactly them without a password, nothing else.
+rule=/etc/sudoers.d/prism-kiosk
+cat >"$rule.tmp" <<EOF
+# Prism kiosk: the power buttons in Prism's settings (written by setup-kiosk.sh).
+$user ALL=(root) NOPASSWD: /usr/bin/systemctl poweroff, /usr/bin/systemctl reboot
+EOF
+chmod 0440 "$rule.tmp"
+if visudo -cf "$rule.tmp" >/dev/null; then
+  mv "$rule.tmp" "$rule"
+else
+  rm -f "$rule.tmp"
+  echo "the sudoers rule did not validate; the power buttons will report an error" >&2
+fi
+
 echo "== session"
 install -m 0755 "$here/prism-kiosk-run" /usr/local/bin/prism-kiosk-run
 sed "s/@USER@/$user/" "$here/prism-kiosk.service" >/etc/systemd/system/prism-kiosk.service
