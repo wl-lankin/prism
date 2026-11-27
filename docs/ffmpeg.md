@@ -62,8 +62,11 @@ Windows x64 adds:
 Linux (built natively on Ubuntu 22.04 arm64) adds:
 
 ```
---enable-pthreads --enable-openssl
+--enable-pthreads --enable-openssl --enable-protocol=udp
 ```
+
+FFmpeg 8's OpenSSL glue also serves DTLS and calls into the `udp` protocol, so the Linux build
+links it in; Prism's `-protocol_whitelist` never lets a stream use it.
 
 `ffmpeg -version` of a bundled binary prints its exact line.
 

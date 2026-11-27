@@ -41,10 +41,12 @@ rm -rf "$work"
 mkdir -p "$work"
 # OpenSSL for https (HLS stations); the system's libssl.so.3 is linked dynamically. OpenSSL 3 is
 # Apache 2.0, which the LGPL build may use (configure refuses it only with --enable-gpl).
+# FFmpeg 8's OpenSSL glue also serves DTLS and calls into the udp protocol, so udp is linked in
+# too; Prism's -protocol_whitelist never lets a stream use it.
 # shellcheck disable=SC2046
 (cd "$work" && "$src_dir/configure" \
   $(ffmpeg_common_flags) \
-  --enable-pthreads --enable-openssl)
+  --enable-pthreads --enable-openssl --enable-protocol=udp)
 make -C "$work" -j"$(ffmpeg_jobs)" ffmpeg ffprobe
 
 mkdir -p "$out_dir"
