@@ -1,0 +1,75 @@
+# Linux arm64 (Raspberry Pi OS): tests, lints and the .deb, on GitHub's arm64 runner.
+#
+# Built on Ubuntu 22.04 (glibc 2.35, WebKitGTK 4.1), so the package runs on Raspberry Pi OS
+# Bookworm (glibc 2.36) and Trixie (2.41). The tests use the distribution's FFmpeg, which the
+# .deb also depends on instead of bundling its own (src-tauri/tauri.linux.conf.json).
+
+name: Linux
+
+on:
+  push:
+    branches: [main, PRISM-8]
+    paths-ignore: ["docs/**", "**/*.md"]
+  pull_request:
+    paths-ignore: ["docs/**", "**/*.md"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  arm64:
+    runs-on: ubuntu-22.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: System packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config file patchelf \
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev \
+            libssl-dev libasound2-dev libdbus-1-dev \
+            ffmpeg xvfb xauth
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: npm ci
+
+      - run: npm test
+
+      - run: npm run check
+
+      # The Rust build embeds the frontend (frontendDist ../dist), so clippy and the tests need it.
+      - run: npm run build
+
+      - run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
+
+      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+
+      # Some tests start GTK pieces; give them a display.
+      - run: xvfb-run -a cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: Build the .deb
+        run: npx tauri build --bundles deb
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prism-linux-arm64-deb
+          path: src-tauri/target/release/bundle/deb/*.deb
+          if-no-files-found: error
