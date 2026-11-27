@@ -30,7 +30,6 @@ use library::covers::CoverStore;
 use library::scan::lock;
 use library::{query, tauri_emitter, watch, Library, LibraryOptions};
 use media_controls::MediaBridge;
-use navidrome::keychain::{CredentialStore, KeyringStore};
 use navidrome::stream::navidrome_opener;
 use navidrome::{NavidromeEmit, NavidromeEvent, NavidromeService};
 use player::{
@@ -382,7 +381,7 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
     let navidrome = NavidromeService::spawn(
         Arc::clone(&library.db),
         Arc::clone(&settings),
-        Arc::new(KeyringStore::new(&app.config().identifier)) as Arc<dyn CredentialStore>,
+        navidrome::keychain::platform_store(&app.config().identifier, &data_dir),
         navidrome_emit(handle.clone()),
     );
     // Before the player: its resolver reads stations from the radio store.
