@@ -1,0 +1,33 @@
+# Prism as a full screen touch player: cage (a Wayland kiosk compositor) runs Prism on tty1 in
+# a real login session of the kiosk user, so cage gets the display and input through logind and
+# Prism a session D-Bus (media controls). Restarted when Prism exits. Installed by
+# scripts/pi/setup-kiosk.sh, which fills in @USER@.
+
+[Unit]
+Description=Prism touch player (cage on tty1)
+After=systemd-user-sessions.service plymouth-quit-wait.service network-online.target
+Wants=network-online.target
+Conflicts=getty@tty1.service
+After=getty@tty1.service
+
+[Service]
+Type=simple
+User=@USER@
+PAMName=login
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+StandardInput=tty-fail
+StandardOutput=journal
+StandardError=journal
+UtmpIdentifier=tty1
+UtmpMode=user
+Environment=PRISM_KIOSK=1
+EnvironmentFile=-/etc/default/prism-kiosk
+ExecStart=/usr/bin/cage -d -s -- /usr/bin/prism
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=graphical.target

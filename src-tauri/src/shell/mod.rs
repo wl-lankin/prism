@@ -1,5 +1,6 @@
 //! The shell around the player: tray, mini player, shortcuts and autostart.
 
+pub mod kiosk;
 pub mod mini;
 pub mod open_with;
 pub mod shape;
@@ -150,6 +151,12 @@ pub fn start_main(app: &AppHandle, autostart: bool) {
         }
         MainAtStart::Show => {
             if let Some(window) = app.get_window(MAIN_LABEL) {
+                // A kiosk fills the screen; the page lays itself out as for a maximized window.
+                if kiosk::enabled() {
+                    if let Err(err) = window.set_fullscreen(true) {
+                        eprintln!("making the main window full screen failed: {err}");
+                    }
+                }
                 if let Err(err) = window.show() {
                     eprintln!("showing the main window failed: {err}");
                 }

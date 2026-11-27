@@ -33,7 +33,7 @@
   import ViewHead from './lib/components/ViewHead.svelte';
   import { activateIdle, holdToOpen } from './lib/flow';
   import { lang, t, tc, type Key } from './lib/i18n';
-  import { onNavGo, playerPlayFiles, playerToggle, startupNotice, traySetLabels, windowVibrancy } from './lib/ipc';
+  import { onNavGo, playerPlayFiles, playerToggle, startupNotice, traySetLabels, windowKiosk, windowVibrancy } from './lib/ipc';
   import { favorites, initFavorites } from './lib/stores/favorites.svelte';
   import { albumsOf, artistsOf, countOf, hasMixedSources, initLibrary, library } from './lib/stores/library.svelte';
   import { failureText, initNavidrome, navidrome } from './lib/stores/navidrome.svelte';
@@ -88,6 +88,12 @@
       .then((on) => {
         glass = on;
         document.documentElement.dataset.vibrancy = on ? 'on' : 'off';
+      })
+      .catch(() => {});
+    windowKiosk()
+      .then((on) => {
+        windowState.kiosk = on === true;
+        document.documentElement.dataset.kiosk = on === true ? 'on' : 'off';
       })
       .catch(() => {});
     return () => {

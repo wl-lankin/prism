@@ -25,23 +25,25 @@
   <div class="lead" data-tauri-drag-region>
     {@render children?.()}
   </div>
-  <div class="controls">
-    <button type="button" class="ctl" aria-label={t('window.minimize')} title={t('window.minimize')} onclick={() => act('minimize')}>
-      <Icon name="minimize" size={16} />
-    </button>
-    <button
-      type="button"
-      class="ctl"
-      aria-label={maximized ? t('window.restore') : t('window.maximize')}
-      title={maximized ? t('window.restore') : t('window.maximize')}
-      onclick={() => act('toggleMaximize')}
-    >
-      <Icon name={maximized ? 'restore' : 'maximize'} size={16} />
-    </button>
-    <button type="button" class="ctl close" aria-label={t('window.close')} title={t('window.close')} onclick={() => act('close')}>
-      <Icon name="close" size={16} />
-    </button>
-  </div>
+  {#if !windowState.kiosk}
+    <div class="controls">
+      <button type="button" class="ctl" aria-label={t('window.minimize')} title={t('window.minimize')} onclick={() => act('minimize')}>
+        <Icon name="minimize" size={16} />
+      </button>
+      <button
+        type="button"
+        class="ctl"
+        aria-label={maximized ? t('window.restore') : t('window.maximize')}
+        title={maximized ? t('window.restore') : t('window.maximize')}
+        onclick={() => act('toggleMaximize')}
+      >
+        <Icon name={maximized ? 'restore' : 'maximize'} size={16} />
+      </button>
+      <button type="button" class="ctl close" aria-label={t('window.close')} title={t('window.close')} onclick={() => act('close')}>
+        <Icon name="close" size={16} />
+      </button>
+    </div>
+  {/if}
 </header>
 
 <style>

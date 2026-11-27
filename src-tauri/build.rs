@@ -83,6 +83,7 @@ const COMMANDS: &[&str] = &[
     "update_check",
     "update_restart",
     "window_vibrancy",
+    "window_kiosk",
     "startup_notice",
 ];
 

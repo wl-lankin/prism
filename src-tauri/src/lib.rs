@@ -524,18 +524,25 @@ fn setup(app: &mut tauri::App) -> anyhow::Result<()> {
         settings,
         thumbs,
     });
+    // A kiosk (the touchscreen player) has no desktop around it: no mini player, no global
+    // shortcut, no tray.
+    let kiosk = shell::kiosk::enabled();
     // After the app state: the mini page asks for it as soon as it loads. Hidden until the
     // user asks for it.
-    if let Err(err) = shell::mini::create(app.handle(), initial.mini_on_top) {
-        eprintln!("creating the mini player failed: {err}");
-    }
-    if let Err(err) = shell::shortcut::apply(&handle, &initial.mini_shortcut) {
-        eprintln!("registering the mini player shortcut failed: {err}");
+    if !kiosk {
+        if let Err(err) = shell::mini::create(app.handle(), initial.mini_on_top) {
+            eprintln!("creating the mini player failed: {err}");
+        }
+        if let Err(err) = shell::shortcut::apply(&handle, &initial.mini_shortcut) {
+            eprintln!("registering the mini player shortcut failed: {err}");
+        }
     }
     media.start(handle.clone(), main_window_handle(app), cover_cache);
     // The tray: closing the main window leaves Prism there (and the taskbar button goes).
-    if let Err(err) = shell::tray::create(&handle) {
-        eprintln!("creating the tray icon failed: {err}");
+    if !kiosk {
+        if let Err(err) = shell::tray::create(&handle) {
+            eprintln!("creating the tray icon failed: {err}");
+        }
     }
     #[cfg(target_os = "windows")]
     if let Some(window) = app.get_window(shell::MAIN_LABEL) {
@@ -598,9 +605,12 @@ pub fn run() {
         .on_window_event(|window, event| {
             if window.label() == shell::MAIN_LABEL {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                    // Prism keeps playing: the main window steps aside (`shell::close_main`).
+                    // Prism keeps playing: the main window steps aside (`shell::close_main`). A
+                    // kiosk window has nothing to step aside to and stays.
                     api.prevent_close();
-                    shell::close_main(window);
+                    if !shell::kiosk::enabled() {
+                        shell::close_main(window);
+                    }
                     return;
                 }
                 window::on_main_event(window, event);
@@ -690,6 +700,7 @@ pub fn run() {
             commands::update_check,
             commands::update_restart,
             window::window_vibrancy,
+            shell::kiosk::window_kiosk,
             startup::startup_notice,
         ])
         .build(tauri::generate_context!())

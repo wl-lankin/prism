@@ -11,6 +11,7 @@
     "core:window:allow-start-dragging",
     "core:window:allow-start-resize-dragging",
     "core:window:allow-is-maximized",
+    "core:window:allow-is-fullscreen",
     "dialog:allow-open",
     {
       "identifier": "opener:allow-open-url",
@@ -80,6 +81,7 @@
     "allow-radio-redetect",
     "allow-tray-set-labels",
     "allow-window-vibrancy",
+    "allow-window-kiosk",
     "allow-startup-notice",
     "allow-ytm-show",
     "allow-ytm-hide",
