@@ -24,8 +24,10 @@ StandardError=journal
 UtmpIdentifier=tty1
 UtmpMode=user
 Environment=PRISM_KIOSK=1
+# No accessibility bus in the kiosk session: GTK would wait for it at every start.
+Environment=NO_AT_BRIDGE=1
 EnvironmentFile=-/etc/default/prism-kiosk
-ExecStart=/usr/bin/cage -d -s -- /usr/bin/prism
+ExecStart=/usr/bin/cage -d -s -- /usr/local/bin/prism-kiosk-run
 Restart=always
 RestartSec=3
 
