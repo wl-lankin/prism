@@ -16,6 +16,17 @@ pub const SIGNIN_LABEL: &str = "ytm-signin";
 pub const SIGNIN_URL: &str =
     "https://accounts.google.com/ServiceLogin?service=youtube&continue=https://music.youtube.com/";
 pub const SIZE: (f64, f64) = (900.0, 700.0);
+/// Where the kiosk keyboard's "Cancel" goes (`osk.js`): the window closes instead. `.invalid`
+/// never resolves, so the address can never load a real page.
+pub const CLOSE_URL: &str = "https://prism.invalid/close-sign-in";
+
+/// Whether a navigation is the kiosk's "Cancel".
+fn is_close_request(url: &Url) -> bool {
+    url.scheme() == "https"
+        && url.host_str() == Some("prism.invalid")
+        && url.port().is_none()
+        && url.path() == "/close-sign-in"
+}
 
 /// Held while the window is created, so two opens never build two windows. Never taken on
 /// the main thread.
@@ -35,6 +46,13 @@ pub fn start_url(from_view: Option<&Url>) -> Url {
 
 /// What the window does with a navigation. Runs inside the web view's callback.
 fn act(app: &AppHandle, url: &Url) -> bool {
+    // A kiosk window has no frame to close it by; its "Cancel" arrives as a navigation. Closed
+    // off the callback, which runs on the main thread.
+    if crate::shell::kiosk::enabled() && is_close_request(url) {
+        let app = app.clone();
+        std::thread::spawn(move || close(&app));
+        return false;
+    }
     match policy::decide(url, From::SignIn) {
         Decision::Stay => true,
         Decision::External | Decision::SignIn => {
@@ -119,6 +137,17 @@ pub fn open(app: &AppHandle, data_dir: &Path, url: Option<Url>) -> Result<(), St
         Some(agent) => builder.user_agent(&agent),
         None => builder,
     };
+    // Kiosk: the whole screen, no frame (cage shows none anyway), and a keyboard with a
+    // "Cancel" bar, since Google's page is no page of Prism's.
+    let kiosk = crate::shell::kiosk::enabled();
+    let builder = if kiosk {
+        builder
+            .fullscreen(true)
+            .decorations(false)
+            .initialization_script(super::osk_script(true))
+    } else {
+        builder
+    };
     // Windows: the view's own profile, with the same switches (WebView2 requires them to
     // match per profile).
     let builder = if cfg!(windows) {
@@ -128,7 +157,13 @@ pub fn open(app: &AppHandle, data_dir: &Path, url: Option<Url>) -> Result<(), St
     } else {
         builder
     };
-    builder.build().map(|_| ()).map_err(|err| err.to_string())
+    let window = builder.build().map_err(|err| err.to_string())?;
+    if let (true, Some(zoom)) = (kiosk, crate::shell::kiosk::zoom()) {
+        if let Err(err) = window.set_zoom(zoom) {
+            eprintln!("zooming the Google sign-in failed: {err}");
+        }
+    }
+    Ok(())
 }
 
 pub fn close(app: &AppHandle) {
@@ -172,5 +207,27 @@ mod tests {
         }
         assert_eq!(SIGNIN_LABEL, "ytm-signin");
         assert_eq!(SIZE, (900.0, 700.0));
+    }
+
+    #[test]
+    fn only_the_exact_cancel_address_closes() {
+        assert!(is_close_request(&Url::parse(CLOSE_URL).unwrap()));
+        assert!(is_close_request(
+            &Url::parse("https://prism.invalid/close-sign-in?x=1").unwrap()
+        ));
+        for other in [
+            "http://prism.invalid/close-sign-in",
+            "https://prism.invalid:8443/close-sign-in",
+            "https://prism.invalid/close-sign-in/more",
+            "https://prism.invalid.example.org/close-sign-in",
+            "https://accounts.google.com/close-sign-in",
+        ] {
+            assert!(!is_close_request(&Url::parse(other).unwrap()), "{other}");
+        }
+        // The cancel address is no page the policy would ever load or hand off on its own.
+        assert_ne!(
+            policy::decide(&Url::parse(CLOSE_URL).unwrap(), From::SignIn),
+            Decision::Stay
+        );
     }
 }

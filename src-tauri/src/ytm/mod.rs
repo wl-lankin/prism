@@ -37,6 +37,15 @@ pub const EVENT_STATE: &str = "ytm://state";
 pub const EVENT_QUEUE: &str = "ytm://queue";
 
 const BRIDGE: &str = include_str!("bridge.js");
+const OSK: &str = include_str!("osk.js");
+
+/// The on-screen keyboard for Google's and YouTube Music's own pages in kiosk mode: Prism's
+/// keyboard lives in Prism's page and cannot type into another web view. `with_bar` adds the
+/// top bar whose "Cancel" leaves the sign-in window ([`signin::CLOSE_URL`]). The script only
+/// edits the focused field; it has no IPC and sends nothing anywhere.
+pub fn osk_script(with_bar: bool) -> String {
+    format!("{{ window.__prismOskBar = {with_bar};\n{OSK}\n}}")
+}
 
 /// The bridge as the view's initialization script. The block keeps `ALLOW_DEV_HOST` out of
 /// the page's global scope.

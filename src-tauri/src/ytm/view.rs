@@ -91,6 +91,20 @@ pub struct Rect {
     pub height: f64,
 }
 
+/// A rect from the main page (CSS px) in the window's logical px: a kiosk zooms the page
+/// (`PRISM_KIOSK_ZOOM`), so one CSS px covers `zoom` logical px there.
+pub fn zoomed(rect: Rect, zoom: Option<f64>) -> Rect {
+    let Some(zoom) = zoom else {
+        return rect;
+    };
+    Rect {
+        x: rect.x * zoom,
+        y: rect.y * zoom,
+        width: rect.width * zoom,
+        height: rect.height * zoom,
+    }
+}
+
 /// The rect inside the main window's inner size (logical px): never negative, never past the
 /// right or bottom edge; a value that is not a number counts as 0.
 pub fn clamp(rect: Rect, inner: Option<(f64, f64)>) -> Rect {
@@ -209,7 +223,10 @@ impl YtmView {
     /// `ytm_show`: puts the view at `rect` and shows it, creating it first if needed (in the
     /// background: the call returns at once).
     pub fn show(self: &Arc<Self>, rect: Rect) -> Result<(), String> {
-        let rect = clamp(rect, self.host.main_size());
+        let rect = clamp(
+            zoomed(rect, crate::shell::kiosk::zoom()),
+            self.host.main_size(),
+        );
         let (main_closed, create) = {
             let mut inner = lock(&self.inner);
             inner.shown = true;
@@ -500,8 +517,13 @@ impl TauriHost {
                 NewWindowResponse::Deny
             }
         };
-        let builder = WebviewBuilder::new(super::VIEW_LABEL, tauri::WebviewUrl::External(url))
-            .initialization_script(super::bridge_script(super::dev::bridge_flag(dev_page)))
+        let mut builder = WebviewBuilder::new(super::VIEW_LABEL, tauri::WebviewUrl::External(url))
+            .initialization_script(super::bridge_script(super::dev::bridge_flag(dev_page)));
+        // Kiosk: YouTube Music's own search field needs a keyboard of its own.
+        if crate::shell::kiosk::enabled() {
+            builder = builder.initialization_script(super::osk_script(false));
+        }
+        let builder = builder
             .background_throttling(BackgroundThrottlingPolicy::Disabled)
             .data_store_identifier(YTM_STORE)
             .on_navigation(on_navigation)
@@ -538,14 +560,20 @@ impl ViewHost for TauriHost {
             .app
             .get_window(crate::shell::MAIN_LABEL)
             .ok_or("the main window is gone")?;
-        window
+        let view = window
             .add_child(
                 self.builder()?,
                 tauri::LogicalPosition::new(rect.x, rect.y),
                 tauri::LogicalSize::new(rect.width, rect.height),
             )
-            .map(|_| ())
-            .map_err(|err| err.to_string())
+            .map_err(|err| err.to_string())?;
+        // The kiosk zooms its pages alike, so YouTube Music reads at touch size too.
+        if let Some(zoom) = crate::shell::kiosk::zoom() {
+            if let Err(err) = view.set_zoom(zoom) {
+                eprintln!("zooming the YouTube Music view failed: {err}");
+            }
+        }
+        Ok(())
     }
 
     fn set_bounds(&self, rect: Rect) -> Result<(), String> {
@@ -859,6 +887,13 @@ mod tests {
         f.service.handle(report::parse(bridge_report()).unwrap());
         assert_eq!(f.service.state().status, YtmStatus::Playing);
         assert_eq!(f.transport.active(), Active::Ytm);
+    }
+
+    #[test]
+    fn kiosk_zoom_scales_the_page_rect() {
+        let page = rect(232.0, 48.0, 600.0, 400.0);
+        assert_eq!(zoomed(page, None), page);
+        assert_eq!(zoomed(page, Some(1.5)), rect(348.0, 72.0, 900.0, 600.0));
     }
 
     #[test]
