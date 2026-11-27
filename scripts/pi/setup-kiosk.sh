@@ -94,6 +94,12 @@ case "$model" in
 GDK_GL=gles
 WEBKIT_DMABUF_RENDERER_FORCE_SHM=1
 EOF
+    # Every frame is a software copy here, so a big panel runs at 1280x800 (less than half the
+    # pixels of 1920x1200) and Prism zooms its page to touch size (960x600 points).
+    preferred="$(head -n 1 /sys/class/drm/card*-HDMI-A-1/modes 2>/dev/null | head -n 1)"
+    if [ "${preferred%%x*}" -ge 1600 ] 2>/dev/null && cat /sys/class/drm/card*-HDMI-A-1/modes 2>/dev/null | grep -qx 1280x800; then
+      printf 'PRISM_KIOSK_MODE=1280x800\nPRISM_KIOSK_SCALE=1\nPRISM_KIOSK_ZOOM=1.333\n' >>/etc/default/prism-kiosk
+    fi
     # Reduced motion for the page (WebKitGTK follows GTK's enable-animations).
     runuser -u "$user" -- dbus-run-session -- gsettings set org.gnome.desktop.interface enable-animations false
     ;;
