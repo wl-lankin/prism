@@ -9,6 +9,10 @@ use std::sync::OnceLock;
 /// The environment variable that turns kiosk mode on (`1`, `true`, `yes` or `on`).
 pub const ENV: &str = "PRISM_KIOSK";
 
+/// The page zoom of the kiosk window, e.g. `1.333`: a slow GPU runs the screen at 1280x800
+/// (fewer pixels per frame) and the page still lays out at 960x600 points, touch size.
+pub const ZOOM_ENV: &str = "PRISM_KIOSK_ZOOM";
+
 /// True when Prism runs as a kiosk. Read once per start.
 pub fn enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
@@ -23,6 +27,16 @@ fn is_on(value: Option<&OsStr>) -> bool {
         value.trim().to_ascii_lowercase().as_str(),
         "1" | "true" | "yes" | "on"
     )
+}
+
+/// The kiosk window's page zoom from `PRISM_KIOSK_ZOOM`, `None` when unset or outside 0.5 to 3.
+pub fn zoom() -> Option<f64> {
+    parse_zoom(std::env::var_os(ZOOM_ENV).as_deref())
+}
+
+fn parse_zoom(value: Option<&OsStr>) -> Option<f64> {
+    let zoom: f64 = value?.to_str()?.trim().parse().ok()?;
+    (0.5..=3.0).contains(&zoom).then_some(zoom)
 }
 
 /// Whether the page runs in kiosk mode (no window controls, touch layout).
@@ -44,5 +58,15 @@ mod tests {
             assert!(!is_on(Some(OsStr::new(off))), "{off:?}");
         }
         assert!(!is_on(None));
+    }
+
+    #[test]
+    fn zoom_takes_a_sane_factor_only() {
+        assert_eq!(parse_zoom(Some(OsStr::new("1.333"))), Some(1.333));
+        assert_eq!(parse_zoom(Some(OsStr::new(" 2 "))), Some(2.0));
+        for bad in ["", "0", "0.2", "4", "big", "NaN", "inf"] {
+            assert_eq!(parse_zoom(Some(OsStr::new(bad))), None, "{bad:?}");
+        }
+        assert_eq!(parse_zoom(None), None);
     }
 }

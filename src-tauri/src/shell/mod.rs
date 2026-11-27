@@ -156,6 +156,11 @@ pub fn start_main(app: &AppHandle, autostart: bool) {
                     if let Err(err) = window.set_fullscreen(true) {
                         eprintln!("making the main window full screen failed: {err}");
                     }
+                    if let (Some(zoom), Some(page)) = (kiosk::zoom(), app.get_webview(MAIN_LABEL)) {
+                        if let Err(err) = page.set_zoom(zoom) {
+                            eprintln!("zooming the kiosk page failed: {err}");
+                        }
+                    }
                 }
                 if let Err(err) = window.show() {
                     eprintln!("showing the main window failed: {err}");
