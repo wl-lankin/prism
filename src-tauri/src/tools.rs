@@ -3,7 +3,9 @@
 //!
 //! Release builds bundle the tools as Tauri sidecars (`src-tauri/tauri.sidecar.conf.json`),
 //! which Tauri installs next to the executable without the target triple: the install folder on
-//! Windows, `Prism.app/Contents/MacOS` on macOS. Dev builds bundle nothing and use `PATH`.
+//! Windows, `Prism.app/Contents/MacOS` on macOS. On Linux the `.deb` puts them into `/usr/bin`
+//! as `prism-ffmpeg` and `prism-ffprobe` (`src-tauri/tauri.sidecar-linux.conf.json`), so they
+//! never clash with the distribution's FFmpeg. Dev builds bundle nothing and use `PATH`.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -12,6 +14,12 @@ use std::sync::OnceLock;
 
 const FFMPEG: &str = "ffmpeg";
 const FFPROBE: &str = "ffprobe";
+/// Put before a sidecar's name: `/usr/bin/ffmpeg` belongs to the distribution's package.
+const SIDECAR_PREFIX: &str = if cfg!(target_os = "linux") {
+    "prism-"
+} else {
+    ""
+};
 
 pub fn ffprobe_path() -> Option<PathBuf> {
     static PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
@@ -70,10 +78,12 @@ fn resolve_in(
             return Some(path);
         }
     }
-    let file_name = format!("{name}{}", std::env::consts::EXE_SUFFIX);
-    if let Some(sidecar) = exe.and_then(|exe| sidecar_in(exe, &file_name)) {
+    let suffix = std::env::consts::EXE_SUFFIX;
+    let sidecar_name = format!("{SIDECAR_PREFIX}{name}{suffix}");
+    if let Some(sidecar) = exe.and_then(|exe| sidecar_in(exe, &sidecar_name)) {
         return Some(sidecar);
     }
+    let file_name = format!("{name}{suffix}");
     std::env::split_paths(&path_var?)
         .map(|dir| dir.join(&file_name))
         .find(|candidate| candidate.is_file())
@@ -191,12 +201,16 @@ pub(crate) mod tests {
         format!("{name}{}", std::env::consts::EXE_SUFFIX)
     }
 
+    fn sidecar_file(name: &str) -> String {
+        format!("{SIDECAR_PREFIX}{}", tool_file(name))
+    }
+
     #[test]
     fn finds_the_sidecar_in_the_mac_bundle() {
         let dir = tempfile::tempdir().unwrap();
         let macos = dir.path().join("Prism.app/Contents/MacOS");
         let exe = touch(&macos.join("prism"));
-        let sidecar = touch(&macos.join(tool_file(FFMPEG)));
+        let sidecar = touch(&macos.join(sidecar_file(FFMPEG)));
         assert_eq!(resolve_in(None, Some(&exe), None, FFMPEG), Some(sidecar));
         assert_eq!(resolve_in(None, Some(&exe), None, FFPROBE), None);
     }
@@ -206,7 +220,7 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let install = dir.path().join("Programs").join("Prism");
         let exe = touch(&install.join(tool_file("prism")));
-        let sidecar = touch(&install.join(tool_file(FFPROBE)));
+        let sidecar = touch(&install.join(sidecar_file(FFPROBE)));
         assert_eq!(resolve_in(None, Some(&exe), None, FFPROBE), Some(sidecar));
     }
 
@@ -221,7 +235,7 @@ pub(crate) mod tests {
             resolve_in(None, Some(&exe), path_var.clone(), FFMPEG),
             Some(path_tool)
         );
-        let sidecar = touch(&dir.path().join("app").join(tool_file(FFMPEG)));
+        let sidecar = touch(&dir.path().join("app").join(sidecar_file(FFMPEG)));
         assert_eq!(
             resolve_in(None, Some(&exe), path_var.clone(), FFMPEG),
             Some(sidecar)
@@ -244,7 +258,7 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let macos = dir.path().join("Prism.app/Contents/MacOS");
         let exe = touch(&macos.join("prism"));
-        let sidecar = touch(&macos.join(FFMPEG));
+        let sidecar = touch(&macos.join(sidecar_file(FFMPEG)));
         let link = dir.path().join("bin").join("prism");
         std::fs::create_dir_all(link.parent().unwrap()).unwrap();
         std::os::unix::fs::symlink(&exe, &link).unwrap();
@@ -277,5 +291,39 @@ pub(crate) mod tests {
         assert!(read("tauri.conf.json")["bundle"]
             .get("externalBin")
             .is_none());
+        assert!(read("tauri.linux.conf.json")["bundle"]
+            .get("externalBin")
+            .is_none());
+    }
+
+    /// The Linux release config bundles the tools under the prefixed names the lookup wants
+    /// there (Tauri drops the target triple, the prefix stays).
+    #[test]
+    fn the_linux_sidecar_config_uses_the_prefixed_names() {
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let text = std::fs::read_to_string(manifest.join("tauri.sidecar-linux.conf.json")).unwrap();
+        let config: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let bins: Vec<&str> = config["bundle"]["externalBin"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|bin| bin.as_str().unwrap())
+            .collect();
+        assert_eq!(bins, ["binaries/prism-ffmpeg", "binaries/prism-ffprobe"]);
+    }
+
+    #[test]
+    fn a_plain_ffmpeg_next_to_the_executable_is_a_sidecar_only_off_linux() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("usr").join("bin");
+        let exe = touch(&bin.join(tool_file("prism")));
+        let plain = touch(&bin.join(tool_file(FFMPEG)));
+        let found = resolve_in(None, Some(&exe), None, FFMPEG);
+        if cfg!(target_os = "linux") {
+            // /usr/bin/ffmpeg is the distribution's; without PATH it is not looked at.
+            assert_eq!(found, None);
+        } else {
+            assert_eq!(found, Some(plain));
+        }
     }
 }

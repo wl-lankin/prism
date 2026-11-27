@@ -1,7 +1,7 @@
-# Builds Prism's minimal LGPL FFmpeg for both platforms, checks it, and uploads the pair as an
-# artifact (ffmpeg-universal-apple-darwin, ffmpeg-x86_64-pc-windows-msvc) of the calling run.
-# Called by ci.yml (the tests run against these binaries) and release.yml (the installers bundle
-# them). The built files are cached by the hash of the scripts that make them, so a normal run
+# Builds Prism's minimal LGPL FFmpeg for every platform, checks it, and uploads the pair as an
+# artifact (ffmpeg-universal-apple-darwin, ffmpeg-x86_64-pc-windows-msvc,
+# ffmpeg-aarch64-unknown-linux-gnu) of the calling run. Called by ci.yml and linux.yml (the tests
+# run against these binaries) and release.yml (the installers bundle them). The built files are cached by the hash of the scripts that make them, so a normal run
 # only restores the cache and re-runs the check (a few seconds).
 # The Windows pair is cross-built on Linux and only ever executed on windows-latest, by the check.
 
@@ -94,5 +94,38 @@ jobs:
           path: |
             ffmpeg-win/ffmpeg.exe
             ffmpeg-win/ffprobe.exe
+          if-no-files-found: error
+          retention-days: 7
+
+  # Native on the arm64 runner, Ubuntu 22.04 like the .deb build (linux.yml), so the binaries
+  # need no newer glibc than Raspberry Pi OS Bookworm has.
+  linux-arm64:
+    runs-on: ubuntu-22.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache the build
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: ffmpeg-build/out
+          key: ffmpeg-linux-arm64-${{ hashFiles('scripts/ffmpeg-config.sh', 'scripts/build-ffmpeg-linux.sh') }}
+
+      - name: Build FFmpeg (Linux arm64)
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential pkg-config xz-utils libssl-dev
+          bash scripts/build-ffmpeg-linux.sh --no-stage
+
+      - name: Check
+        run: bash scripts/check-ffmpeg.sh ffmpeg-build/out/aarch64-unknown-linux-gnu
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-aarch64-unknown-linux-gnu
+          path: |
+            ffmpeg-build/out/aarch64-unknown-linux-gnu/ffmpeg
+            ffmpeg-build/out/aarch64-unknown-linux-gnu/ffprobe
           if-no-files-found: error
           retention-days: 7
