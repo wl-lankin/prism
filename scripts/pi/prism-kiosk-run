@@ -1,0 +1,32 @@
+#!/bin/sh
+# Runs inside cage (prism-kiosk.service): sets up the screen, then starts Prism.
+#
+# From /etc/default/prism-kiosk:
+#   PRISM_KIOSK_MODE   a screen mode like 1280x800 instead of the panel's own (fewer pixels per
+#                      frame for a slow GPU; the panel scales the picture up).
+#   PRISM_KIOSK_SCALE  the output scale. Unset, a dense screen (170 dpi and more, like a 10"
+#                      panel at 1920x1200) gets 2, anything else 1.
+#   PRISM_KIOSK_ZOOM   read by Prism itself: the page zoom (1.333 makes 1280x800 look like
+#                      960x600). Prism needs at least 900x600 points.
+set -u
+
+randr() { wlr-randr "$@" 2>/dev/null; }
+
+output="$(randr | awk 'NR == 1 { print $1 }')"
+if [ -n "$output" ] && [ -n "${PRISM_KIOSK_MODE:-}" ]; then
+  randr --output "$output" --mode "$PRISM_KIOSK_MODE" || echo "screen mode $PRISM_KIOSK_MODE refused"
+fi
+scale="${PRISM_KIOSK_SCALE:-}"
+if [ -z "$scale" ] && [ -n "$output" ]; then
+  scale="$(randr | awk '
+    /current/ && !px { split($1, wh, "x"); px = wh[1] }
+    /Physical size:/ { split($3, mm, "x"); w = mm[1] }
+    END {
+      if (px > 0 && w > 0 && px / (w / 25.4) >= 170) print 2; else print 1
+    }')"
+fi
+if [ -n "$output" ] && [ -n "$scale" ]; then
+  randr --output "$output" --scale "$scale" || true
+fi
+
+exec /usr/bin/prism

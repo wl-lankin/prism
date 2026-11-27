@@ -1,0 +1,111 @@
+# Linux arm64 (Raspberry Pi OS): tests, lints and the .deb, on GitHub's arm64 runner.
+#
+# Built on Ubuntu 22.04 (glibc 2.35, WebKitGTK 4.1), so the package runs on Raspberry Pi OS
+# Bookworm (glibc 2.36) and Trixie (2.41). The Rust tests run against Prism's own minimal FFmpeg
+# (ffmpeg.yml), and the .deb bundles exactly that build as /usr/bin/prism-ffmpeg and
+# /usr/bin/prism-ffprobe (src-tauri/tauri.sidecar-linux.conf.json).
+
+name: Linux
+
+on:
+  push:
+    branches: [main, PRISM-8]
+    paths-ignore: ["docs/**", "**/*.md"]
+  pull_request:
+    paths-ignore: ["docs/**", "**/*.md"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ffmpeg:
+    uses: ./.github/workflows/ffmpeg.yml
+
+  arm64:
+    needs: ffmpeg
+    runs-on: ubuntu-22.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: System packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config file patchelf \
+            libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev \
+            libssl-dev libasound2-dev libdbus-1-dev \
+            xvfb xauth
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ffmpeg-aarch64-unknown-linux-gnu
+          path: ffmpeg-bin
+
+      - name: Point the tests at the built FFmpeg and stage it for the package
+        run: |
+          chmod +x ffmpeg-bin/ffmpeg ffmpeg-bin/ffprobe
+          {
+            echo "PRISM_FFMPEG=$GITHUB_WORKSPACE/ffmpeg-bin/ffmpeg"
+            echo "PRISM_FFPROBE=$GITHUB_WORKSPACE/ffmpeg-bin/ffprobe"
+          } >> "$GITHUB_ENV"
+          ffmpeg-bin/ffmpeg -version | head -1
+          mkdir -p staged/aarch64-unknown-linux-gnu
+          cp ffmpeg-bin/ffmpeg ffmpeg-bin/ffprobe staged/aarch64-unknown-linux-gnu/
+          bash scripts/stage-ffmpeg.sh staged/aarch64-unknown-linux-gnu
+
+      - run: npm ci
+
+      - run: npm test
+
+      - run: npm run check
+
+      # The Rust build embeds the frontend (frontendDist ../dist), so clippy and the tests need it.
+      - run: npm run build
+
+      - run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
+
+      - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+
+      # Some tests start GTK pieces; give them a display.
+      - run: xvfb-run -a cargo test --manifest-path src-tauri/Cargo.toml
+
+      # With the updater artifacts, as the release builds it, but signed with a throwaway key:
+      # this checks that the bundler makes the .deb.sig the updater needs, without the real key.
+      - name: Build the .deb
+        run: |
+          npx tauri signer generate --ci -w "$RUNNER_TEMP/throwaway.key" -p throwaway >/dev/null
+          export TAURI_SIGNING_PRIVATE_KEY="$(cat "$RUNNER_TEMP/throwaway.key")"
+          export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=throwaway
+          npx tauri build --bundles deb --config src-tauri/tauri.updater.conf.json --config src-tauri/tauri.sidecar-linux.conf.json
+          ls -l src-tauri/target/release/bundle/deb/
+          test -s src-tauri/target/release/bundle/deb/*.deb.sig
+
+      - name: Show the package
+        run: |
+          deb="$(ls src-tauri/target/release/bundle/deb/*.deb)"
+          dpkg-deb --info "$deb"
+          dpkg-deb --contents "$deb"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prism-linux-arm64-deb
+          path: src-tauri/target/release/bundle/deb/*.deb
+          if-no-files-found: error

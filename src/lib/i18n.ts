@@ -324,6 +324,16 @@ const en = {
   'lyrics.source.navidrome': 'Lyrics: from Navidrome',
   'lyrics.source.youtube': 'Lyrics: from YouTube Music',
   'settings.system': 'System',
+  // This device (kiosk only, instead of Mini player and System).
+  'settings.device': 'This device',
+  'settings.device.power': 'Switch off or restart',
+  'settings.device.powerHint': 'Shuts the device down safely. Unplug it only when it is off.',
+  'settings.device.poweroff': 'Switch off',
+  'settings.device.reboot': 'Restart',
+  'settings.device.confirmPoweroff': 'Switch the device off now?',
+  'settings.device.confirmReboot': 'Restart the device now?',
+  'settings.device.cancel': 'Cancel',
+  'settings.device.failed': 'The device could not be switched: {message}',
   'settings.startWithSystem': 'Start with system',
   'settings.startWithSystemHint': 'Prism starts quietly when you sign in: only its tray icon appears, no window opens.',
   'settings.startWithSystemHintMac': 'Prism starts quietly when you log in: only its Dock and menu bar icons appear, no window opens.',
@@ -524,6 +534,16 @@ const en = {
   'update.restart': 'Restart to update',
   'update.restartTitle': 'Install Prism {version} and restart',
   'update.restartFailed': 'The update could not be installed. Prism stays as it is.',
+
+  // Touch keyboard (kiosk).
+  'keyboard.label': 'On-screen keyboard',
+  'keyboard.space': 'Space',
+  'keyboard.backspace': 'Delete',
+  'keyboard.shift': 'Shift',
+  'keyboard.enter': 'Enter',
+  'keyboard.done': 'Done',
+  'keyboard.symbols': 'Numbers and symbols',
+  'keyboard.letters': 'Letters',
 } as const;
 
 export type Key = keyof typeof en;
@@ -849,6 +869,16 @@ const de: Record<Key, string> = {
   'lyrics.source.navidrome': 'Songtext: von Navidrome',
   'lyrics.source.youtube': 'Songtext: von YouTube Music',
   'settings.system': 'System',
+  // Dieses Gerät (nur im Kiosk, statt Mini-Player und System).
+  'settings.device': 'Dieses Gerät',
+  'settings.device.power': 'Ausschalten oder neu starten',
+  'settings.device.powerHint': 'Fährt das Gerät sicher herunter. Den Stecker erst ziehen, wenn es aus ist.',
+  'settings.device.poweroff': 'Ausschalten',
+  'settings.device.reboot': 'Neu starten',
+  'settings.device.confirmPoweroff': 'Das Gerät jetzt ausschalten?',
+  'settings.device.confirmReboot': 'Das Gerät jetzt neu starten?',
+  'settings.device.cancel': 'Abbrechen',
+  'settings.device.failed': 'Das Gerät ließ sich nicht schalten: {message}',
   'settings.startWithSystem': 'Mit dem System starten',
   'settings.startWithSystemHint': 'Prism startet still bei der Anmeldung: Nur das Symbol im Infobereich erscheint, kein Fenster öffnet sich.',
   'settings.startWithSystemHintMac': 'Prism startet still bei der Anmeldung: Nur die Symbole im Dock und in der Menüleiste erscheinen, kein Fenster öffnet sich.',
@@ -1046,6 +1076,16 @@ const de: Record<Key, string> = {
   'update.restart': 'Zum Aktualisieren neu starten',
   'update.restartTitle': 'Prism {version} installieren und neu starten',
   'update.restartFailed': 'Das Update ließ sich nicht installieren. Prism bleibt, wie es ist.',
+
+  // Touch keyboard (kiosk).
+  'keyboard.label': 'Bildschirmtastatur',
+  'keyboard.space': 'Leerzeichen',
+  'keyboard.backspace': 'Löschen',
+  'keyboard.shift': 'Umschalten',
+  'keyboard.enter': 'Eingabe',
+  'keyboard.done': 'Fertig',
+  'keyboard.symbols': 'Zahlen und Symbole',
+  'keyboard.letters': 'Buchstaben',
 };
 
 /** The string tables, exported for tests. */

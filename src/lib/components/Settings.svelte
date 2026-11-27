@@ -6,6 +6,7 @@
   import { lang, systemLang, t, tc } from '../i18n';
   import {
     audioDevices,
+    kioskPower,
     libraryAddFolder,
     libraryFolders,
     libraryRemoveFolder,
@@ -21,6 +22,7 @@
   import { listCountries, listRegions, loadNear, radio, redetectPlace } from '../stores/radio.svelte';
   import { closeOverlay, openOverlay } from '../stores/overlays.svelte';
   import { settings, updateSettings } from '../stores/settings.svelte';
+  import { windowState } from '../stores/window.svelte';
   import { signIn as ytmSignIn, signOut as ytmSignOut } from '../stores/ytm.svelte';
   import { checkForUpdates, restartToUpdate, update, updateStatusText } from '../stores/update.svelte';
   import type {
@@ -531,6 +533,42 @@
     event.preventDefault();
     event.stopPropagation();
     void keepYtm();
+  }
+
+  // Kiosk: the device's own power buttons, since no desktop around Prism offers them. Each one
+  // asks first, so a stray tap never switches the player off.
+  type Power = 'poweroff' | 'reboot';
+  let powerConfirm = $state<Power | null>(null);
+  let powerBusy = $state(false);
+  let powerError = $state<string | null>(null);
+  let powerKeepButton = $state<HTMLButtonElement>();
+
+  async function askPower(action: Power) {
+    powerError = null;
+    powerConfirm = action;
+    await tick();
+    powerKeepButton?.focus();
+  }
+
+  async function doPower() {
+    const action = powerConfirm;
+    if (!action) return;
+    powerBusy = true;
+    powerError = null;
+    try {
+      await kioskPower(action);
+    } catch (err) {
+      powerError = t('settings.device.failed', { message: String(err) });
+      powerBusy = false;
+    }
+    powerConfirm = null;
+  }
+
+  function powerConfirmKeys(event: KeyboardEvent) {
+    if (event.key !== 'Escape') return;
+    event.preventDefault();
+    event.stopPropagation();
+    powerConfirm = null;
   }
 
   // Radio location. Opening Settings never asks the location service: only "Automatic" and
@@ -1104,6 +1142,42 @@
       </div>
     </section>
 
+    {#if windowState.kiosk}
+    <section aria-labelledby="settings-device">
+      <h2 id="settings-device">{t('settings.device')}</h2>
+      <div class="panel">
+        <div class="row">
+          <div class="row-text">
+            <span class="row-label">{t('settings.device.power')}</span>
+            <span class="hint">{t('settings.device.powerHint')}</span>
+          </div>
+          <div class="control end power-actions">
+            <button type="button" class="btn ghost small" disabled={powerConfirm !== null || powerBusy} onclick={() => askPower('reboot')}>
+              {t('settings.device.reboot')}
+            </button>
+            <button type="button" class="btn ghost small" disabled={powerConfirm !== null || powerBusy} onclick={() => askPower('poweroff')}>
+              {t('settings.device.poweroff')}
+            </button>
+          </div>
+        </div>
+        {#if powerConfirm}
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <div class="confirm-row power-confirm" onkeydown={powerConfirmKeys}>
+            <span>{t(powerConfirm === 'poweroff' ? 'settings.device.confirmPoweroff' : 'settings.device.confirmReboot')}</span>
+            <div class="confirm-actions">
+              <button type="button" class="link danger" disabled={powerBusy} onclick={doPower}>
+                {t(powerConfirm === 'poweroff' ? 'settings.device.poweroff' : 'settings.device.reboot')}
+              </button>
+              <button bind:this={powerKeepButton} type="button" class="link keep" onclick={() => (powerConfirm = null)}>
+                {t('settings.device.cancel')}
+              </button>
+            </div>
+          </div>
+        {/if}
+      </div>
+      {#if powerError}<p class="error" role="alert">{powerError}</p>{/if}
+    </section>
+    {:else}
     <section aria-labelledby="settings-mini">
       <h2 id="settings-mini">{t('settings.mini')}</h2>
       <div class="panel">
@@ -1215,6 +1289,7 @@
       </div>
       {#if systemError}<p class="error" role="alert">{systemError}</p>{/if}
     </section>
+    {/if}
 
     <section id="settings-section-updates" aria-labelledby="settings-updates">
       <h2 id="settings-updates">{t('settings.updates')}</h2>
@@ -1719,6 +1794,16 @@
     display: flex;
     align-items: center;
     gap: 6px;
+  }
+
+  .power-actions {
+    display: flex;
+    gap: 8px;
+  }
+
+  /* Under the power row, which has no indented name above it like a Navidrome account. */
+  .confirm-row.power-confirm {
+    margin: 2px 16px 12px 16px;
   }
 
   .confirm-row {

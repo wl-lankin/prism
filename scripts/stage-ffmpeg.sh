@@ -5,6 +5,8 @@
 #   scripts/stage-ffmpeg.sh <dir with ffmpeg[.exe] and ffprobe[.exe]>
 #
 # Windows (ffmpeg.exe): <tool>-x86_64-pc-windows-msvc.exe.
+# Linux (a dir named after its target triple, e.g. out/aarch64-unknown-linux-gnu):
+# prism-<tool>-<triple>, see src-tauri/tauri.sidecar-linux.conf.json.
 # macOS (universal binaries): <tool>-universal-apple-darwin for the bundler, and the same file as
 # <tool>-aarch64-apple-darwin and <tool>-x86_64-apple-darwin for the two per-architecture builds
 # of `tauri build --target universal-apple-darwin`.
@@ -15,9 +17,15 @@ dir="${1:?usage: stage-ffmpeg.sh <dir>}"
 dest="$repo/src-tauri/binaries"
 mkdir -p "$dest"
 
+triple="$(basename "$dir")"
 if [ -f "$dir/ffmpeg.exe" ]; then
   for tool in ffmpeg ffprobe; do
     cp "$dir/$tool.exe" "$dest/$tool-x86_64-pc-windows-msvc.exe"
+  done
+elif [[ "$triple" == *-linux-gnu ]]; then
+  for tool in ffmpeg ffprobe; do
+    cp "$dir/$tool" "$dest/prism-$tool-$triple"
+    chmod +x "$dest/prism-$tool-$triple"
   done
 else
   for tool in ffmpeg ffprobe; do

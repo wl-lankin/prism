@@ -11,6 +11,7 @@ Start here to continue Prism on another machine or in a new session. It says whe
 | M2 plan (Everyday player) | `docs/superpowers/plans/2026-10-20-prism-m2-everyday-player.md` |
 | M3 plan (Navidrome) | `docs/superpowers/plans/2026-10-21-prism-m3-navidrome.md` |
 | M4 plan (Radio) | `docs/superpowers/plans/2026-10-21-prism-m4-radio.md` |
+| M8 plan (Raspberry Pi touch player) | `docs/superpowers/plans/2026-11-27-prism-m8-raspberry-pi.md` |
 | Rules for every M4 implementer agent | `docs/superpowers/handoff/ledgers/m4-implementer-rules.md` |
 | Per-milestone ledgers (progress, rulings, deferred minors, incidents) | `docs/superpowers/handoff/ledgers/` |
 | Rules every implementer agent follows | `docs/superpowers/handoff/ledgers/m3-implementer-rules.md` |
@@ -32,7 +33,8 @@ Each milestone branch is cut from the previous one. `main` holds the released st
 | `PRISM-5` | M5 YouTube Music, cut from `PRISM-4` | done; Mac hand check done (sign-in, playback, controls), Windows hand check open |
 | `PRISM-6` | M6 Release v1.0.0, cut from `PRISM-5` | released as v1.0.0 from `main` 6284b56; its fix cb93132 reached `main` with v1.1.0 |
 | `PRISM-7` | M7 Lyrics, cut from `PRISM-6` | released as v1.1.0 from `main` 222e2c0 |
-| `main` | released versions | v1.1.0 |
+| `PRISM-8` | M8 Raspberry Pi touch player, cut from `main` at v1.1.1 | built, checked on the owner's Pi 3; release 1.2.0 pending |
+| `main` | released versions | v1.1.1 |
 | `spike-ytm` | YouTube Music sign-in spike | reference only |
 
 Parallel work uses short-lived branches `PRISM-<milestone><task>` (for example `PRISM-312`) in worktrees under `../Prism-wt/`. They are merged with `--no-ff` into the milestone branch and then deleted.
@@ -76,7 +78,8 @@ Parallel work uses short-lived branches `PRISM-<milestone><task>` (for example `
 5. **M5 YouTube Music**: built on `PRISM-5` (plan `docs/superpowers/plans/2026-10-21-prism-m5-youtube-music.md`, ledger `ledgers/m5-progress.md`). An embedded music.youtube.com child view in the main window, Google sign-in in its own window, a bridge that reads and drives the page through one IPC command, one transport with exclusive playback, media keys and tray following the active player, the YouTube queue in Prism's queue panel, a per-window app command manifest. Checked on the Mac by the owner; the Windows hand check is open.
 6. **M6 Release v1.0.0**: released and published on 2026-10-22 (plan `docs/superpowers/plans/2026-10-22-prism-m6-release.md`, ledger `ledgers/m6-progress.md`, release flow `docs/releasing.md`). Updater, CI and release workflow, bundled LGPL FFmpeg, mac mini panel, About with licenses, README. The repo is public. The owner skipped the beta and dropped the M3 Navidrome and M5 Windows hand checks before 1.0.0. cb93132 (FFmpeg check fix, `requireSignedVersion`) reached `main` with v1.1.0.
 7. **M7 Lyrics**: released as v1.1.0 on 2026-10-23 (plan `docs/superpowers/plans/2026-10-22-prism-m7-lyrics.md`, ledger `ledgers/m7-progress.md`). Lyrics from sidecar .lrc files, embedded tags, Navidrome (OpenSubsonic `songLyrics`), LRCLIB (on by default, switchable off) and the YouTube Music page, cached in `lyrics_cache`; synced view in Now Playing and a side panel (Ctrl+L). The YouTube Music bridge now makes two same-origin, credential-less innertube requests for lyrics. Checked by the owner on the Mac.
-8. **Later**: Apple Music (needs the owner's Apple developer account; no dev key in the public app) and macOS notarization.
+8. **M8 Raspberry Pi touch player** (plan `docs/superpowers/plans/2026-11-27-prism-m8-raspberry-pi.md`): Linux arm64 build in CI (`linux.yml`, `.deb` with Prism's own FFmpeg as `prism-ffmpeg`), kiosk mode (`PRISM_KIOSK=1`: full screen, no mini player, tray or shortcut, page zoom), touch keyboards (Prism's own in Svelte, `ytm/osk.js` for Google's sign-in and the YouTube Music view), the YouTube Music view floating over the page on Linux (`ytm/overlay_linux.rs`), the Navidrome password in a 0600 file when no Secret Service runs, and `scripts/pi/` (cage on tty1 as a systemd service, ALSA to the 3.5 mm jack, Pi 3 graphics settings). The owner's Pi: see the plan.
+9. **Later**: Apple Music (needs the owner's Apple developer account; no dev key in the public app) and macOS notarization.
 
 ### M3 Task 20: the owner hand check
 

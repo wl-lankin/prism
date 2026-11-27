@@ -1,13 +1,41 @@
 //! The Navidrome password, kept in the OS keychain (Windows Credential Manager, macOS
-//! Keychain) and nowhere else on disk.
+//! Keychain, the Secret Service on Linux) and nowhere else on disk. A Linux session without a
+//! Secret Service (a kiosk without a desktop) keeps it in a file only the user can read
+//! instead, see [`platform_store`].
 //!
 //! Entries are keyed by the app identifier, so a dev build with its own identifier never
 //! reads or writes the password of the installed app.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard};
+
+use anyhow::Context;
 
 use crate::secret::Secret;
+
+/// The [`FileStore`] file in the data folder.
+pub const FILE_STORE_NAME: &str = "navidrome-password.json";
+
+/// The password store of this platform for the app `identifier`, whose data lives in
+/// `data_dir`.
+///
+/// Windows and macOS: the OS keychain. Linux: the Secret Service (gnome-keyring, KWallet) when
+/// the session answers on it; otherwise a [`FileStore`] in `data_dir`, readable by the user
+/// only. The choice is made once per start.
+pub fn platform_store(identifier: &str, data_dir: &Path) -> Arc<dyn CredentialStore> {
+    let keyring = KeyringStore::new(identifier);
+    #[cfg(target_os = "linux")]
+    if !keyring.reachable() {
+        eprintln!(
+            "no Secret Service in this session; the Navidrome password lives in {FILE_STORE_NAME}, readable by this user only"
+        );
+        return Arc::new(FileStore::new(data_dir.join(FILE_STORE_NAME)));
+    }
+    let _ = data_dir;
+    Arc::new(keyring)
+}
 
 /// Where the password of an account lives.
 pub trait CredentialStore: Send + Sync {
@@ -25,7 +53,7 @@ pub fn account_key(url: &str, user: &str) -> String {
 }
 
 /// The OS keychain: Credential Manager on Windows (`windows-native`), the Keychain on macOS
-/// (`apple-native`).
+/// (`apple-native`), the Secret Service on Linux (`sync-secret-service`).
 pub struct KeyringStore {
     service: String,
 }
@@ -46,6 +74,125 @@ impl KeyringStore {
     fn entry(&self, url: &str, user: &str) -> anyhow::Result<keyring::Entry> {
         keyring::Entry::new(&self.service, &account_key(url, user))
             .map_err(|err| failed("opening the keychain entry failed", &err))
+    }
+
+    /// True when the keychain answers: looking up an entry nobody stores comes back empty
+    /// instead of failing. A Linux session may have no Secret Service at all.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    fn reachable(&self) -> bool {
+        self.get("prism:probe", "prism").is_ok()
+    }
+}
+
+/// Passwords in a JSON file only the user can read (mode 0600), for a Linux session without a
+/// Secret Service. Every change replaces the whole file through a temporary one, so a crash
+/// never leaves half a file.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub struct FileStore {
+    path: PathBuf,
+    lock: Mutex<()>,
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+impl FileStore {
+    pub fn new(path: PathBuf) -> FileStore {
+        FileStore {
+            path,
+            lock: Mutex::new(()),
+        }
+    }
+
+    fn guard(&self) -> MutexGuard<'_, ()> {
+        match self.lock.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    /// The stored entries; no file is no entries. Errors name the kind only, never content.
+    fn read(&self) -> anyhow::Result<HashMap<String, String>> {
+        match std::fs::read(&self.path) {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .map_err(|_| anyhow::anyhow!("the password file is damaged")),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(HashMap::new()),
+            Err(err) => Err(anyhow::anyhow!(
+                "the password file cannot be read: {}",
+                err.kind()
+            )),
+        }
+    }
+
+    /// Replaces the file with `entries`, or removes it when there are none.
+    fn write(&self, entries: &HashMap<String, String>) -> anyhow::Result<()> {
+        if entries.is_empty() {
+            return match std::fs::remove_file(&self.path) {
+                Ok(()) => Ok(()),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(err) => Err(anyhow::anyhow!(
+                    "the password file cannot be removed: {}",
+                    err.kind()
+                )),
+            };
+        }
+        let dir = self
+            .path
+            .parent()
+            .context("the password file has no folder")?;
+        std::fs::create_dir_all(dir).context("creating the data folder failed")?;
+        let tmp = self.path.with_extension("json.tmp");
+        let bytes = serde_json::to_vec(entries).context("encoding the password file failed")?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let written = options.open(&tmp).and_then(|mut file| {
+            // `mode` only applies to a new file; a leftover temporary file is tightened too.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+            }
+            file.write_all(&bytes)?;
+            file.sync_all()
+        });
+        if let Err(err) = written.and_then(|()| std::fs::rename(&tmp, &self.path)) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(anyhow::anyhow!(
+                "the password file cannot be written: {}",
+                err.kind()
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl CredentialStore for FileStore {
+    fn get(&self, url: &str, user: &str) -> anyhow::Result<Option<Secret>> {
+        let _guard = self.guard();
+        let entries = self.read().context("reading the password failed")?;
+        Ok(entries
+            .get(&account_key(url, user))
+            .cloned()
+            .map(Secret::new))
+    }
+
+    fn set(&self, url: &str, user: &str, password: &Secret) -> anyhow::Result<()> {
+        let _guard = self.guard();
+        let mut entries = self.read().context("saving the password failed")?;
+        entries.insert(account_key(url, user), password.expose().to_owned());
+        self.write(&entries).context("saving the password failed")
+    }
+
+    fn delete(&self, url: &str, user: &str) -> anyhow::Result<()> {
+        let _guard = self.guard();
+        let mut entries = self.read().context("deleting the password failed")?;
+        if entries.remove(&account_key(url, user)).is_none() {
+            return Ok(());
+        }
+        self.write(&entries).context("deleting the password failed")
     }
 }
 
@@ -240,5 +387,92 @@ mod tests {
         store
             .delete(url, "demo")
             .expect("deleting nothing is a no-op");
+    }
+
+    fn file_store() -> (tempfile::TempDir, FileStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileStore::new(dir.path().join("data").join(FILE_STORE_NAME));
+        (dir, store)
+    }
+
+    #[test]
+    fn file_store_keeps_and_forgets_passwords() {
+        let (_dir, store) = file_store();
+        let url = "http://127.0.0.1:4533";
+        assert_eq!(store.get(url, "demo").unwrap(), None);
+        store.set(url, "demo", &Secret::new("demo-pass")).unwrap();
+        store.set(url, "other", &Secret::new("other-pass")).unwrap();
+        assert_eq!(
+            store.get(url, "demo").unwrap(),
+            Some(Secret::new("demo-pass"))
+        );
+        store.set(url, "demo", &Secret::new("new-pass")).unwrap();
+        assert_eq!(
+            store.get(url, "demo").unwrap(),
+            Some(Secret::new("new-pass"))
+        );
+        store.delete(url, "demo").unwrap();
+        assert_eq!(store.get(url, "demo").unwrap(), None);
+        assert_eq!(
+            store.get(url, "other").unwrap(),
+            Some(Secret::new("other-pass"))
+        );
+    }
+
+    #[test]
+    fn file_store_survives_a_restart() {
+        let (_dir, store) = file_store();
+        store
+            .set("http://127.0.0.1:4533", "demo", &Secret::new("demo-pass"))
+            .unwrap();
+        let again = FileStore::new(store.path.clone());
+        assert_eq!(
+            again.get("http://127.0.0.1:4533", "demo").unwrap(),
+            Some(Secret::new("demo-pass"))
+        );
+    }
+
+    #[test]
+    fn file_store_removes_the_file_with_the_last_password() {
+        let (_dir, store) = file_store();
+        store.delete("http://127.0.0.1:4533", "demo").unwrap();
+        store
+            .set("http://127.0.0.1:4533", "demo", &Secret::new("demo-pass"))
+            .unwrap();
+        assert!(store.path.is_file());
+        store.delete("http://127.0.0.1:4533", "demo").unwrap();
+        assert!(!store.path.exists());
+        assert!(!store.path.with_extension("json.tmp").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_store_is_readable_by_the_user_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_dir, store) = file_store();
+        // A leftover temporary file from a crash, readable by everyone.
+        std::fs::create_dir_all(store.path.parent().unwrap()).unwrap();
+        let tmp = store.path.with_extension("json.tmp");
+        std::fs::write(&tmp, b"{}").unwrap();
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644)).unwrap();
+        store
+            .set("http://127.0.0.1:4533", "demo", &Secret::new("demo-pass"))
+            .unwrap();
+        let mode = std::fs::metadata(&store.path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn a_damaged_file_store_names_no_content() {
+        let (_dir, store) = file_store();
+        std::fs::create_dir_all(store.path.parent().unwrap()).unwrap();
+        std::fs::write(&store.path, b"{\"demo@x\": \"demo-pass\"").unwrap();
+        let err = store.get("x", "demo").unwrap_err();
+        let text = format!("{err:#}");
+        assert_eq!(
+            text,
+            "reading the password failed: the password file is damaged"
+        );
+        assert!(!text.contains("demo-pass"));
     }
 }

@@ -8,13 +8,15 @@
 
 <p align="center">
   Your own music, your Navidrome server, internet radio and YouTube Music in one player.<br>
-  For Windows and macOS.
+  For Windows, macOS and the Raspberry Pi.
 </p>
 
 <p align="center">
   <a href="https://github.com/wl-lankin/prism/releases/latest/download/Prism-setup.exe"><b>Download for Windows</b></a>
   &nbsp;|&nbsp;
   <a href="https://github.com/wl-lankin/prism/releases/latest/download/Prism.dmg"><b>Download for macOS</b></a>
+  &nbsp;|&nbsp;
+  <a href="#raspberry-pi"><b>Raspberry Pi</b></a>
 </p>
 
 <p align="center">
@@ -80,6 +82,25 @@ The macOS app is not signed, so your system warns you the first time. The Window
   ```
   xattr -dr com.apple.quarantine /Applications/Prism.app
   ```
+
+## Raspberry Pi
+
+Prism runs on a Raspberry Pi with a touchscreen as a full screen player that starts when the Pi boots (a kiosk): large touch controls, an on-screen keyboard, sound through the 3.5 mm jack.
+
+You need a Raspberry Pi 3, 4 or 5 with **64-bit Raspberry Pi OS Lite** (Bookworm or Trixie), a touchscreen, and a network connection. A Pi 4 or 5 runs smoother; on a Pi 3 Prism uses lighter effects and a lower screen resolution.
+
+On the Pi, as the user the player should run as:
+
+```
+curl -LO https://github.com/wl-lankin/prism/releases/latest/download/Prism-arm64.deb
+curl -L https://github.com/wl-lankin/prism/releases/latest/download/prism-pi-kiosk.tar.gz | tar xz
+sudo ./pi/setup-kiosk.sh Prism-arm64.deb
+sudo reboot
+```
+
+The setup installs Prism and what it needs, starts it full screen on the display at every boot (with [cage](https://github.com/cage-kiosk/cage)), restarts it if it ever quits, and sends the sound to the 3.5 mm jack. Updates arrive like on the other systems. Logs: `journalctl -u prism-kiosk`. Settings for the session (screen mode, zoom) are in `/etc/default/prism-kiosk`; see `scripts/pi/` for what each one does.
+
+The Navidrome password is kept in the system keyring when the Pi runs one (a desktop session); the kiosk has none, so there it is kept in a file in Prism's data folder that only the Pi's user can read.
 
 ## Building from source
 

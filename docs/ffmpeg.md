@@ -25,11 +25,12 @@ programs; it does not link FFmpeg.
   above is the original.
 - The source is used as released, without patches. The build scripts that turn it into the
   bundled programs are in this repo: `scripts/ffmpeg-config.sh`, `scripts/build-ffmpeg.sh`
-  (macOS), `scripts/build-ffmpeg-windows.sh` (Windows).
+  (macOS), `scripts/build-ffmpeg-windows.sh` (Windows), `scripts/build-ffmpeg-linux.sh`
+  (Linux arm64, the Raspberry Pi package).
 
 ## Configure line
 
-Shared by both platforms (from `scripts/ffmpeg-config.sh`):
+Shared by all platforms (from `scripts/ffmpeg-config.sh`):
 
 ```
 --disable-everything --disable-autodetect --disable-programs --enable-ffmpeg --enable-ffprobe
@@ -58,6 +59,15 @@ Windows x64 adds:
 --extra-ldflags=-static --enable-w32threads --enable-schannel
 ```
 
+Linux (built natively on Ubuntu 22.04 arm64) adds:
+
+```
+--enable-pthreads --enable-openssl --enable-protocol=udp
+```
+
+FFmpeg 8's OpenSSL glue also serves DTLS and calls into the `udp` protocol, so the Linux build
+links it in; Prism's `-protocol_whitelist` never lets a stream use it.
+
 `ffmpeg -version` of a bundled binary prints its exact line.
 
 ## What is in it, and why
@@ -69,27 +79,31 @@ Windows x64 adds:
 - **Protocols:** `file` and `pipe` for local files and the streams Prism feeds through stdin;
   `http`, `https`, `httpproxy`, `tcp`, `tls` and `crypto` for HLS stations, exactly the
   `-protocol_whitelist` Prism passes. TLS is the system's: Secure Transport on macOS, Schannel
-  on Windows.
+  on Windows, OpenSSL 3 on Linux (the distribution's `libssl.so.3`, linked dynamically; the
+  Apache 2.0 license of OpenSSL 3 is fine for an LGPL build).
 - **Output:** 32-bit float PCM on stdout (`-f f32le`), resampled with libswresample. The
   `null`, `s16le` and `wav` outputs are for tests and manual checks.
 - **Not in it:** video decoders (embedded cover art is read by Prism itself; the ffmpeg
   program always brings a few tiny video filters of its own), any
   encoder beyond raw PCM, devices, network protocols other than the above, hardware
-  acceleration, external libraries.
+  acceleration, external libraries (apart from OpenSSL on Linux).
 
 ## Building
 
 ```
 scripts/build-ffmpeg.sh            # macOS: universal ffmpeg + ffprobe
 scripts/build-ffmpeg-windows.sh    # Windows x64, cross-compiled with mingw-w64 (Linux or macOS)
+scripts/build-ffmpeg-linux.sh      # Linux, native (CI: arm64 for the Raspberry Pi)
 scripts/check-ffmpeg.sh <dir>      # LGPL, version and component check, prints sizes
 scripts/stage-ffmpeg.sh <dir>      # copies a built pair into src-tauri/binaries/
 ```
 
-Output goes to `ffmpeg-build/out/universal-apple-darwin/` and
-`ffmpeg-build/out/x86_64-pc-windows-msvc/` (both ignored by git), and is staged into
-`src-tauri/binaries/` as Tauri sidecars. A release build bundles them with
-`--config src-tauri/tauri.sidecar.conf.json`; dev builds bundle nothing and use the FFmpeg on
+Output goes to `ffmpeg-build/out/universal-apple-darwin/`,
+`ffmpeg-build/out/x86_64-pc-windows-msvc/` and `ffmpeg-build/out/aarch64-unknown-linux-gnu/`
+(all ignored by git), and is staged into `src-tauri/binaries/` as Tauri sidecars. A release
+build bundles them with `--config src-tauri/tauri.sidecar.conf.json`; the Linux `.deb` uses
+`--config src-tauri/tauri.sidecar-linux.conf.json` and installs them as `/usr/bin/prism-ffmpeg`
+and `/usr/bin/prism-ffprobe`, so they never clash with the distribution's `ffmpeg` package. Dev builds bundle nothing and use the FFmpeg on
 `PATH` (or `PRISM_FFMPEG` / `PRISM_FFPROBE`).
 
 The Windows build is cross-compiled with mingw-w64 rather than built in MSYS2 on Windows: the

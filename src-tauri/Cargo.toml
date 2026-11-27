@@ -1,6 +1,6 @@
 [package]
 name = "prism"
-version = "1.1.1"
+version = "1.2.0"
 description = "Prism - a music player for every source."
 authors = ["Wolfgang Linz"]
 license = "MIT"
@@ -24,7 +24,9 @@ tauri-plugin-autostart = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
-rfd = "0.16"
+# No default features: on Linux tauri-plugin-dialog brings the gtk3 backend, and rfd refuses gtk3
+# and its default xdg-portal backend together.
+rfd = { version = "0.16", default-features = false }
 anyhow = "1.0.104"
 sha1 = "0.11.0"
 hex = "0.4.3"
@@ -43,7 +45,7 @@ souvlaki = "0.8.3"
 rand = "0.9"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "rustls-tls-native-roots", "json", "gzip"] }
 md-5 = "0.11"
-keyring = { version = "3", features = ["windows-native", "apple-native"] }
+keyring = { version = "3", features = ["windows-native", "apple-native", "sync-secret-service", "crypto-rust"] }
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 
@@ -54,6 +56,12 @@ tauri-plugin-process = "2"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Storage_FileSystem", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 # ITaskbarList3 for the main window's thumbnail toolbar (COM, which windows-sys does not wrap).
 windows = { version = "0.62", features = ["Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_System_Com", "Win32_Foundation"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# The YouTube Music view floats over the main page in a GtkOverlay (ytm/overlay_linux.rs); the
+# same versions Tauri uses.
+gtk = "0.18"
+webkit2gtk = "2.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # orderFrontRegardless and the panel behaviour for the mini player (shown without activating

@@ -1,0 +1,11 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "bundle": {
+    "targets": ["deb"],
+    "linux": {
+      "deb": {
+        "depends": ["libssl3t64 | libssl3", "gstreamer1.0-plugins-good", "gstreamer1.0-plugins-bad", "gstreamer1.0-libav"]
+      }
+    }
+  }
+}

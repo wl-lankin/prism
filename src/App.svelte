@@ -28,12 +28,13 @@
   import Segmented from './lib/components/Segmented.svelte';
   import SongList from './lib/components/SongList.svelte';
   import SourceEmpty from './lib/components/SourceEmpty.svelte';
+  import TouchKeyboard from './lib/components/TouchKeyboard.svelte';
   import TitleBar from './lib/components/TitleBar.svelte';
   import TransportStrip from './lib/components/TransportStrip.svelte';
   import ViewHead from './lib/components/ViewHead.svelte';
   import { activateIdle, holdToOpen } from './lib/flow';
   import { lang, t, tc, type Key } from './lib/i18n';
-  import { onNavGo, playerPlayFiles, playerToggle, startupNotice, traySetLabels, windowVibrancy } from './lib/ipc';
+  import { onNavGo, playerPlayFiles, playerToggle, startupNotice, traySetLabels, windowKiosk, windowVibrancy } from './lib/ipc';
   import { favorites, initFavorites } from './lib/stores/favorites.svelte';
   import { albumsOf, artistsOf, countOf, hasMixedSources, initLibrary, library } from './lib/stores/library.svelte';
   import { failureText, initNavidrome, navidrome } from './lib/stores/navidrome.svelte';
@@ -88,6 +89,13 @@
       .then((on) => {
         glass = on;
         document.documentElement.dataset.vibrancy = on ? 'on' : 'off';
+      })
+      .catch(() => {});
+    windowKiosk()
+      .then((on) => {
+        windowState.kiosk = on === true;
+        if (on === true) windowState.maximized = true;
+        document.documentElement.dataset.kiosk = on === true ? 'on' : 'off';
       })
       .catch(() => {});
     return () => {
@@ -639,6 +647,10 @@
 
 <SearchPalette bind:open={searching} />
 
+{#if windowState.kiosk}
+  <TouchKeyboard />
+{/if}
+
 {#if flowMenu}
   <FlowMenu x={flowMenu.x} y={flowMenu.y} onclose={() => (flowMenu = null)} />
 {/if}
@@ -715,6 +727,8 @@
     flex: 1;
     min-height: 0;
     overflow: clip;
+    /* The on-screen keyboard (kiosk) covers the bottom of the screen; the views end above it. */
+    padding-bottom: var(--osk-h, 0px);
   }
 
   /* Over a backdrop view the title bar floats: the view starts at the card's top edge, so its

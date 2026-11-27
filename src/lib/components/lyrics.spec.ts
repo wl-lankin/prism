@@ -27,6 +27,7 @@ vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn(async () => null) }));
 vi.mock('@tauri-apps/api/window', () => ({
   getCurrentWindow: () => ({
     isMaximized: async () => false,
+    isFullscreen: async () => false,
     onResized: async () => () => {},
     onDragDropEvent: async () => () => {},
   }),
