@@ -12,9 +12,12 @@
 #                    is the updater artifact)
 #   macOS universal: Prism_<v>_universal.dmg, Prism_universal.app.tar.gz (no version in the
 #                    name) and Prism_universal.app.tar.gz.sig
-#   both:            latest.json
-# plus what the release workflow adds: the versionless copies Prism-setup.exe and Prism.dmg, and
-# the LGPL source: ffmpeg-<FFMPEG_VERSION>.tar.xz and prism-ffmpeg-build-scripts.tar.gz.
+#   Linux arm64:     Prism_<v>_arm64.deb and Prism_<v>_arm64.deb.sig (the package itself is
+#                    the updater artifact)
+#   all:             latest.json
+# plus what the release workflow adds: the versionless copies Prism-setup.exe, Prism.dmg and
+# Prism-arm64.deb, the Pi's kiosk setup prism-pi-kiosk.tar.gz, and the LGPL source:
+# ffmpeg-<FFMPEG_VERSION>.tar.xz and prism-ffmpeg-build-scripts.tar.gz.
 set -euo pipefail
 
 version="${1:?usage: verify-release-assets.sh <version> <repo> <dir>}"
@@ -27,6 +30,7 @@ dir="${3:?dir missing}"
 setup="Prism_${version}_x64-setup.exe"
 dmg="Prism_${version}_universal.dmg"
 tarball="Prism_universal.app.tar.gz"
+deb="Prism_${version}_arm64.deb"
 
 failed=0
 fail() {
@@ -42,7 +46,9 @@ expected=(
   "$setup" "$setup.sig"
   "$dmg"
   "$tarball" "$tarball.sig"
-  "Prism-setup.exe" "Prism.dmg"
+  "$deb" "$deb.sig"
+  "Prism-setup.exe" "Prism.dmg" "Prism-arm64.deb"
+  "prism-pi-kiosk.tar.gz"
   "latest.json"
   "ffmpeg-${FFMPEG_VERSION}.tar.xz" "prism-ffmpeg-build-scripts.tar.gz"
 )
@@ -58,6 +64,7 @@ done
 # The versionless links must serve the same bytes as the versioned installers.
 [ "$(size_of Prism-setup.exe)" = "$(size_of "$setup")" ] || fail "Prism-setup.exe differs in size from $setup"
 [ "$(size_of Prism.dmg)" = "$(size_of "$dmg")" ] || fail "Prism.dmg differs in size from $dmg"
+[ "$(size_of Prism-arm64.deb)" = "$(size_of "$deb")" ] || fail "Prism-arm64.deb differs in size from $deb"
 
 if [ ! -f "$dir/latest.json" ]; then
   fail "latest.json was not downloaded"
@@ -92,6 +99,13 @@ else
   check_platform darwin-aarch64 "$tarball"
   check_platform darwin-x86_64 "$tarball"
   check_platform windows-x86_64 "$setup"
+  # The Pi's updater looks for linux-aarch64-deb first, then linux-aarch64; at least one must
+  # lead to the .deb.
+  if [ -n "$(jq -r '.platforms["linux-aarch64-deb"].url // empty' "$json")" ]; then
+    check_platform linux-aarch64-deb "$deb"
+  else
+    check_platform linux-aarch64 "$deb"
+  fi
 fi
 
 if [ "$failed" = 1 ]; then
