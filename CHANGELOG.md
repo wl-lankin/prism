@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.2.0
+
+**Raspberry Pi**
+- Prism runs on a Raspberry Pi with a touchscreen, as a full screen player that starts when the Pi boots. There is a package for 64-bit Raspberry Pi OS (Bookworm and Trixie) and a setup script for the kiosk.
+- A touch layout without window controls, and an on-screen keyboard for every text field, including the Google sign-in for YouTube Music.
+- Sound through the Pi's 3.5 mm jack. Updates install by themselves, as on Windows and macOS.
+- On a Raspberry Pi 3 Prism uses lighter effects and a lower screen resolution. A Pi 4 or 5 runs smoother.
+
+---
+
+**First install**
+
+The macOS app is not code-signed yet, so macOS will warn you the first time.
+
+- Windows: the installer is signed. While the certificate is still new, SmartScreen can ask once; click "Run anyway" if it does.
+- macOS: right-click Prism in Applications and choose "Open", then confirm. Or run `xattr -dr com.apple.quarantine /Applications/Prism.app` in Terminal.
+- Raspberry Pi: see "Raspberry Pi" in the README on GitHub (two downloads and one setup command).
+
 ## 1.1.1
 
 **Signed Windows installer**
