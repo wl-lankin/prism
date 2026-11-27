@@ -161,6 +161,10 @@ pub fn start_main(app: &AppHandle, autostart: bool) {
                             eprintln!("zooming the kiosk page failed: {err}");
                         }
                     }
+                    #[cfg(target_os = "linux")]
+                    if let Some(page) = app.get_webview(MAIN_LABEL) {
+                        kiosk::no_tooltips(&page);
+                    }
                 }
                 if let Err(err) = window.show() {
                     eprintln!("showing the main window failed: {err}");

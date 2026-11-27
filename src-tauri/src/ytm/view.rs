@@ -570,6 +570,10 @@ impl ViewHost for TauriHost {
         // Linux packs the view below the main page instead of over it.
         #[cfg(target_os = "linux")]
         super::overlay_linux::float(&view, rect).map_err(|err| err.to_string())?;
+        #[cfg(target_os = "linux")]
+        if crate::shell::kiosk::enabled() {
+            crate::shell::kiosk::no_tooltips(&view);
+        }
         // The kiosk zooms its pages alike, so YouTube Music reads at touch size too.
         if let Some(zoom) = crate::shell::kiosk::zoom() {
             if let Err(err) = view.set_zoom(zoom) {

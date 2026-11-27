@@ -39,6 +39,26 @@ fn parse_zoom(value: Option<&OsStr>) -> Option<f64> {
     (0.5..=3.0).contains(&zoom).then_some(zoom)
 }
 
+/// Turns off the tooltips of a kiosk web view. On a touchscreen a tap leaves the pointer where
+/// it was, so the tooltip of the last tapped control stays on screen. WebKitGTK sets its own
+/// tooltip text on every hover, so the `query-tooltip` emission is stopped instead.
+#[cfg(target_os = "linux")]
+pub fn no_tooltips(view: &tauri::Webview) {
+    let result = view.with_webview(|platform| {
+        use gtk::glib::object::ObjectExt;
+        use gtk::prelude::WidgetExt;
+        platform
+            .inner()
+            .connect_query_tooltip(|widget, _, _, _, _| {
+                widget.stop_signal_emission_by_name("query-tooltip");
+                false
+            });
+    });
+    if let Err(err) = result {
+        eprintln!("turning off the kiosk tooltips failed: {err}");
+    }
+}
+
 /// Whether the page runs in kiosk mode (no window controls, touch layout).
 #[tauri::command]
 pub fn window_kiosk() -> bool {
