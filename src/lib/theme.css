@@ -42,6 +42,16 @@
   }
 }
 
+/* Kiosk (the touchscreen player on a Raspberry Pi): no frosted glass. A Pi 3 draws the page in
+   software and copies every frame, and a backdrop blur makes each repaint under a panel far
+   dearer. The panels are nearly opaque, so they look the same without it. */
+:root[data-kiosk='on'] *,
+:root[data-kiosk='on'] *::before,
+:root[data-kiosk='on'] *::after {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
 html,
 body {
   margin: 0;

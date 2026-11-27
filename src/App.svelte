@@ -28,6 +28,7 @@
   import Segmented from './lib/components/Segmented.svelte';
   import SongList from './lib/components/SongList.svelte';
   import SourceEmpty from './lib/components/SourceEmpty.svelte';
+  import TouchKeyboard from './lib/components/TouchKeyboard.svelte';
   import TitleBar from './lib/components/TitleBar.svelte';
   import TransportStrip from './lib/components/TransportStrip.svelte';
   import ViewHead from './lib/components/ViewHead.svelte';
@@ -645,6 +646,10 @@
 
 <SearchPalette bind:open={searching} />
 
+{#if windowState.kiosk}
+  <TouchKeyboard />
+{/if}
+
 {#if flowMenu}
   <FlowMenu x={flowMenu.x} y={flowMenu.y} onclose={() => (flowMenu = null)} />
 {/if}
@@ -721,6 +726,8 @@
     flex: 1;
     min-height: 0;
     overflow: clip;
+    /* The on-screen keyboard (kiosk) covers the bottom of the screen; the views end above it. */
+    padding-bottom: var(--osk-h, 0px);
   }
 
   /* Over a backdrop view the title bar floats: the view starts at the card's top edge, so its

@@ -524,6 +524,16 @@ const en = {
   'update.restart': 'Restart to update',
   'update.restartTitle': 'Install Prism {version} and restart',
   'update.restartFailed': 'The update could not be installed. Prism stays as it is.',
+
+  // Touch keyboard (kiosk).
+  'keyboard.label': 'On-screen keyboard',
+  'keyboard.space': 'Space',
+  'keyboard.backspace': 'Delete',
+  'keyboard.shift': 'Shift',
+  'keyboard.enter': 'Enter',
+  'keyboard.done': 'Done',
+  'keyboard.symbols': 'Numbers and symbols',
+  'keyboard.letters': 'Letters',
 } as const;
 
 export type Key = keyof typeof en;
@@ -1046,6 +1056,16 @@ const de: Record<Key, string> = {
   'update.restart': 'Zum Aktualisieren neu starten',
   'update.restartTitle': 'Prism {version} installieren und neu starten',
   'update.restartFailed': 'Das Update ließ sich nicht installieren. Prism bleibt, wie es ist.',
+
+  // Touch keyboard (kiosk).
+  'keyboard.label': 'Bildschirmtastatur',
+  'keyboard.space': 'Leerzeichen',
+  'keyboard.backspace': 'Löschen',
+  'keyboard.shift': 'Umschalten',
+  'keyboard.enter': 'Eingabe',
+  'keyboard.done': 'Fertig',
+  'keyboard.symbols': 'Zahlen und Symbole',
+  'keyboard.letters': 'Buchstaben',
 };
 
 /** The string tables, exported for tests. */
