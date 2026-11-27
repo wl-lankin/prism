@@ -87,8 +87,16 @@ jobs:
       # Some tests start GTK pieces; give them a display.
       - run: xvfb-run -a cargo test --manifest-path src-tauri/Cargo.toml
 
+      # With the updater artifacts, as the release builds it, but signed with a throwaway key:
+      # this checks that the bundler makes the .deb.sig the updater needs, without the real key.
       - name: Build the .deb
-        run: npx tauri build --bundles deb --config src-tauri/tauri.sidecar-linux.conf.json
+        run: |
+          npx tauri signer generate --ci -w "$RUNNER_TEMP/throwaway.key" -p throwaway >/dev/null
+          export TAURI_SIGNING_PRIVATE_KEY="$(cat "$RUNNER_TEMP/throwaway.key")"
+          export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=throwaway
+          npx tauri build --bundles deb --config src-tauri/tauri.updater.conf.json --config src-tauri/tauri.sidecar-linux.conf.json
+          ls -l src-tauri/target/release/bundle/deb/
+          test -s src-tauri/target/release/bundle/deb/*.deb.sig
 
       - name: Show the package
         run: |
