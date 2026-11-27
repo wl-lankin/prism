@@ -94,6 +94,7 @@
     windowKiosk()
       .then((on) => {
         windowState.kiosk = on === true;
+        if (on === true) windowState.maximized = true;
         document.documentElement.dataset.kiosk = on === true ? 'on' : 'off';
       })
       .catch(() => {});

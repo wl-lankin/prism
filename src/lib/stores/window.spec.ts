@@ -76,3 +76,18 @@ it('counts a full screen window as maximized (the kiosk)', async () => {
 it('starts outside kiosk mode', () => {
   expect(windowState.kiosk).toBe(false);
 });
+
+it('keeps a kiosk laid out as full screen, whatever the window reports', async () => {
+  windowState.kiosk = true;
+  try {
+    const stop = await initWindow();
+    expect(windowState.maximized).toBe(true);
+    resized!();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(windowState.maximized).toBe(true);
+    stop();
+  } finally {
+    windowState.kiosk = false;
+  }
+});

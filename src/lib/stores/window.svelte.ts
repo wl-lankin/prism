@@ -11,7 +11,9 @@ export async function initWindow(): Promise<() => void> {
   const win = getCurrentWindow();
   const sync = () =>
     Promise.all([win.isMaximized(), win.isFullscreen()])
-      .then(([maximized, fullscreen]) => (windowState.maximized = maximized || fullscreen))
+      // A kiosk always fills the screen: what the compositor reports in between never moves
+      // the layout (the Flow ring jumped out of the transport and back on a tap).
+      .then(([maximized, fullscreen]) => (windowState.maximized = windowState.kiosk || maximized || fullscreen))
       .catch(() => {});
   const stop = await win.onResized(() => void sync());
   await sync();
