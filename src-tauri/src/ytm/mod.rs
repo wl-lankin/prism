@@ -9,6 +9,8 @@
 pub mod agent;
 pub mod covers;
 pub mod dev;
+#[cfg(target_os = "linux")]
+mod overlay_linux;
 pub mod policy;
 pub mod report;
 pub mod signin;

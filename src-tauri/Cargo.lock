@@ -3725,6 +3725,7 @@ dependencies = [
  "cpal",
  "crossbeam-channel",
  "flate2",
+ "gtk",
  "hex",
  "image",
  "keyring",
@@ -3757,6 +3758,7 @@ dependencies = [
  "tauri-plugin-updater",
  "tempfile",
  "walkdir",
+ "webkit2gtk",
  "windows 0.62.2",
  "windows-sys 0.61.2",
 ]

@@ -567,6 +567,9 @@ impl ViewHost for TauriHost {
                 tauri::LogicalSize::new(rect.width, rect.height),
             )
             .map_err(|err| err.to_string())?;
+        // Linux packs the view below the main page instead of over it.
+        #[cfg(target_os = "linux")]
+        super::overlay_linux::float(&view, rect).map_err(|err| err.to_string())?;
         // The kiosk zooms its pages alike, so YouTube Music reads at touch size too.
         if let Some(zoom) = crate::shell::kiosk::zoom() {
             if let Err(err) = view.set_zoom(zoom) {
@@ -577,6 +580,11 @@ impl ViewHost for TauriHost {
     }
 
     fn set_bounds(&self, rect: Rect) -> Result<(), String> {
+        // Linux: the view floats in an overlay, where Tauri's bounds do not reach.
+        if cfg!(target_os = "linux") {
+            #[cfg(target_os = "linux")]
+            return self.with_webview(|view| super::overlay_linux::float(view, rect));
+        }
         self.with_webview(|view| {
             view.set_bounds(tauri::Rect {
                 position: tauri::LogicalPosition::new(rect.x, rect.y).into(),

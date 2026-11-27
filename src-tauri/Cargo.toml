@@ -57,6 +57,12 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Globali
 # ITaskbarList3 for the main window's thumbnail toolbar (COM, which windows-sys does not wrap).
 windows = { version = "0.62", features = ["Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_System_Com", "Win32_Foundation"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# The YouTube Music view floats over the main page in a GtkOverlay (ytm/overlay_linux.rs); the
+# same versions Tauri uses.
+gtk = "0.18"
+webkit2gtk = "2.0"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 # orderFrontRegardless and the panel behaviour for the mini player (shown without activating
 # Prism); the same versions Tauri uses.
