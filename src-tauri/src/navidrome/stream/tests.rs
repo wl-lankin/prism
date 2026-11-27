@@ -399,7 +399,14 @@ fn byte_seek_uses_range() {
 #[test]
 fn transcoded_seek_uses_time_offset() {
     let env = env(FakeLibrary::synthetic(1, 1).with_wav(SONG, 5));
-    env.server.set_fault(Fault::NoRanges);
+    // A transcode is never byte-seekable. It trickles in, so the seek comes while its length is
+    // still unknown: a finished download would rightly be seeked in the buffer instead (a fast
+    // machine fetches the whole 5 s over localhost before the first 300 ms are read).
+    env.server.set_fault(Fault::Trickle {
+        method: "stream",
+        chunk: 16 * 1024,
+        every: Duration::from_millis(10),
+    });
     let mut source = env.open(StreamQuality::Kbps192, "mp3");
     read_ms(&mut source, 300);
     source.seek(1500).unwrap();
